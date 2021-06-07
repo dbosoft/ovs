@@ -14,6 +14,15 @@
  * limitations under the License.
  */
 
+/*
+* define _NO_CRT_STDIO_INLINE
+* This this a workaround for a issue with Visual Studio 2019
+* (noticed first with VS 16.10).
+* LNK errors like this: 
+* __stdio_common_vswprintf referenced in function _vsnwprintf_l	
+*/
+#define  _NO_CRT_STDIO_INLINE 1
+
 #include <ndis.h>
 #include <netiodef.h>
 #include <intsafe.h>
