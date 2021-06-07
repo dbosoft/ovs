@@ -30,6 +30,6 @@ jobs:
       - name: CI-Build      
         run: |
           echo 'Running in MSYS2!'
-          source ~/visualstudio.sh
+          source ~/.visualstudio.sh
           echo $PATH
           echo $LIBPATH
