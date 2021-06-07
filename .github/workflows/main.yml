@@ -1,0 +1,42 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Build and Test Windows
+
+on: [workflow_dispatch]
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: windows-latest
+    defaults:
+      run:
+         shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: git mingw-w64-x86_64-toolchain
+          
+     # from: https://anadoxin.org/blog/bringing-visual-studio-compiler-into-msys2-environment.html/          
+      - name: build envdiff   
+        run: |
+          mkdir envdiff && cd envdiff
+          git clone https://gitlab.com/antekone/envdiff.git .
+          cargo build --release
+      - name: capture environment
+        shell: cmd
+        run: |
+          cd c:\msys64\home%USERNAME%\envdiff
+          envdiff.exe
+          "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          envdiff.exe > ..\.visualstudio.s
+      - name: CI-Build      
+        run: |
+          echo 'Running in MSYS2!'
+          source .visualstudio.sh
+          echo $PATH
+          echo $LIBPATH
