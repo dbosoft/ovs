@@ -51,6 +51,9 @@ jobs:
 
       - name: prepare
         run:  | 
+          mv /mingw64/bin/python /mingw64/bin/python_off
+          mv /mingw64/bin/python3 /mingw64/bin/python3_off
+          which python
           which python3
           pwd
           ./.ci/windows-prepare.sh
