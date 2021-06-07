@@ -26,7 +26,8 @@ jobs:
         run: |
           powershell -c ./build-aux/envdiff.ps1
           "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          powershell -c ./build-aux/envdiff.ps1 > c:\msys64\%USERNAME%\.visualstudio.sh
+          set RUNNER_TEMP
+          powershell -c ./build-aux/envdiff.ps1 > %RUNNER_TEMP%\msys\msys64\home\%USERNAME%\.visualstudio.sh
       - name: CI-Build      
         run: |
           echo 'Running in MSYS2!'
