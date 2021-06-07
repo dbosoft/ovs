@@ -51,6 +51,7 @@ jobs:
 
       - name: prepare
         run:  | 
+          source ~/.visualstudio.sh
           mv /mingw64/bin/python /mingw64/bin/python_off
           mv /mingw64/bin/python3 /mingw64/bin/python3_off
           which python
