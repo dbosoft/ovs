@@ -15,10 +15,11 @@ jobs:
          shell: msys2 {0}
     steps:
       - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1      
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          update: true
+          update: false
           install: git mingw-w64-x86_64-toolchain
           
      # from: https://anadoxin.org/blog/bringing-visual-studio-compiler-into-msys2-environment.html/          
