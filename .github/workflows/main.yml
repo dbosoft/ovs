@@ -15,31 +15,21 @@ jobs:
          shell: msys2 {0}
     steps:
       - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1     
-        with:
-            toolchain: stable
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: false
           install: git mingw-w64-x86_64-toolchain
-          
-     # from: https://anadoxin.org/blog/bringing-visual-studio-compiler-into-msys2-environment.html/          
-      - name: build envdiff   
-        run: |
-          mkdir envdiff && cd envdiff
-          git clone https://gitlab.com/antekone/envdiff.git .
-          cargo build --release
-      - name: capture environment
+               
+      - name: generate environment  
         shell: cmd
         run: |
-          cd c:\msys64\home%USERNAME%\envdiff
-          envdiff.exe
+          powershell -c ./build-aux/envdiff.ps1
           "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          envdiff.exe > ..\.visualstudio.s
+          powershell -c ./build-aux/envdiff.ps1 > c:\msys64\%USERNAME%\.visualstudio.sh
       - name: CI-Build      
         run: |
           echo 'Running in MSYS2!'
-          source .visualstudio.sh
+          source ~/visualstudio.sh
           echo $PATH
           echo $LIBPATH
