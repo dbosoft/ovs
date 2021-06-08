@@ -292,6 +292,7 @@ jobs:
           ln -s "$pythonLocation\python" /ucrt64/bin/python3      
       - name: prepare
         run:  | 
+          -test -e "/usr/bin/link || mv /usr/bin/link /usr/bin/link_off
           source ~/.visualstudio.sh 
           ./.ci/windows-prepare.sh
       - name: build
