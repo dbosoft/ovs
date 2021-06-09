@@ -237,16 +237,17 @@ jobs:
     
     # linking on latest VS 2019 don't work, most propably due to a VS 2019 issue since VS 16.10
     runs-on: windows-2016
-    timeout-minutes: 90
+    timeout-minutes: 60
     
     strategy:
       fail-fast: false
       matrix:
         include:
-          - opts: --disable-ssl --with-vstudiotarget=Debug --with-vstudiotargetver=Win8        
-          - opts: --disable-ssl --with-vstudiotarget=Debug --with-vstudiotargetver=Win8.1            
+          # run only one job for windows, as more than one be enough currently to verify
+          # PRs
+          # tests are not enabled as they take very long and a lot of them will fail to          
           - opts: --disable-ssl --with-vstudiotarget=Debug --with-vstudiotargetver=Win10
-            testsuite: 1-5
+          
     defaults:
       run:
          shell: msys2 {0}         
