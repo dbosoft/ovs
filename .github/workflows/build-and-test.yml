@@ -237,7 +237,7 @@ jobs:
     
     # linking on latest VS 2019 don't work, most propably due to a VS 2019 issue since VS 16.10
     runs-on: windows-2016
-    timeout-minutes: 60
+    timeout-minutes: 90
     
     strategy:
       fail-fast: false
