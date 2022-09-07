@@ -259,7 +259,7 @@ jobs:
         include:
           # run only one job for windows, as more than one be enough currently to verify
           # PRs
-          # tests are not enabled as they take very long and a lot of them will fail to          
+          # tests are not enabled as they take very long and a lot of them will fail          
           - opts: --disable-ssl --with-vstudiotarget=Debug --with-vstudiotargetver=Win10
           
     defaults:
@@ -295,7 +295,7 @@ jobs:
         shell: cmd
         run: |
           powershell -c ./build-aux/envdiff.ps1          
-          @call "C:\Program Files (x86)\Microsoft Visual Studio\2017\Enterprise\VC\Auxiliary\Build\vcvars64.bat"          
+          @call "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"          
           powershell -c ./build-aux/envdiff.ps1 > %RUNNER_TEMP%\msys\msys64\home\%USERNAME%\.visualstudio.sh
           echo ".visualstudio.sh was generated in %RUNNER_TEMP%\msys\msys64\home\%USERNAME%"
       - name: configure python for MSYS 
