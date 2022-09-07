@@ -33,7 +33,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: base-devel git mingw-w64-ucrt-x86_64-toolchain autoconf
+          install: base-devel git mingw-w64-ucrt-x86_64-toolchain automake libtool
       - name: set up python
         uses: actions/setup-python@v2
         with:
