@@ -39,6 +39,10 @@ jobs:
         with:
           python-version: '3.x'  
 
+      - shell: pwsh
+        run: |
+          $Env:MSYS2_ROOT = msys2 -c 'cygpath -m /'
+          $Env:MSYS2_ROOT
       # pypiwin32 has to be installed with a Windows python version therefore
       # this step will configure python first on Windows and exports
       # its location for MSYS bash.  
