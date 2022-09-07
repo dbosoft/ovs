@@ -47,6 +47,9 @@ jobs:
         run: |
             python -m pip install --upgrade pip
             pip install pypiwin32
+            dir %RUNNER_TEMP%\msys
+            dir %RUNNER_TEMP%\msys\msys64
+            dir %RUNNER_TEMP%\msys\msys64\home
             echo export pythonLocation="%pythonLocation%" > %RUNNER_TEMP%\msys\msys64\home\%USERNAME%\.pythonenv.sh
             echo export PYTHONPATH="%pythonLocation%\Lib;%pythonLocation%\DLLs;%pythonLocation%\Lib\lib-tk" >> %RUNNER_TEMP%\msys\msys64\home\%USERNAME%\.pythonenv.sh
             echo ".pythonenv.sh was generated in %RUNNER_TEMP%\msys\msys64\home\%USERNAME%"
