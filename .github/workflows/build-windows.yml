@@ -9,7 +9,7 @@ jobs:
       OPTS: --prefix=C:/openvswitch/usr --localstatedir=C:/openvswitch/var --sysconfdir=C:/openvswitch/etc ${{ matrix.opts }}
       TESTSUITE: ${{ matrix.testsuite }}
     
-    runs-on: windows-2022
+    runs-on: windows-latest
     timeout-minutes: 60
     
     strategy:
