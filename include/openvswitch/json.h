@@ -116,7 +116,7 @@ static void json_destroy(struct json *);
 
 size_t json_hash(const struct json *, size_t basis);
 bool json_equal(const struct json *, const struct json *);
-
+
 /* Parsing JSON. */
 enum {
     JSPF_TRAILER = 1 << 0       /* Check for garbage following input.  */
@@ -132,7 +132,7 @@ struct json *json_from_string(const char *string);
 struct json *json_from_serialized_object(const struct json *);
 struct json *json_from_file(const char *file_name);
 struct json *json_from_stream(FILE *stream);
-
+
 /* Serializing JSON. */
 
 enum {
@@ -141,12 +141,12 @@ enum {
 };
 char *json_to_string(const struct json *, int flags);
 void json_to_ds(const struct json *, int flags, struct ds *);
-
+
 /* JSON string formatting operations. */
 
 bool json_string_unescape(const char *in, size_t in_len, char **outp);
 void json_string_escape(const char *in, struct ds *out);
-
+
 /* Inline functions. */
 
 /* Returns 'json', with the reference count incremented. */
