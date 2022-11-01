@@ -88,7 +88,10 @@ jobs:
           name: logs-windows-${{ join(matrix.*, '-') }}
           path: config.log
       - name: install
-        run: make install
+        run: |
+          source ~/.visualstudio.sh 
+          source ~/.pythonenv.sh
+          make install
 
       - name: upload build artifacts
         uses: actions/upload-artifact@v2
