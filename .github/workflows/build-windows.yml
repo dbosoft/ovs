@@ -6,7 +6,7 @@ jobs:
   build-windows:
     name: windows ${{ join(matrix.*, ' ') }}
     env:
-      OPTS: --prefix=C:/openvswitch/usr --localstatedir=C:/openvswitch/var --sysconfdir=C:/openvswitch/etc ${{ matrix.opts }}
+      OPTS: --prefix=C:/openvswitch/usr --localstatedir=C:/ProgramData/openvswitch/var --sysconfdir=C:/ProgramData/openvswitch/etc ${{ matrix.opts }}
       TESTSUITE: ${{ matrix.testsuite }}
     
     runs-on: windows-latest
@@ -87,3 +87,10 @@ jobs:
         with:
           name: logs-windows-${{ join(matrix.*, '-') }}
           path: config.log
+      - name: install
+        run: make install
+
+      - name: upload build artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          path: c:\openvswitch
