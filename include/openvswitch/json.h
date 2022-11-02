@@ -110,9 +110,9 @@ double json_real(const struct json *);
 int64_t json_integer(const struct json *);
 
 struct json *json_deep_clone(const struct json *);
-static inline struct json *json_clone(const struct json *);
+static struct json *json_clone(const struct json *);
 struct json *json_nullable_clone(const struct json *);
-static inline void json_destroy(struct json *);
+static void json_destroy(struct json *);
 
 size_t json_hash(const struct json *, size_t basis);
 bool json_equal(const struct json *, const struct json *);

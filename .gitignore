@@ -79,3 +79,6 @@ testsuite.tmp.orig
 /Documentation/_build
 /.venv
 /cxx-check
+snapshot.env
+PTHREADS-BUILT
+
