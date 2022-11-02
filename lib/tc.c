@@ -1541,6 +1541,9 @@ static const struct nl_policy ct_policy[] = {
                               .optional = true, },
     [TCA_CT_NAT_PORT_MAX] = { .type = NL_A_U16,
                               .optional = true, },
+    [TCA_CT_TM] = { .type = NL_A_UNSPEC,
+                    .min_len = sizeof(struct tcf_t),
+                    .optional = true, },
 };
 
 static int
@@ -1551,6 +1554,7 @@ nl_parse_act_ct(struct nlattr *options, struct tc_flower *flower)
     struct tc_action *action;
     const struct tc_ct *ct;
     uint16_t ct_action = 0;
+    struct tcf_t tm;
 
     if (!nl_parse_nested(options, ct_policy, ct_attrs,
                          ARRAY_SIZE(ct_policy))) {
@@ -1636,6 +1640,11 @@ nl_parse_act_ct(struct nlattr *options, struct tc_flower *flower)
     }
     action->type = TC_ACT_CT;
 
+    if (ct_attrs[TCA_CT_TM]) {
+        memcpy(&tm, nl_attr_get_unspec(ct_attrs[TCA_CT_TM], sizeof tm),
+               sizeof tm);
+        nl_parse_tcf(&tm, flower);
+    }
     nl_parse_action_pc(ct->action, action);
     return 0;
 }
@@ -1904,8 +1913,6 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower,
     struct nlattr *act_cookie;
     const char *act_kind;
     struct nlattr *action_attrs[ARRAY_SIZE(act_policy)];
-    int act_index = flower->action_count;
-    bool is_meter = false;
     int err = 0;
 
     if (!nl_parse_nested(action, act_policy, action_attrs,
@@ -1943,7 +1950,6 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower,
         nl_parse_act_ct(act_options, flower);
     } else if (!strcmp(act_kind, "police")) {
         nl_parse_act_police(act_options, flower);
-        is_meter = tc_is_meter_index(flower->actions[act_index].police.index);
     } else {
         VLOG_ERR_RL(&error_rl, "unknown tc action kind: %s", act_kind);
         err = EINVAL;
@@ -1956,14 +1962,6 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower,
     if (act_cookie) {
         flower->act_cookie.data = nl_attr_get(act_cookie);
         flower->act_cookie.len = nl_attr_get_size(act_cookie);
-    }
-
-    /* Skip the stats update when act_police is meter since there are always
-     * some other actions following meter. For other potential kinds of
-     * act_police actions, whose stats could not be skipped (e.g. filter has
-     * only one police action), update the action stats to the flow rule. */
-    if (is_meter) {
-        return 0;
     }
 
     return nl_parse_action_stats(action_attrs[TCA_ACT_STATS],
@@ -3126,7 +3124,11 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
             uint32_t action_pc; /* Programmatic Control */
 
             if (!action->jump_action) {
-                action_pc = TC_ACT_PIPE;
+                if (i == flower->action_count - 1) {
+                    action_pc = TC_ACT_SHOT;
+                } else {
+                    action_pc = TC_ACT_PIPE;
+                }
             } else if (action->jump_action == JUMP_ACTION_STOP) {
                 action_pc = TC_ACT_STOLEN;
             } else {
@@ -3807,4 +3809,25 @@ tc_set_policy(const char *policy)
     }
 
     VLOG_INFO("tc: Using policy '%s'", policy);
+}
+
+void
+nl_msg_put_act_tc_policy_flag(struct ofpbuf *request)
+{
+    int flag = 0;
+
+    if (!request) {
+        return;
+    }
+
+    if (tc_policy == TC_POLICY_SKIP_HW) {
+        flag = TCA_ACT_FLAGS_SKIP_HW;
+    } else if (tc_policy == TC_POLICY_SKIP_SW) {
+        flag = TCA_ACT_FLAGS_SKIP_SW;
+    }
+
+    if (flag) {
+        struct nla_bitfield32 flags = { flag, flag };
+        nl_msg_put_unspec(request, TCA_ACT_FLAGS, &flags, sizeof flags);
+    }
 }
