@@ -39,12 +39,6 @@ jobs:
         with:
           python-version: '3.x'  
 
-      - name: fix kernel build tools
-        shell: pwsh
-        run: |
-          $FilePath = Resolve-Path "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\*\WDK.vsix"
-          Install-VsixExtension -FilePath $FilePath -Name "WDK.vsix" -VSversion "2022" -InstallOnly
-
       # pypiwin32 has to be installed with a Windows python version therefore
       # this step will configure python first on Windows and exports
       # its location for MSYS bash.  
