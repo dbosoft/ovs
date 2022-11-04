@@ -20,7 +20,7 @@ jobs:
           # PRs
           # tests are not enabled as they take very long and a lot of them will fail          
           - opts: --disable-ssl
-            targetVersion: Win10
+            targetVersion: Win8
             target: Release
 
     defaults:
@@ -28,6 +28,12 @@ jobs:
          shell: msys2 {0}         
          
     steps:
+
+      - name: Install Windows 8.1 SDK
+        shell: powershell
+        run: |
+         Invoke-WebRequest -Method Get -Uri https://go.microsoft.com/fwlink/p/?LinkId=323507 -OutFile sdksetup.exe -UseBasicParsing
+         Start-Process -Wait sdksetup.exe -ArgumentList "/q", "/norestart", "/features", "OptionId.WindowsDesktopSoftwareDevelopmentKit", "OptionId.NetFxSoftwareDevelopmentKit"
       - name: checkout
         uses: actions/checkout@v2
       - name: install msys 
