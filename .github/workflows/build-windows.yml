@@ -99,5 +99,5 @@ jobs:
       - name: upload build artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: openswitch-windows-${{ join(matrix.*, '-') }}
+          name: openvswitch-windows-${{ join(matrix.*, '-') }}
           path: c:\openvswitch
