@@ -93,6 +93,7 @@ jobs:
           make install
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
+          mkdir /C/openvswitch/driver
           cp ./datapath-windows/x64/Win10${{ matrix.target }}/package/* /C/openvswitch/driver
           cp ./datapath-windows/x64/Win10${{ matrix.target }}/package.cer /C/openvswitch/driver
           cp ./datapath-windows/misc/* /C/openvswitch/driver
