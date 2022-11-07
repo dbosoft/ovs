@@ -1823,7 +1823,7 @@ static dpdk_port_t netdev_dpdk_get_port_by_devargs(const char *devargs)
 }
 
 /*
- * Normally, a PCI id (optionally followed by a representor number)
+ * Normally, a PCI id (optionally followed by a representor identifier)
  * is enough for identifying a specific DPDK port.
  * However, for some NICs having multiple ports sharing the same PCI
  * id, using PCI id won't work then.
@@ -2882,9 +2882,9 @@ netdev_dpdk_eth_send(struct netdev *netdev, int qid,
 
     cnt = netdev_dpdk_common_send(netdev, batch, &stats);
 
-    dropped = batch_cnt - cnt;
-
-    dropped += netdev_dpdk_eth_tx_burst(dev, qid, pkts, cnt);
+    dropped = netdev_dpdk_eth_tx_burst(dev, qid, pkts, cnt);
+    stats.tx_failure_drops += dropped;
+    dropped += batch_cnt - cnt;
     if (OVS_UNLIKELY(dropped)) {
         struct netdev_dpdk_sw_stats *sw_stats = dev->sw_stats;
 
