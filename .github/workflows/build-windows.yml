@@ -45,7 +45,8 @@ jobs:
       - name: install openssl
         shell: cmd
         run: |
-            choco install openssl  -y --params "/InstallDir:C:\OpenSSL-Win64"
+            choco install openssl -y
+            mklink /j C:\OpenSSL-Win64 "c:\Program Files\OpenSSL-Win64"
       - name: configure python in Windows cmdline
         shell: cmd
         run: |
