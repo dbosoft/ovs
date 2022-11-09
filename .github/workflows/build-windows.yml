@@ -16,10 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # run only one job for windows, as more than one be enough currently to verify
-          # PRs
-          # tests are not enabled as they take very long and a lot of them will fail          
+          # run only one job for windows, as more than one be enough currently to verify PRs.
           - target: Release
+            testsuite: test
           
     defaults:
       run:
