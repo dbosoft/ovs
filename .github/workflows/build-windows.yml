@@ -6,7 +6,7 @@ jobs:
   build-windows:
     name: windows ${{ join(matrix.*, ' ') }}
     env:
-      OPTS: --with-vstudiotarget=${{ matrix.target }} --with-vstudiotargetver=${{ matrix.targetVersion }} --prefix=C:/openvswitch/usr --localstatedir=C:/ProgramData/openvswitch/var --sysconfdir=C:/ProgramData/openvswitch/etc ${{ matrix.opts }}
+      OPTS: --with-vstudiotarget=${{ matrix.target }} --with-vstudiotargetver=Win10 --prefix=C:/openvswitch/usr --localstatedir=C:/ProgramData/openvswitch/var --sysconfdir=C:/ProgramData/openvswitch/etc --enable-ssl --with-openssl=c:/OpenSSL-Win64 ${{ matrix.opts }}
       TESTSUITE: ${{ matrix.testsuite }}
     
     runs-on: windows-latest
@@ -19,10 +19,8 @@ jobs:
           # run only one job for windows, as more than one be enough currently to verify
           # PRs
           # tests are not enabled as they take very long and a lot of them will fail          
-          - opts: --disable-ssl
-            targetVersion: Win10
-            target: Release
-
+          - target: Release
+          
     defaults:
       run:
          shell: msys2 {0}         
@@ -44,6 +42,11 @@ jobs:
       # pypiwin32 has to be installed with a Windows python version therefore
       # this step will configure python first on Windows and exports
       # its location for MSYS bash.  
+      - name: install openssl
+        shell: cmd
+        run: |
+            choco install openssl -y
+            mklink /j C:\OpenSSL-Win64 "c:\Program Files\OpenSSL-Win64"
       - name: configure python in Windows cmdline
         shell: cmd
         run: |
@@ -90,8 +93,13 @@ jobs:
           make install
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
+          mkdir /C/openvswitch/driver
+          cp ./datapath-windows/x64/Win10${{ matrix.target }}/package/* /C/openvswitch/driver
+          cp ./datapath-windows/x64/Win10${{ matrix.target }}/package.cer /C/openvswitch/driver
+          cp ./datapath-windows/misc/* /C/openvswitch/driver
+      
       - name: upload build artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: openswitch-windows-${{ join(matrix.*, '-') }}
+          name: openvswitch-windows-${{ join(matrix.*, '-') }}
           path: c:\openvswitch
