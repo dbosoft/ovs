@@ -94,7 +94,7 @@ jobs:
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
           cp /C/OpenSSL-Win64/libcrypto-1_1-x64.dll /C/openvswitch/usr/bin
-          cp /C/OpenSSL-Win64/libcrypto-1_1-x64.dll /C/openvswitch/usr/bin/sbin
+          cp /C/OpenSSL-Win64/libcrypto-1_1-x64.dll /C/openvswitch/usr/sbin
           cp /C/OpenSSL-Win64/libssl-1_1-x64.dll /C/openvswitch/usr/bin
           cp /C/OpenSSL-Win64/libssl-1_1-x64.dll /C/openvswitch/usr/sbin
           mkdir /C/openvswitch/driver
