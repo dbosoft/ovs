@@ -10,7 +10,7 @@ jobs:
       TESTSUITE: ${{ matrix.testsuite }}
     
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 300
     
     strategy:
       fail-fast: false
