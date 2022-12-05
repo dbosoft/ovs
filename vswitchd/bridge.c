@@ -1678,7 +1678,7 @@ port_configure_stp(const struct ofproto *ofproto, struct port *port,
         unsigned int mbps;
 
         netdev_get_features(iface->netdev, &current, NULL, NULL, NULL);
-        mbps = netdev_features_to_bps(current, 100 * 1000 * 1000) / 1000000;
+        mbps = netdev_features_to_bps(current, NETDEV_DEFAULT_BPS) / 1000000;
         port_s->path_cost = stp_convert_speed_to_cost(mbps);
     }
 
@@ -1761,7 +1761,7 @@ port_configure_rstp(const struct ofproto *ofproto, struct port *port,
         unsigned int mbps;
 
         netdev_get_features(iface->netdev, &current, NULL, NULL, NULL);
-        mbps = netdev_features_to_bps(current, 100 * 1000 * 1000) / 1000000;
+        mbps = netdev_features_to_bps(current, NETDEV_DEFAULT_BPS) / 1000000;
         port_s->path_cost = rstp_convert_speed_to_cost(mbps);
     }
 
@@ -2619,6 +2619,7 @@ iface_refresh_stats(struct iface *iface)
     IFACE_STAT(tx_512_to_1023_packets,  "tx_512_to_1023_packets")   \
     IFACE_STAT(tx_1024_to_1522_packets, "tx_1024_to_1522_packets")  \
     IFACE_STAT(tx_1523_to_max_packets,  "tx_1523_to_max_packets")   \
+    IFACE_STAT(multicast,               "rx_multicast_packets")     \
     IFACE_STAT(tx_multicast_packets,    "tx_multicast_packets")     \
     IFACE_STAT(rx_broadcast_packets,    "rx_broadcast_packets")     \
     IFACE_STAT(tx_broadcast_packets,    "tx_broadcast_packets")     \
