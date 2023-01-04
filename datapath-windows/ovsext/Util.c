@@ -34,14 +34,14 @@ OvsAllocateMemoryWithTag(size_t size, ULONG tag)
 }
 
 VOID
-OvsFreeMemoryWithTag(VOID *ptr, ULONG tag)
+OvsFreeMemoryWithTag(VOID* ptr, ULONG tag)
 {
     ASSERT(ptr);
     NdisFreeMemoryWithTagPriority(gOvsExtDriverHandle, ptr, tag);
 }
 
 _Use_decl_annotations_
-VOID *
+VOID*
 OvsAllocateMemory(size_t size)
 {
     return NdisAllocateMemoryWithTagPriority(gOvsExtDriverHandle,
@@ -49,7 +49,7 @@ OvsAllocateMemory(size_t size)
 }
 
 _Use_decl_annotations_
-VOID *
+VOID*
 OvsAllocateAlignedMemory(size_t size, UINT16 align)
 {
     ASSERT((align == 8) || (align == 16));
@@ -59,12 +59,9 @@ OvsAllocateAlignedMemory(size_t size, UINT16 align)
          * XXX: NdisAllocateMemory*() functions don't talk anything about
          * alignment. Hence using ExAllocatePool*();
          */
-
-        POOL_EXTENDED_PARAMETER params = { 0 };
-        params.Type = PoolExtendedParameterPriority;
-        params.Priority = HighPoolPriority;
-        return (VOID*) ExAllocatePool3(POOL_FLAG_PAGED,
-            size, OVS_MEMORY_TAG, &params, 1);
+        return (VOID*)ExAllocatePoolPriorityUninitialized(NonPagedPoolNx, size,
+            OVS_MEMORY_TAG,
+            NormalPoolPriority);
     }
 
     /* Invalid user input. */
@@ -72,14 +69,14 @@ OvsAllocateAlignedMemory(size_t size, UINT16 align)
 }
 
 VOID
-OvsFreeMemory(VOID *ptr)
+OvsFreeMemory(VOID* ptr)
 {
     ASSERT(ptr);
     NdisFreeMemoryWithTagPriority(gOvsExtDriverHandle, ptr, OVS_MEMORY_TAG);
 }
 
 VOID
-OvsFreeAlignedMemory(VOID *ptr)
+OvsFreeAlignedMemory(VOID* ptr)
 {
     ASSERT(ptr);
     ExFreePoolWithTag(ptr, OVS_MEMORY_TAG);
@@ -120,12 +117,12 @@ OvsCompareString(PVOID string1, PVOID string2)
     return RtlEqualString(&str1, &str2, FALSE);
 }
 
-VOID *
+VOID*
 OvsAllocateMemoryPerCpu(size_t size,
-                        size_t count,
-                        ULONG tag)
+    size_t count,
+    ULONG tag)
 {
-    VOID *ptr = NULL;
+    VOID* ptr = NULL;
 
     ASSERT(KeQueryActiveGroupCount() == 1);
 
@@ -166,19 +163,19 @@ OvsPerCpuDataCleanup()
 }
 
 NTSTATUS
-OvsIpv6StringToAddress(const char* ip6String, struct in6_addr *ipv6Addr)
+OvsIpv6StringToAddress(const char* ip6String, struct in6_addr* ipv6Addr)
 {
     NTSTATUS status = STATUS_SUCCESS;
-    char *terminator = NULL;
+    char* terminator = NULL;
 
     status = RtlIpv6StringToAddressA(ip6String, &terminator, ipv6Addr);
     return status;
 }
 
-char *
+char*
 OvsIpv6AddressToString(struct in6_addr ipv6Addr, char* ip6String)
 {
-    char *returnedIpv6Str = NULL;
+    char* returnedIpv6Str = NULL;
 
     returnedIpv6Str = RtlIpv6AddressToStringA((&ipv6Addr), ip6String);
     return returnedIpv6Str;
