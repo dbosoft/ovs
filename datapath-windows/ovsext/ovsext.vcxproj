@@ -54,7 +54,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{63FE215D-98BE-4440-8081-C6160EFB80FA}</ProjectGuid>
     <RootNamespace>$(MSBuildProjectName)</RootNamespace>
-  </PropertyGroup>
+   </PropertyGroup>
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">
     <TargetVersion>WindowsV6.3</TargetVersion>
     <UseDebugLibraries>True</UseDebugLibraries>
@@ -105,6 +105,7 @@
     <PlatformToolsetVer Condition="'$(PlatformToolsetVer)' == ''">10.0</PlatformToolsetVer>
     <PlatformToolset>WindowsKernelModeDriver$(PlatformToolsetVer)</PlatformToolset>
     <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <_NT_TARGET_VERSION>0x0A00</_NT_TARGET_VERSION>
   </PropertyGroup>
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">
     <TargetVersion>Windows8</TargetVersion>
