@@ -9,7 +9,6 @@ lib_LTLIBRARIES += lib/libopenvswitch.la
 
 lib_libopenvswitch_la_LIBADD = $(SSL_LIBS)
 lib_libopenvswitch_la_LIBADD += $(CAPNG_LDADD)
-lib_libopenvswitch_la_LIBADD += $(LIBBPF_LDADD)
 
 
 if WIN32
@@ -227,6 +226,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/ofp-actions.c \
 	lib/ofp-bundle.c \
 	lib/ofp-connection.c \
+	lib/ofp-ct.c \
 	lib/ofp-ed-props.c \
 	lib/ofp-errors.c \
 	lib/ofp-flow.c \

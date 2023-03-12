@@ -41,6 +41,7 @@
 #include "netlink.h"
 #include "odp-util.h"
 #include "openvswitch/ofpbuf.h"
+#include "openvswitch/ofp-ct.h"
 #include "packets.h"
 #include "openvswitch/shash.h"
 #include "simap.h"
@@ -748,6 +749,10 @@ show_dpif(struct dpif *dpif, struct dpctl_params *dpctl_p)
                 print_human_size(dpctl_p, s.rx_bytes);
                 print_stat(dpctl_p, "  TX bytes:", s.tx_bytes);
                 print_human_size(dpctl_p, s.tx_bytes);
+                dpctl_print(dpctl_p, "\n");
+
+                print_stat(dpctl_p, "    UPCALL packets:", s.upcall_packets);
+                print_stat(dpctl_p, " errors:", s.upcall_errors);
                 dpctl_print(dpctl_p, "\n");
             } else {
                 dpctl_print(dpctl_p, ", could not retrieve stats (%s)",
@@ -1707,37 +1712,55 @@ dpctl_flush_conntrack(int argc, const char *argv[],
                       struct dpctl_params *dpctl_p)
 {
     struct dpif *dpif = NULL;
-    struct ct_dpif_tuple tuple, *ptuple = NULL;
+    struct ofp_ct_match match = {0};
     struct ds ds = DS_EMPTY_INITIALIZER;
     uint16_t zone, *pzone = NULL;
     int error;
     int args = argc - 1;
 
-    /* Parse ct tuple */
-    if (args && ct_dpif_parse_tuple(&tuple, argv[args], &ds)) {
-        ptuple = &tuple;
-        args--;
-    }
-
-    /* Parse zone */
-    if (args && ovs_scan(argv[args], "zone=%"SCNu16, &zone)) {
+    /* Parse zone. */
+    if (args && !strncmp(argv[1], "zone=", 5)) {
+        if (!ovs_scan(argv[1], "zone=%"SCNu16, &zone)) {
+            ds_put_cstr(&ds, "failed to parse zone");
+            error = EINVAL;
+            goto error;
+        }
         pzone = &zone;
         args--;
     }
 
-    /* Report error if there are more than one unparsed argument. */
+    /* Parse ct tuples. */
+    for (int i = 0; i < 2; i++) {
+        if (!args) {
+            break;
+        }
+
+        struct ofp_ct_tuple *tuple =
+            i ? &match.tuple_reply : &match.tuple_orig;
+        const char *arg = argv[argc - args];
+
+        if (arg[0] && !ofp_ct_tuple_parse(tuple, arg, &ds, &match.ip_proto,
+                                          &match.l3_type)) {
+            error = EINVAL;
+            goto error;
+        }
+        args--;
+    }
+
+    /* Report error if there is more than one unparsed argument. */
     if (args > 1) {
         ds_put_cstr(&ds, "invalid arguments");
         error = EINVAL;
         goto error;
     }
 
-    error = opt_dpif_open(argc, argv, dpctl_p, 4, &dpif);
+    error = opt_dpif_open(argc, argv, dpctl_p, 5, &dpif);
     if (error) {
+        dpctl_error(dpctl_p, error, "Cannot open dpif");
         return error;
     }
 
-    error = ct_dpif_flush(dpif, pzone, ptuple);
+    error = ct_dpif_flush(dpif, pzone, &match);
     if (!error) {
         dpif_close(dpif);
         return 0;
@@ -2862,8 +2885,8 @@ static const struct dpctl_command all_commands[] = {
       0, 1, dpctl_offload_stats_show, DP_RO },
     { "dump-conntrack", "[-m] [-s] [dp] [zone=N]",
       0, 4, dpctl_dump_conntrack, DP_RO },
-    { "flush-conntrack", "[dp] [zone=N] [ct-tuple]", 0, 3,
-      dpctl_flush_conntrack, DP_RW },
+    { "flush-conntrack", "[dp] [zone=N] [ct-orig-tuple] [ct-reply-tuple]",
+      0, 4, dpctl_flush_conntrack, DP_RW },
     { "cache-get-size", "[dp]", 0, 1, dpctl_cache_get_size, DP_RO },
     { "cache-set-size", "dp cache <size>", 3, 3, dpctl_cache_set_size, DP_RW },
     { "ct-stats-show", "[dp] [zone=N]",

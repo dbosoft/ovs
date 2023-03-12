@@ -1,5 +1,33 @@
-Post-v3.0.0
+Post-v3.1.0
 --------------------
+   - IPFIX template and statistics intervals can now be configured through two
+     new options in the IPFIX table: 'template_interval' and 'stats_interval'.
+   - Linux kernel datapath:
+     * OVS now collects per-interface upcall statistics that can be obtained
+       via 'ovs-appctl dpctl/show -s' or the interface's statistics column
+       in OVSDB.  Available with upstream kernel 6.2+.
+   - OVS route table in userspace now takes into account preferred source
+     address from cached kernel routes.
+   - ovs-appctl:
+     * Add support for selecting the source address with the
+       'ovs-appctl ovs/route/add' command.
+   - ovs-ctl:
+     * Added new options --[ovsdb-server|ovs-vswitchd]-umask=MODE to set umask
+       value when starting OVS daemons.  E.g., use --ovsdb-server-umask=0002
+       in order to create OVSDB sockets with access mode of 0770.
+   - QoS:
+     * Added new configuration option 'jitter' for a linux-netem QoS type.
+
+
+v3.1.0 - 16 Feb 2023
+--------------------
+   - ovs-vswitchd now detects changes in CPU affinity and adjusts the number
+     of handler and revalidator threads if necessary.
+   - AF_XDP:
+     * Added support for building with libxdp and libbpf >= 0.7.
+     * Support for AF_XDP is now enabled by default if all dependencies are
+       available at the build time.  Use --disable-afxdp to disable.
+       Use --enable-afxdp to fail the build if dependencies are not present.
    - ovs-appctl:
      * "ovs-appctl ofproto/trace" command can now display port names with the
        "--names" option.
@@ -14,6 +42,27 @@ Post-v3.0.0
      10 Gbps link speed by default in case the actual link speed cannot be
      determined.  Previously it was 10 Mbps.  Values can still be overridden
      by specifying 'max-rate' or '[r]stp-path-cost' accordingly.
+   - OpenFlow:
+     * New OpenFlow extension NXT_CT_FLUSH to flush connections matching
+       the specified fields.
+   - ovs-ctl:
+     * New option '--dump-hugepages' to include hugepages in core dumps. This
+       can assist with postmortem analysis involving DPDK, but may also produce
+       significantly larger core dump files.
+   - ovs-dpctl and 'ovs-appctl dpctl/' commands:
+     * 'flush-conntrack' is now capable of handling partial 5-tuple,
+        with additional optional parameter to specify the reply direction.
+   - ovs-ofctl:
+     * New command 'flush-conntrack' that accepts zone and 5-tuple (or partial
+       5-tuple) for both directions.
+   - Support for travis-ci.org based continuous integration builds has been
+     dropped.
+   - Userspace datapath:
+     * Add '-secs' argument to appctl 'dpif-netdev/pmd-rxq-show' to show
+       the pmd usage of an Rx queue over a configurable time period.
+     * Add new experimental PMD load based sleeping feature. PMD threads can
+       request to sleep up to a user configured 'pmd-maxsleep' value under
+       low load conditions.
 
 
 v3.0.0 - 15 Aug 2022

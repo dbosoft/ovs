@@ -160,14 +160,24 @@ static struct odp_support dp_netdev_support = {
 
 /* Time in microseconds of the interval in which rxq processing cycles used
  * in rxq to pmd assignments is measured and stored. */
-#define PMD_INTERVAL_LEN 10000000LL
+#define PMD_INTERVAL_LEN 5000000LL
+/* For converting PMD_INTERVAL_LEN to secs. */
+#define INTERVAL_USEC_TO_SEC 1000000LL
 
 /* Number of intervals for which cycles are stored
  * and used during rxq to pmd assignment. */
-#define PMD_INTERVAL_MAX 6
+#define PMD_INTERVAL_MAX 12
 
 /* Time in microseconds to try RCU quiescing. */
 #define PMD_RCU_QUIESCE_INTERVAL 10000LL
+
+/* Timer resolution for PMD threads in nanoseconds. */
+#define PMD_TIMER_RES_NS 1000
+
+/* Number of pkts Rx on an interface that will stop pmd thread sleeping. */
+#define PMD_SLEEP_THRESH (NETDEV_MAX_BURST / 2)
+/* Time in uS to increment a pmd thread sleep time. */
+#define PMD_SLEEP_INC_US 1
 
 struct dpcls {
     struct cmap_node node;      /* Within dp_netdev_pmd_thread.classifiers */
@@ -277,6 +287,8 @@ struct dp_netdev {
     atomic_uint32_t emc_insert_min;
     /* Enable collection of PMD performance metrics. */
     atomic_bool pmd_perf_metrics;
+    /* Max load based sleep request. */
+    atomic_uint64_t pmd_max_sleep;
     /* Enable the SMC cache from ovsdb config */
     atomic_bool smc_enable_db;
 
@@ -428,7 +440,7 @@ struct dp_netdev_rxq {
                                           pinned. OVS_CORE_UNSPEC if the
                                           queue doesn't need to be pinned to a
                                           particular core. */
-    unsigned intrvl_idx;               /* Write index for 'cycles_intrvl'. */
+    atomic_count intrvl_idx;           /* Write index for 'cycles_intrvl'. */
     struct dp_netdev_pmd_thread *pmd;  /* pmd thread that polls this queue. */
     bool is_vhost;                     /* Is rxq of a vhost port. */
 
@@ -615,6 +627,9 @@ dp_netdev_rxq_set_intrvl_cycles(struct dp_netdev_rxq *rx,
                            unsigned long long cycles);
 static uint64_t
 dp_netdev_rxq_get_intrvl_cycles(struct dp_netdev_rxq *rx, unsigned idx);
+static uint64_t
+get_interval_values(atomic_ullong *source, atomic_count *cur_idx,
+                    int num_to_read);
 static void
 dpif_netdev_xps_revalidate_pmd(const struct dp_netdev_pmd_thread *pmd,
                                bool purge);
@@ -869,14 +884,16 @@ sorted_poll_list(struct dp_netdev_pmd_thread *pmd, struct rxq_poll **list,
 }
 
 static void
-pmd_info_show_rxq(struct ds *reply, struct dp_netdev_pmd_thread *pmd)
+pmd_info_show_rxq(struct ds *reply, struct dp_netdev_pmd_thread *pmd,
+                  int secs)
 {
     if (pmd->core_id != NON_PMD_CORE_ID) {
         struct rxq_poll *list;
         size_t n_rxq;
-        uint64_t total_cycles = 0;
-        uint64_t busy_cycles = 0;
+        uint64_t total_pmd_cycles = 0;
+        uint64_t busy_pmd_cycles = 0;
         uint64_t total_rxq_proc_cycles = 0;
+        unsigned int intervals;
 
         ds_put_format(reply,
                       "pmd thread numa_id %d core_id %u:\n  isolated : %s\n",
@@ -887,18 +904,17 @@ pmd_info_show_rxq(struct ds *reply, struct dp_netdev_pmd_thread *pmd)
         sorted_poll_list(pmd, &list, &n_rxq);
 
         /* Get the total pmd cycles for an interval. */
-        atomic_read_relaxed(&pmd->intrvl_cycles, &total_cycles);
+        atomic_read_relaxed(&pmd->intrvl_cycles, &total_pmd_cycles);
+        /* Calculate how many intervals are to be used. */
+        intervals = DIV_ROUND_UP(secs,
+                                 PMD_INTERVAL_LEN / INTERVAL_USEC_TO_SEC);
         /* Estimate the cycles to cover all intervals. */
-        total_cycles *= PMD_INTERVAL_MAX;
-
-        for (int j = 0; j < PMD_INTERVAL_MAX; j++) {
-            uint64_t cycles;
-
-            atomic_read_relaxed(&pmd->busy_cycles_intrvl[j], &cycles);
-            busy_cycles += cycles;
-        }
-        if (busy_cycles > total_cycles) {
-            busy_cycles = total_cycles;
+        total_pmd_cycles *= intervals;
+        busy_pmd_cycles = get_interval_values(pmd->busy_cycles_intrvl,
+                                              &pmd->intrvl_idx,
+                                              intervals);
+        if (busy_pmd_cycles > total_pmd_cycles) {
+            busy_pmd_cycles = total_pmd_cycles;
         }
 
         for (int i = 0; i < n_rxq; i++) {
@@ -906,18 +922,18 @@ pmd_info_show_rxq(struct ds *reply, struct dp_netdev_pmd_thread *pmd)
             const char *name = netdev_rxq_get_name(rxq->rx);
             uint64_t rxq_proc_cycles = 0;
 
-            for (int j = 0; j < PMD_INTERVAL_MAX; j++) {
-                rxq_proc_cycles += dp_netdev_rxq_get_intrvl_cycles(rxq, j);
-            }
+            rxq_proc_cycles = get_interval_values(rxq->cycles_intrvl,
+                                                  &rxq->intrvl_idx,
+                                                  intervals);
             total_rxq_proc_cycles += rxq_proc_cycles;
             ds_put_format(reply, "  port: %-16s  queue-id: %2d", name,
                           netdev_rxq_get_queue_id(list[i].rxq->rx));
             ds_put_format(reply, " %s", netdev_rxq_enabled(list[i].rxq->rx)
                                         ? "(enabled) " : "(disabled)");
             ds_put_format(reply, "  pmd usage: ");
-            if (total_cycles) {
+            if (total_pmd_cycles) {
                 ds_put_format(reply, "%2"PRIu64"",
-                              rxq_proc_cycles * 100 / total_cycles);
+                              rxq_proc_cycles * 100 / total_pmd_cycles);
                 ds_put_cstr(reply, " %");
             } else {
                 ds_put_format(reply, "%s", "NOT AVAIL");
@@ -927,14 +943,14 @@ pmd_info_show_rxq(struct ds *reply, struct dp_netdev_pmd_thread *pmd)
 
         if (n_rxq > 0) {
             ds_put_cstr(reply, "  overhead: ");
-            if (total_cycles) {
+            if (total_pmd_cycles) {
                 uint64_t overhead_cycles = 0;
 
-                if (total_rxq_proc_cycles < busy_cycles) {
-                    overhead_cycles = busy_cycles - total_rxq_proc_cycles;
+                if (total_rxq_proc_cycles < busy_pmd_cycles) {
+                    overhead_cycles = busy_pmd_cycles - total_rxq_proc_cycles;
                 }
                 ds_put_format(reply, "%2"PRIu64" %%",
-                              overhead_cycles * 100 / total_cycles);
+                              overhead_cycles * 100 / total_pmd_cycles);
             } else {
                 ds_put_cstr(reply, "NOT AVAIL");
             }
@@ -1422,6 +1438,10 @@ dpif_netdev_pmd_info(struct unixctl_conn *conn, int argc, const char *argv[],
     unsigned int core_id;
     bool filter_on_pmd = false;
     size_t n;
+    unsigned int secs = 0;
+    unsigned long long max_secs = (PMD_INTERVAL_LEN * PMD_INTERVAL_MAX)
+                                      / INTERVAL_USEC_TO_SEC;
+    bool first_show_rxq = true;
 
     ovs_mutex_lock(&dp_netdev_mutex);
 
@@ -1429,6 +1449,14 @@ dpif_netdev_pmd_info(struct unixctl_conn *conn, int argc, const char *argv[],
         if (!strcmp(argv[1], "-pmd") && argc > 2) {
             if (str_to_uint(argv[2], 10, &core_id)) {
                 filter_on_pmd = true;
+            }
+            argc -= 2;
+            argv += 2;
+        } else if (type == PMD_INFO_SHOW_RXQ &&
+                       !strcmp(argv[1], "-secs") &&
+                       argc > 2) {
+            if (!str_to_uint(argv[2], 10, &secs)) {
+                secs = max_secs;
             }
             argc -= 2;
             argv += 2;
@@ -1461,7 +1489,18 @@ dpif_netdev_pmd_info(struct unixctl_conn *conn, int argc, const char *argv[],
             continue;
         }
         if (type == PMD_INFO_SHOW_RXQ) {
-            pmd_info_show_rxq(&reply, pmd);
+            if (first_show_rxq) {
+                if (!secs || secs > max_secs) {
+                    secs = max_secs;
+                } else {
+                    secs = ROUND_UP(secs,
+                                    PMD_INTERVAL_LEN / INTERVAL_USEC_TO_SEC);
+                }
+                ds_put_format(&reply, "Displaying last %u seconds "
+                              "pmd usage %%\n", secs);
+                first_show_rxq = false;
+            }
+            pmd_info_show_rxq(&reply, pmd, secs);
         } else if (type == PMD_INFO_CLEAR_STATS) {
             pmd_perf_stats_clear(&pmd->perf_stats);
         } else if (type == PMD_INFO_SHOW_STATS) {
@@ -1576,8 +1615,9 @@ dpif_netdev_init(void)
     unixctl_command_register("dpif-netdev/pmd-stats-clear", "[-pmd core] [dp]",
                              0, 3, dpif_netdev_pmd_info,
                              (void *)&clear_aux);
-    unixctl_command_register("dpif-netdev/pmd-rxq-show", "[-pmd core] [dp]",
-                             0, 3, dpif_netdev_pmd_info,
+    unixctl_command_register("dpif-netdev/pmd-rxq-show", "[-pmd core] "
+                             "[-secs secs] [dp]",
+                             0, 5, dpif_netdev_pmd_info,
                              (void *)&poll_aux);
     unixctl_command_register("dpif-netdev/pmd-perf-show",
                              "[-nh] [-it iter-history-len]"
@@ -3320,6 +3360,28 @@ netdev_flow_key_init_masked(struct netdev_flow_key *dst,
                             (dst_u64 - miniflow_get_values(&dst->mf)) * 8);
 }
 
+/* Initializes 'key' as a copy of 'flow'. */
+static inline void
+netdev_flow_key_init(struct netdev_flow_key *key,
+                     const struct flow *flow)
+{
+    uint64_t *dst = miniflow_values(&key->mf);
+    uint32_t hash = 0;
+    uint64_t value;
+
+    miniflow_map_init(&key->mf, flow);
+    miniflow_init(&key->mf, flow);
+
+    size_t n = dst - miniflow_get_values(&key->mf);
+
+    FLOW_FOR_EACH_IN_MAPS (value, flow, key->mf.map) {
+        hash = hash_add64(hash, value);
+    }
+
+    key->hash = hash_finish(hash, n * 8);
+    key->len = netdev_flow_key_size(n);
+}
+
 static inline void
 emc_change_entry(struct emc_entry *ce, struct dp_netdev_flow *flow,
                  const struct netdev_flow_key *key)
@@ -4194,7 +4256,7 @@ static int
 dpif_netdev_flow_put(struct dpif *dpif, const struct dpif_flow_put *put)
 {
     struct dp_netdev *dp = get_dp_netdev(dpif);
-    struct netdev_flow_key key, mask;
+    struct netdev_flow_key key;
     struct dp_netdev_pmd_thread *pmd;
     struct match match;
     ovs_u128 ufid;
@@ -4243,9 +4305,12 @@ dpif_netdev_flow_put(struct dpif *dpif, const struct dpif_flow_put *put)
 
     /* Must produce a netdev_flow_key for lookup.
      * Use the same method as employed to create the key when adding
-     * the flow to the dplcs to make sure they match. */
-    netdev_flow_mask_init(&mask, &match);
-    netdev_flow_key_init_masked(&key, &match.flow, &mask);
+     * the flow to the dplcs to make sure they match.
+     * We need to put in the unmasked key as flow_put_on_pmd() will first try
+     * to see if an entry exists doing a packet type lookup. As masked-out
+     * fields are interpreted as zeros, they could falsely match a wider IP
+     * address mask. Installation of the flow will use the match variable. */
+    netdev_flow_key_init(&key, &match.flow);
 
     if (put->pmd_id == PMD_ID_NULL) {
         if (cmap_count(&dp->poll_threads) == 0) {
@@ -4766,8 +4831,10 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
     uint64_t rebalance_intvl;
     uint8_t cur_rebalance_load;
     uint32_t rebalance_load, rebalance_improve;
+    uint64_t  pmd_max_sleep, cur_pmd_max_sleep;
     bool log_autolb = false;
     enum sched_assignment_type pmd_rxq_assign_type;
+    static bool first_set_config = true;
 
     tx_flush_interval = smap_get_int(other_config, "tx-flush-interval",
                                      DEFAULT_TX_FLUSH_INTERVAL);
@@ -4914,6 +4981,18 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
     bool autolb_state = smap_get_bool(other_config, "pmd-auto-lb", false);
 
     set_pmd_auto_lb(dp, autolb_state, log_autolb);
+
+    pmd_max_sleep = smap_get_ullong(other_config, "pmd-maxsleep", 0);
+    pmd_max_sleep = MIN(PMD_RCU_QUIESCE_INTERVAL, pmd_max_sleep);
+    atomic_read_relaxed(&dp->pmd_max_sleep, &cur_pmd_max_sleep);
+    if (first_set_config || pmd_max_sleep != cur_pmd_max_sleep) {
+        atomic_store_relaxed(&dp->pmd_max_sleep, pmd_max_sleep);
+        VLOG_INFO("PMD max sleep request is %"PRIu64" usecs.", pmd_max_sleep);
+        VLOG_INFO("PMD load based sleeps are %s.",
+                  pmd_max_sleep ? "enabled" : "disabled" );
+    }
+
+    first_set_config  = false;
     return 0;
 }
 
@@ -5149,7 +5228,7 @@ static void
 dp_netdev_rxq_set_intrvl_cycles(struct dp_netdev_rxq *rx,
                                 unsigned long long cycles)
 {
-    unsigned int idx = rx->intrvl_idx++ % PMD_INTERVAL_MAX;
+    unsigned int idx = atomic_count_inc(&rx->intrvl_idx) % PMD_INTERVAL_MAX;
     atomic_store_relaxed(&rx->cycles_intrvl[idx], cycles);
 }
 
@@ -6076,39 +6155,33 @@ rxq_scheduling(struct dp_netdev *dp)
 static uint64_t variance(uint64_t a[], int n);
 
 static uint64_t
-sched_numa_list_variance(struct sched_numa_list *numa_list)
+sched_numa_variance(struct sched_numa *numa)
 {
-    struct sched_numa *numa;
     uint64_t *percent_busy = NULL;
-    unsigned total_pmds = 0;
     int n_proc = 0;
     uint64_t var;
 
-    HMAP_FOR_EACH (numa, node, &numa_list->numas) {
-        total_pmds += numa->n_pmds;
-        percent_busy = xrealloc(percent_busy,
-                                total_pmds * sizeof *percent_busy);
+    percent_busy = xmalloc(numa->n_pmds * sizeof *percent_busy);
 
-        for (unsigned i = 0; i < numa->n_pmds; i++) {
-            struct sched_pmd *sched_pmd;
-            uint64_t total_cycles = 0;
+    for (unsigned i = 0; i < numa->n_pmds; i++) {
+        struct sched_pmd *sched_pmd;
+        uint64_t total_cycles = 0;
 
-            sched_pmd = &numa->pmds[i];
-            /* Exclude isolated PMDs from variance calculations. */
-            if (sched_pmd->isolated == true) {
-                continue;
-            }
-            /* Get the total pmd cycles for an interval. */
-            atomic_read_relaxed(&sched_pmd->pmd->intrvl_cycles, &total_cycles);
+        sched_pmd = &numa->pmds[i];
+        /* Exclude isolated PMDs from variance calculations. */
+        if (sched_pmd->isolated == true) {
+            continue;
+        }
+        /* Get the total pmd cycles for an interval. */
+        atomic_read_relaxed(&sched_pmd->pmd->intrvl_cycles, &total_cycles);
 
-            if (total_cycles) {
-                /* Estimate the cycles to cover all intervals. */
-                total_cycles *= PMD_INTERVAL_MAX;
-                percent_busy[n_proc++] = (sched_pmd->pmd_proc_cycles * 100)
-                                             / total_cycles;
-            } else {
-                percent_busy[n_proc++] = 0;
-            }
+        if (total_cycles) {
+            /* Estimate the cycles to cover all intervals. */
+            total_cycles *= PMD_INTERVAL_MAX;
+            percent_busy[n_proc++] = (sched_pmd->pmd_proc_cycles * 100)
+                                            / total_cycles;
+        } else {
+            percent_busy[n_proc++] = 0;
         }
     }
     var = variance(percent_busy, n_proc);
@@ -6182,6 +6255,7 @@ pmd_rebalance_dry_run(struct dp_netdev *dp)
     struct sched_numa_list numa_list_est;
     bool thresh_met = false;
     uint64_t current_var, estimate_var;
+    struct sched_numa *numa_cur, *numa_est;
     uint64_t improvement = 0;
 
     VLOG_DBG("PMD auto load balance performing dry run.");
@@ -6200,25 +6274,29 @@ pmd_rebalance_dry_run(struct dp_netdev *dp)
             sched_numa_list_count(&numa_list_est) == 1) {
 
         /* Calculate variances. */
-        current_var = sched_numa_list_variance(&numa_list_cur);
-        estimate_var = sched_numa_list_variance(&numa_list_est);
-
-        if (estimate_var < current_var) {
-             improvement = ((current_var - estimate_var) * 100) / current_var;
+        HMAP_FOR_EACH (numa_cur, node, &numa_list_cur.numas) {
+            numa_est = sched_numa_list_lookup(&numa_list_est,
+                                              numa_cur->numa_id);
+            if (!numa_est) {
+                continue;
+            }
+            current_var = sched_numa_variance(numa_cur);
+            estimate_var = sched_numa_variance(numa_est);
+            if (estimate_var < current_var) {
+                improvement = ((current_var - estimate_var) * 100)
+                              / current_var;
+            }
+            VLOG_DBG("Numa node %d. Current variance %"PRIu64" Estimated "
+                     "variance %"PRIu64". Variance improvement %"PRIu64"%%.",
+                     numa_cur->numa_id, current_var,
+                     estimate_var, improvement);
+            if (improvement >= dp->pmd_alb.rebalance_improve_thresh) {
+                thresh_met = true;
+            }
         }
-        VLOG_DBG("Current variance %"PRIu64" Estimated variance %"PRIu64".",
-                 current_var, estimate_var);
-        VLOG_DBG("Variance improvement %"PRIu64"%%.", improvement);
-
-        if (improvement >= dp->pmd_alb.rebalance_improve_thresh) {
-            thresh_met = true;
-            VLOG_DBG("PMD load variance improvement threshold %u%% "
-                     "is met.", dp->pmd_alb.rebalance_improve_thresh);
-        } else {
-            VLOG_DBG("PMD load variance improvement threshold "
-                     "%u%% is not met.",
-                      dp->pmd_alb.rebalance_improve_thresh);
-        }
+        VLOG_DBG("PMD load variance improvement threshold %u%% is %s.",
+                 dp->pmd_alb.rebalance_improve_thresh,
+                 thresh_met ? "met" : "not met");
     } else {
         VLOG_DBG("PMD auto load balance detected cross-numa polling with "
                  "multiple numa nodes. Unable to accurately estimate.");
@@ -6875,6 +6953,7 @@ pmd_thread_main(void *f_)
     int poll_cnt;
     int i;
     int process_packets = 0;
+    uint64_t sleep_time = 0;
 
     poll_list = NULL;
 
@@ -6885,9 +6964,13 @@ pmd_thread_main(void *f_)
     poll_cnt = pmd_load_queues_and_ports(pmd, &poll_list);
     dfc_cache_init(&pmd->flow_cache);
     pmd_alloc_static_tx_qid(pmd);
+    set_timer_resolution(PMD_TIMER_RES_NS);
 
 reload:
     atomic_count_init(&pmd->pmd_overloaded, 0);
+
+    pmd->intrvl_tsc_prev = 0;
+    atomic_store_relaxed(&pmd->intrvl_cycles, 0);
 
     if (!dpdk_attached) {
         dpdk_attached = dpdk_attach_thread(pmd->core_id);
@@ -6920,12 +7003,10 @@ reload:
         }
     }
 
-    pmd->intrvl_tsc_prev = 0;
-    atomic_store_relaxed(&pmd->intrvl_cycles, 0);
     for (i = 0; i < PMD_INTERVAL_MAX; i++) {
         atomic_store_relaxed(&pmd->busy_cycles_intrvl[i], 0);
     }
-    pmd->intrvl_idx = 0;
+    atomic_count_set(&pmd->intrvl_idx, 0);
     cycles_counter_update(s);
 
     pmd->next_rcu_quiesce = pmd->ctx.now + PMD_RCU_QUIESCE_INTERVAL;
@@ -6934,10 +7015,13 @@ reload:
     ovs_mutex_lock(&pmd->perf_stats.stats_mutex);
     for (;;) {
         uint64_t rx_packets = 0, tx_packets = 0;
+        uint64_t time_slept = 0;
+        uint64_t max_sleep;
 
         pmd_perf_start_iteration(s);
 
         atomic_read_relaxed(&pmd->dp->smc_enable_db, &pmd->ctx.smc_enable_db);
+        atomic_read_relaxed(&pmd->dp->pmd_max_sleep, &max_sleep);
 
         for (i = 0; i < poll_cnt; i++) {
 
@@ -6956,6 +7040,9 @@ reload:
                 dp_netdev_process_rxq_port(pmd, poll_list[i].rxq,
                                            poll_list[i].port_no);
             rx_packets += process_packets;
+            if (process_packets >= PMD_SLEEP_THRESH) {
+                sleep_time = 0;
+            }
         }
 
         if (!rx_packets) {
@@ -6963,7 +7050,30 @@ reload:
              * Check if we need to send something.
              * There was no time updates on current iteration. */
             pmd_thread_ctx_time_update(pmd);
-            tx_packets = dp_netdev_pmd_flush_output_packets(pmd, false);
+            tx_packets = dp_netdev_pmd_flush_output_packets(pmd,
+                                                   max_sleep && sleep_time
+                                                   ? true : false);
+        }
+
+        if (max_sleep) {
+            /* Check if a sleep should happen on this iteration. */
+            if (sleep_time) {
+                struct cycle_timer sleep_timer;
+
+                cycle_timer_start(&pmd->perf_stats, &sleep_timer);
+                xnanosleep_no_quiesce(sleep_time * 1000);
+                time_slept = cycle_timer_stop(&pmd->perf_stats, &sleep_timer);
+                pmd_thread_ctx_time_update(pmd);
+            }
+            if (sleep_time < max_sleep) {
+                /* Increase sleep time for next iteration. */
+                sleep_time += PMD_SLEEP_INC_US;
+            } else {
+                sleep_time = max_sleep;
+            }
+        } else {
+            /* Reset sleep time as max sleep policy may have been changed. */
+            sleep_time = 0;
         }
 
         /* Do RCU synchronization at fixed interval.  This ensures that
@@ -7003,7 +7113,7 @@ reload:
             break;
         }
 
-        pmd_perf_end_iteration(s, rx_packets, tx_packets,
+        pmd_perf_end_iteration(s, rx_packets, tx_packets, time_slept,
                                pmd_perf_metrics_enabled(pmd));
     }
     ovs_mutex_unlock(&pmd->perf_stats.stats_mutex);
@@ -9506,6 +9616,7 @@ dpif_netdev_bond_stats_get(struct dpif *dpif, uint32_t bond_id,
 const struct dpif_class dpif_netdev_class = {
     "netdev",
     true,                       /* cleanup_required */
+    true,                       /* synced_dp_layers */
     dpif_netdev_init,
     dpif_netdev_enumerate,
     dpif_netdev_port_open_type,
@@ -9854,7 +9965,7 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
                            struct polled_queue *poll_list, int poll_cnt)
 {
     struct dpcls *cls;
-    uint64_t tot_idle = 0, tot_proc = 0;
+    uint64_t tot_idle = 0, tot_proc = 0, tot_sleep = 0;
     unsigned int pmd_load = 0;
 
     if (pmd->ctx.now > pmd->next_cycle_store) {
@@ -9871,10 +9982,13 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
                        pmd->prev_stats[PMD_CYCLES_ITER_IDLE];
             tot_proc = pmd->perf_stats.counters.n[PMD_CYCLES_ITER_BUSY] -
                        pmd->prev_stats[PMD_CYCLES_ITER_BUSY];
+            tot_sleep = pmd->perf_stats.counters.n[PMD_CYCLES_SLEEP] -
+                        pmd->prev_stats[PMD_CYCLES_SLEEP];
 
             if (pmd_alb->is_enabled && !pmd->isolated) {
                 if (tot_proc) {
-                    pmd_load = ((tot_proc * 100) / (tot_idle + tot_proc));
+                    pmd_load = ((tot_proc * 100) /
+                                    (tot_idle + tot_proc + tot_sleep));
                 }
 
                 atomic_read_relaxed(&pmd_alb->rebalance_load_thresh,
@@ -9891,6 +10005,8 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
                         pmd->perf_stats.counters.n[PMD_CYCLES_ITER_IDLE];
         pmd->prev_stats[PMD_CYCLES_ITER_BUSY] =
                         pmd->perf_stats.counters.n[PMD_CYCLES_ITER_BUSY];
+        pmd->prev_stats[PMD_CYCLES_SLEEP] =
+                        pmd->perf_stats.counters.n[PMD_CYCLES_SLEEP];
 
         /* Get the cycles that were used to process each queue and store. */
         for (unsigned i = 0; i < poll_cnt; i++) {
@@ -9906,7 +10022,7 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
             atomic_store_relaxed(&pmd->intrvl_cycles,
                                  curr_tsc - pmd->intrvl_tsc_prev);
         }
-        idx = pmd->intrvl_idx++ % PMD_INTERVAL_MAX;
+        idx = atomic_count_inc(&pmd->intrvl_idx) % PMD_INTERVAL_MAX;
         atomic_store_relaxed(&pmd->busy_cycles_intrvl[idx], tot_proc);
         pmd->intrvl_tsc_prev = curr_tsc;
         /* Start new measuring interval */
@@ -9927,6 +10043,27 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
                                      + DPCLS_OPTIMIZATION_INTERVAL;
         }
     }
+}
+
+/* Returns the sum of a specified number of newest to
+ * oldest interval values. 'cur_idx' is where the next
+ * write will be and wrap around needs to be handled.
+ */
+static uint64_t
+get_interval_values(atomic_ullong *source, atomic_count *cur_idx,
+                    int num_to_read) {
+    unsigned int i;
+    uint64_t total = 0;
+
+    i = atomic_count_get(cur_idx) % PMD_INTERVAL_MAX;
+    for (int read = 0; read < num_to_read; read++) {
+        uint64_t interval_value;
+
+        i = i ? i - 1 : PMD_INTERVAL_MAX - 1;
+        atomic_read_relaxed(&source[i], &interval_value);
+        total += interval_value;
+    }
+    return total;
 }
 
 /* Insert 'rule' into 'cls'. */

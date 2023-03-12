@@ -163,6 +163,7 @@ Ethan J. Jackson                   ejj@eecs.berkeley.edu
 Ethan Rahn                         erahn@arista.com
 Eziz Durdyyev                      ezizdurdy@gmail.com
 Fabrizio D'Angelo                  fdangelo@redhat.com
+Fangrui Song                       maskray@google.com
 Fengqi Li                          lifengqi@inspur.com
 Flavio Fernandes                   flavio@flaviof.com
 Flavio Leitner                     fbl@redhat.com
@@ -262,6 +263,7 @@ Leif Madsen                        lmadsen@redhat.com
 Leo Alterman
 Li RongQing                        lirongqing@baidu.com
 Lian-min Wang                      liang-min.wang@intel.com
+Liang Mancang                      liangmc1@chinatelecom.cn
 Lin Huang                          linhuang@ruijie.com.cn
 Liu Chang                          liuchang@cmss.chinamobile.com
 Lilijun                            jerry.lilijun@huawei.com
@@ -310,6 +312,7 @@ Michal Weglicki                    michalx.weglicki@intel.com
 Michele Baldessari                 michele@acksyn.org
 Mickey Spiegel                     mickeys.dev@gmail.com
 Miguel Angel Ajo                   majopela@redhat.com
+Miika Petäjäniemi                  miika.petajaniemi@solita.fi
 Mijo Safradin                      mijo@linux.vnet.ibm.com
 Mika Vaisanen                      mika.vaisanen@gmail.com
 Mike Pattrick                      mkp@redhat.com
@@ -350,8 +353,9 @@ Pim van den Berg                   pim@nethuis.nl
 pritesh                            pritesh.kothari@cisco.com
 Pravin B Shelar                    pshelar@ovn.org
 Przemyslaw Szczerbik               przemyslawx.szczerbik@intel.com
-Quentin Monnet                     quentin.monnet@6wind.com
+Qian Chen                          cq674350529@163.com
 Qiuyu Xiao                         qiuyu.xiao.qyx@gmail.com
+Quentin Monnet                     quentin.monnet@6wind.com
 Raju Subramanian
 Rami Rosen                         ramirose@gmail.com
 Ramu Ramamurthy                    ramu.ramamurthy@us.ibm.com
@@ -446,9 +450,11 @@ Usman Ansari                       ua1422@gmail.com
 Valient Gough                      vgough@pobox.com
 Vasu Dasari                        vdasari@gmail.com
 Venkata Anil Kommaddi              vkommadi@redhat.com
+Viacheslav Galaktionov             viacheslav.galaktionov@arknetworks.am
 Vishal Deep Ajmera                 vishal.deep.ajmera@ericsson.com
 Vivien Bernet-Rollande             vbr@soprive.net
 Vlad Buslov                        vladbu@nvidia.com
+Vladislav Odintsov                 odivlad@gmail.com
 Volkan Atlı                        volkan.atli@b-ulltech.com
 Wan Junjie                         wanjunjie@bytedance.com
 Wang Li                            wangli39@baidu.com
@@ -494,6 +500,7 @@ lic121                             lic121@chinatelecom.cn
 lzhecheng                          lzhecheng@vmware.com
 parameswaran krishnamurthy         parkrish@gmail.com
 solomon                            liwei.solomon@gmail.com
+wangchuanlei                       wangchuanlei@inspur.com
 wenxu                              wenxu@ucloud.cn
 wisd0me                            ak47izatool@gmail.com
 xushengping                        shengping.xu@huawei.com

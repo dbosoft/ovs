@@ -344,7 +344,6 @@ is_tcf_id_eq(struct tcf_id *id1, struct tcf_id *id2)
 {
     return id1->prio == id2->prio
            && id1->handle == id2->handle
-           && id1->handle == id2->handle
            && id1->hook == id2->hook
            && id1->block_id == id2->block_id
            && id1->ifindex == id2->ifindex
@@ -384,7 +383,8 @@ struct tc_flower {
 };
 
 int tc_replace_flower(struct tcf_id *id, struct tc_flower *flower);
-int tc_del_filter(struct tcf_id *id);
+int tc_del_filter(struct tcf_id *id, const char *kind);
+int tc_del_flower_filter(struct tcf_id *id);
 int tc_get_flower(struct tcf_id *id, struct tc_flower *flower);
 int tc_dump_flower_start(struct tcf_id *id, struct nl_dump *dump, bool terse);
 int tc_dump_tc_chain_start(struct tcf_id *id, struct nl_dump *dump);

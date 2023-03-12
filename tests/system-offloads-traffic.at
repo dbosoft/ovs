@@ -18,6 +18,16 @@ m4_define([OVS_CHECK_ACTIONS], [
            [0], [$1])
 ])
 
+m4_define([CHECK_TC_INGRESS_PPS],
+[
+    AT_SKIP_IF([test $HAVE_TC = "no"])
+    AT_CHECK([ip link add ovs_tc_pps0 type veth peer name ovs_tc_pps1 dnl
+                  || exit 77])
+    on_exit 'ip link del ovs_tc_pps0'
+    AT_CHECK([tc qdisc add dev ovs_tc_pps0 handle ffff: ingress || exit 77])
+    AT_CHECK([tc filter add dev ovs_tc_pps0 parent ffff: u32 match dnl
+                  u32 0 0 police pkts_rate 100 pkts_burst 10 || exit 77])
+])
 
 AT_SETUP([offloads - ping between two ports - offloads disabled])
 OVS_TRAFFIC_VSWITCHD_START()
@@ -132,7 +142,7 @@ AT_CLEANUP
 
 AT_SETUP([offloads - set ingress_policing_kpkts_rate and ingress_policing_kpkts_burst - offloads disabled])
 AT_KEYWORDS([ingress_policing_kpkts])
-AT_SKIP_IF([test $SUPPORT_TC_INGRESS_PPS = "no"])
+CHECK_TC_INGRESS_PPS()
 OVS_TRAFFIC_VSWITCHD_START()
 AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:hw-offload=false])
 AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
@@ -156,7 +166,7 @@ AT_CLEANUP
 
 AT_SETUP([offloads - set ingress_policing_kpkts_rate and ingress_policing_kpkts_burst - offloads enabled])
 AT_KEYWORDS([ingress_policing_kpkts])
-AT_SKIP_IF([test $SUPPORT_TC_INGRESS_PPS = "no"])
+CHECK_TC_INGRESS_PPS()
 OVS_TRAFFIC_VSWITCHD_START([], [], [-- set Open_vSwitch . other_config:hw-offload=true])
 AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
 ADD_NAMESPACES(at_ns0)
@@ -181,6 +191,7 @@ AT_CLEANUP
 
 AT_SETUP([offloads - check interface meter offloading -  offloads disabled])
 AT_KEYWORDS([dp-meter])
+AT_SKIP_IF([test $HAVE_NC = "no"])
 OVS_TRAFFIC_VSWITCHD_START()
 
 AT_CHECK([ovs-ofctl -O OpenFlow13 add-meter br0 'meter=1 pktps bands=type=drop rate=1'])
@@ -230,6 +241,7 @@ AT_CLEANUP
 AT_SETUP([offloads - check interface meter offloading -  offloads enabled])
 AT_KEYWORDS([offload-meter])
 AT_SKIP_IF([test $SUPPORT_TC_INGRESS_PPS = "no"])
+AT_SKIP_IF([test $HAVE_NC = "no"])
 OVS_TRAFFIC_VSWITCHD_START([], [], [-- set Open_vSwitch . other_config:hw-offload=true])
 
 AT_CHECK([ovs-ofctl -O OpenFlow13 add-meter br0 'meter=1 pktps bands=type=drop rate=1'])
@@ -395,7 +407,7 @@ AT_CHECK([cat p4.pcap | awk 'NF{print $NF}' | uniq -c | awk '{$1=$1;print}'], [0
 # This test verifies the total packet counters work when individual branches
 # are taken.
 
-AT_CHECK([ovs-appctl revalidator/wait], [0])
+AT_CHECK([ovs-appctl revalidator/purge], [0])
 AT_CHECK([ovs-ofctl del-flows br0])
 AT_DATA([flows.txt], [dnl
 table=0,in_port=2 actions=output:1
@@ -415,9 +427,9 @@ NS_CHECK_EXEC([at_ns1], [ping -q -c 10 -i 0.1 -w 2 -s 1024 10.1.1.2 | FORMAT_PIN
 10 packets transmitted, 10 received, 0% packet loss, time 0ms
 ], [], [ovs-appctl dpctl/dump-flows; ovs-ofctl dump-flows br0])
 
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED | sed 's/bytes:11440/bytes:11720/'], [0], [dnl
-in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:20, bytes:11720, used:0.001s, actions:check_pkt_len(size=200,gt(3),le(3))
-in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:20, bytes:11720, used:0.001s, actions:output
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED | sed 's/bytes:11348/bytes:11614/'], [0], [dnl
+in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:check_pkt_len(size=200,gt(3),le(3))
+in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:output
 ])
 
 
@@ -490,7 +502,7 @@ NS_CHECK_EXEC([at_ns1], [ping -q -c 10 -i 0.1 -w 2 -s 1024 10.1.1.2 | FORMAT_PIN
 OVS_CHECK_ACTIONS([check_pkt_len(size=200,gt(3,5),le(3,4))])
 
 
-AT_CHECK([ovs-appctl revalidator/wait], [0])
+AT_CHECK([ovs-appctl revalidator/purge], [0])
 AT_CHECK([ovs-ofctl del-flows br0])
 AT_DATA([flows.txt], [dnl
 table=0,in_port=2 actions=output:1
@@ -515,9 +527,9 @@ NS_CHECK_EXEC([at_ns1], [ping -q -c 10 -i 0.1 -w 2 -s 1024 10.1.1.2 | FORMAT_PIN
 10 packets transmitted, 10 received, 0% packet loss, time 0ms
 ], [], [ovs-appctl dpctl/dump-flows; ovs-ofctl dump-flows br0])
 
-AT_CHECK([ovs-appctl dpctl/dump-flows type=tc,offloaded | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED | sed -e 's/bytes:11348/bytes:11614/' -e 's/bytes:11440/bytes:11720/'], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows type=tc,offloaded | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED | sed -e 's/bytes:11348/bytes:11614/'], [0], [dnl
 in_port(2),eth(),eth_type(0x0800),ipv4(proto=1,tos=0/0xfc,frag=no), packets:19, bytes:11614, used:0.001s, actions:check_pkt_len(size=200,gt(set(ipv4(tos=0x4/0xfc)),4),le(set(ipv4(tos=0x8/0xfc)),5)),3
-in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:20, bytes:11720, used:0.001s, actions:output
+in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:output
 ])
 
 sleep 1
@@ -675,6 +687,66 @@ NS_CHECK_EXEC([at_ns1], [ping -q -c 10 -i 0.1 -w 2 -s 64 10.1.1.2 | FORMAT_PING]
 ], [], [ovs-appctl dpctl/dump-flows; ovs-ofctl dump-flows br0])
 OVS_CHECK_ACTIONS([check_pkt_len(size=200,gt(5),le(check_pkt_len(size=100,gt(5),le(4)))),3])
 
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+
+AT_SETUP([offloads - offload flow to none-offload])
+OVS_TRAFFIC_VSWITCHD_START([], [], [-- set Open_vSwitch . other_config:hw-offload=true])
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+AT_DATA([flows.txt], [dnl
+add in_port=ovs-p0,actions=ovs-p1
+add in_port=ovs-p1,actions=ovs-p0
+])
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+
+NS_CHECK_EXEC([at_ns0], [ping -q -c 10 -i 0.1 -w 2 10.1.1.2 | FORMAT_PING], [0], [dnl
+10 packets transmitted, 10 received, 0% packet loss, time 0ms
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=tc | grep "eth_type(0x0800)" | sort | strip_recirc | strip_used], [0], [dnl
+recirc_id(<recirc>),in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:9, bytes:756, used:0.0s, actions:3
+recirc_id(<recirc>),in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:9, bytes:756, used:0.0s, actions:2
+])
+
+dnl Here we use an output action with truncate, which will force a kernel flow.
+AT_DATA([flows2.txt], [dnl
+modify in_port=ovs-p0,actions=output(port=ovs-p1, max_len=128)
+modify in_port=ovs-p1,actions=output(port=ovs-p0, max_len=128)
+])
+AT_CHECK([ovs-ofctl add-flows br0 flows2.txt])
+AT_CHECK([ovs-appctl revalidator/wait], [0])
+
+NS_CHECK_EXEC([at_ns0], [ping -q -c 10 -i 0.1 -w 2 10.1.1.2 | FORMAT_PING], [0], [dnl
+10 packets transmitted, 10 received, 0% packet loss, time 0ms
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=ovs | grep "eth_type(0x0800)" | sort | strip_recirc | strip_used], [0], [dnl
+recirc_id(<recirc>),in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:10, bytes:980, used:0.0s, actions:trunc(128),3
+recirc_id(<recirc>),in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:10, bytes:980, used:0.0s, actions:trunc(128),2
+])
+
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+AT_CHECK([ovs-appctl revalidator/wait], [0])
+
+NS_CHECK_EXEC([at_ns0], [ping -q -c 10 -i 0.1 -w 2 10.1.1.2 | FORMAT_PING], [0], [dnl
+10 packets transmitted, 10 received, 0% packet loss, time 0ms
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=tc | grep "eth_type(0x0800)" | sort | strip_recirc | strip_used], [0], [dnl
+recirc_id(<recirc>),in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:10, bytes:840, used:0.0s, actions:3
+recirc_id(<recirc>),in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:10, bytes:840, used:0.0s, actions:2
+])
+
+AT_CHECK([ovs-appctl coverage/read-counter ukey_invalid_stat_reset], [0], [dnl
+0
+])
 
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP

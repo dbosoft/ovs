@@ -205,10 +205,11 @@
       </column>
 
       <column name="other_config" key="min-revalidate-pps"
-              type='{"type": "integer", "minInteger": 1}'>
+              type='{"type": "integer", "minInteger": 0}'>
         <p>
           Set minimum pps that flow must have in order to be revalidated when
           revalidation duration exceeds half of max-revalidator config variable.
+          Setting to 0 means always revalidate flows regardless of pps.
         </p>
         <p>
           The default is 5.
@@ -786,6 +787,28 @@
         </p>
         <p>
          The default value is <code>25%</code>.
+        </p>
+      </column>
+      <column name="other_config" key="pmd-maxsleep"
+              type='{"type": "integer",
+                     "minInteger": 0, "maxInteger": 10000}'>
+        <p>
+          Specifies the maximum sleep time that will be requested in
+          microseconds per iteration for a PMD thread which has received zero
+          or a small amount of packets from the Rx queues it is polling.
+        </p>
+        <p>
+          The actual sleep time requested is based on the load
+          of the Rx queues that the PMD polls and may be less than
+          the maximum value.
+        </p>
+        <p>
+          The default value is <code>0 microseconds</code>, which means
+          that the PMD will not sleep regardless of the load from the
+          Rx queues that it polls.
+        </p>
+        <p>
+          The maximum value is <code>10000 microseconds</code>.
         </p>
       </column>
       <column name="other_config" key="userspace-tso-enable"
@@ -4872,6 +4895,10 @@ ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
         Adds an independent loss probability to the packets outgoing from the
         chosen network interface.
       </column>
+      <column name="other_config" key="jitter" type='{"type": "integer"}'>
+        Adds the provided jitter to the latency outgoing to the
+        chosen network interface. The jitter value expressed in us.
+      </column>
     </group>
 
     <group title="Common Columns">
@@ -6567,6 +6594,26 @@ ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
       The maximum number of IPFIX flow records that can be cached at a
       time.  If not specified, defaults to 0.  If 0, caching is
       disabled.
+    </column>
+
+    <column name="stats_interval">
+      <p>
+          Interval (in seconds) for sending IPFIX exporting process statistics
+          according to IETF RFC 5101 Section 4.3.
+      </p>
+      <p>
+          Default value is 600
+      </p>
+    </column>
+
+    <column name="template_interval">
+      <p>
+          Interval (in seconds) for sending IPFIX Template information for each
+          Observation Domain ID.
+      </p>
+      <p>
+          Default value is 600
+      </p>
     </column>
 
     <column name="other_config" key="enable-tunnel-sampling"

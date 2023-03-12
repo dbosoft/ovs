@@ -42,6 +42,7 @@
 #include "openvswitch/meta-flow.h"
 #include "openvswitch/ofp-actions.h"
 #include "openvswitch/ofp-bundle.h"
+#include "openvswitch/ofp-ct.h"
 #include "openvswitch/ofp-errors.h"
 #include "openvswitch/ofp-match.h"
 #include "openvswitch/ofp-msgs.h"
@@ -723,7 +724,7 @@ ofproto_set_max_revalidator(unsigned max_revalidator)
 void
 ofproto_set_min_revalidate_pps(unsigned min_revalidate_pps)
 {
-    ofproto_min_revalidate_pps = min_revalidate_pps ? min_revalidate_pps : 1;
+    ofproto_min_revalidate_pps = min_revalidate_pps;
 }
 
 /* If forward_bpdu is true, the NORMAL action will forward frames with
@@ -934,7 +935,30 @@ handle_nxt_ct_flush_zone(struct ofconn *ofconn, const struct ofp_header *oh)
 
     uint16_t zone = ntohs(nzi->zone_id);
     if (ofproto->ofproto_class->ct_flush) {
-        ofproto->ofproto_class->ct_flush(ofproto, &zone);
+        ofproto->ofproto_class->ct_flush(ofproto, &zone, NULL);
+    } else {
+        return EOPNOTSUPP;
+    }
+
+    return 0;
+}
+
+static enum ofperr
+handle_nxt_ct_flush(struct ofconn *ofconn, const struct ofp_header *oh)
+{
+    struct ofproto *ofproto = ofconn_get_ofproto(ofconn);
+    struct ofp_ct_match match = {0};
+    bool with_zone = false;
+    uint16_t zone_id = 0;
+
+    enum ofperr error = ofp_ct_match_decode(&match, &with_zone, &zone_id, oh);
+    if (error) {
+        return error;
+    }
+
+    if (ofproto->ofproto_class->ct_flush) {
+        ofproto->ofproto_class->ct_flush(ofproto, with_zone ? &zone_id : NULL,
+                                         &match);
     } else {
         return EOPNOTSUPP;
     }
@@ -4800,6 +4824,10 @@ flow_stats_ds(struct ofproto *ofproto, struct rule *rule, struct ds *results,
     created = rule->created;
     ovs_mutex_unlock(&rule->mutex);
 
+    if (rule->flow_cookie != 0) {
+        ds_put_format(results, "cookie=0x%"PRIx64", ",
+                      ntohll(rule->flow_cookie));
+    }
     if (rule->table_id != 0) {
         ds_put_format(results, "table_id=%"PRIu8", ", rule->table_id);
     }
@@ -8786,6 +8814,9 @@ handle_single_part_openflow(struct ofconn *ofconn, const struct ofp_header *oh,
 
     case OFPTYPE_CT_FLUSH_ZONE:
         return handle_nxt_ct_flush_zone(ofconn, oh);
+
+    case OFPTYPE_CT_FLUSH:
+        return handle_nxt_ct_flush(ofconn, oh);
 
     case OFPTYPE_HELLO:
     case OFPTYPE_ERROR:

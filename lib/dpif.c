@@ -1213,7 +1213,7 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
             /* The Linux kernel datapath throws away the tunnel information
              * that we supply as metadata.  We have to use a "set" action to
              * supply it. */
-            if (md->tunnel.ip_dst) {
+            if (flow_tnl_dst_is_set(&md->tunnel)) {
                 odp_put_tunnel_action(&md->tunnel, &execute_actions, NULL);
             }
             ofpbuf_put(&execute_actions, action, NLA_ALIGN(action->nla_len));
@@ -2108,4 +2108,10 @@ dpif_cache_set_size(struct dpif *dpif, uint32_t level, uint32_t size)
     return dpif->dpif_class->cache_set_size
            ? dpif->dpif_class->cache_set_size(dpif, level, size)
            : EOPNOTSUPP;
+}
+
+bool
+dpif_synced_dp_layers(struct dpif *dpif)
+{
+    return dpif->dpif_class->synced_dp_layers;
 }

@@ -97,6 +97,12 @@ static int netdev_tc_parse_nl_actions(struct netdev *netdev,
                                       bool *recirc_act, bool more_actions,
                                       struct tc_action **need_jump_update);
 
+static void parse_tc_flower_to_stats(struct tc_flower *flower,
+                                     struct dpif_flow_stats *stats);
+
+static int get_ufid_adjust_stats(const ovs_u128 *ufid,
+                                 struct dpif_flow_stats *stats);
+
 static bool
 is_internal_port(const char *type)
 {
@@ -193,6 +199,9 @@ static struct ovs_mutex ufid_lock = OVS_MUTEX_INITIALIZER;
  * @ufid: ufid assigned to the flow
  * @id: tc filter id (tcf_id)
  * @netdev: netdev associated with the tc rule
+ * @adjust_stats: When flow gets updated with new actions, we need to adjust
+ *                the reported stats to include previous values as the hardware
+ *                rule is removed and re-added. This stats copy is used for it.
  */
 struct ufid_tc_data {
     struct hmap_node ufid_to_tc_node;
@@ -200,6 +209,7 @@ struct ufid_tc_data {
     ovs_u128 ufid;
     struct tcf_id id;
     struct netdev *netdev;
+    struct dpif_flow_stats adjust_stats;
 };
 
 static void
@@ -233,13 +243,39 @@ del_ufid_tc_mapping(const ovs_u128 *ufid)
     ovs_mutex_unlock(&ufid_lock);
 }
 
+static void
+netdev_tc_adjust_stats(struct dpif_flow_stats *stats,
+                       const struct dpif_flow_stats *adjust_stats)
+{
+    /* Do not try to restore the stats->used, as in terse mode dumps TC doesn't
+     * report TCA_ACT_OPTIONS, so the 'lastused' value is not available, hence
+     * we report used as 0.
+     * tcp_flags is not collected by tc, so no need to update it. */
+    stats->n_bytes += adjust_stats->n_bytes;
+    stats->n_packets += adjust_stats->n_packets;
+}
+
 /* Wrapper function to delete filter and ufid tc mapping */
 static int
-del_filter_and_ufid_mapping(struct tcf_id *id, const ovs_u128 *ufid)
+del_filter_and_ufid_mapping(struct tcf_id *id, const ovs_u128 *ufid,
+                            struct dpif_flow_stats *stats)
 {
+    struct tc_flower flower;
     int err;
 
-    err = tc_del_filter(id);
+    if (stats) {
+        memset(stats, 0, sizeof *stats);
+        if (!tc_get_flower(id, &flower)) {
+            struct dpif_flow_stats adjust_stats;
+
+            parse_tc_flower_to_stats(&flower, stats);
+            if (!get_ufid_adjust_stats(ufid, &adjust_stats)) {
+                netdev_tc_adjust_stats(stats, &adjust_stats);
+            }
+        }
+    }
+
+    err = tc_del_flower_filter(id);
     if (!err) {
         del_ufid_tc_mapping(ufid);
     }
@@ -249,7 +285,7 @@ del_filter_and_ufid_mapping(struct tcf_id *id, const ovs_u128 *ufid)
 /* Add ufid entry to ufid_to_tc hashmap. */
 static void
 add_ufid_tc_mapping(struct netdev *netdev, const ovs_u128 *ufid,
-                    struct tcf_id *id)
+                    struct tcf_id *id, struct dpif_flow_stats *stats)
 {
     struct ufid_tc_data *new_data = xzalloc(sizeof *new_data);
     size_t ufid_hash = hash_bytes(ufid, sizeof *ufid, 0);
@@ -261,6 +297,9 @@ add_ufid_tc_mapping(struct netdev *netdev, const ovs_u128 *ufid,
     new_data->ufid = *ufid;
     new_data->id = *id;
     new_data->netdev = netdev_ref(netdev);
+    if (stats) {
+        new_data->adjust_stats = *stats;
+    }
 
     ovs_mutex_lock(&ufid_lock);
     hmap_insert(&ufid_to_tc, &new_data->ufid_to_tc_node, ufid_hash);
@@ -283,6 +322,30 @@ get_ufid_tc_mapping(const ovs_u128 *ufid, struct tcf_id *id)
     HMAP_FOR_EACH_WITH_HASH (data, ufid_to_tc_node, ufid_hash, &ufid_to_tc) {
         if (ovs_u128_equals(*ufid, data->ufid)) {
             *id = data->id;
+            ovs_mutex_unlock(&ufid_lock);
+            return 0;
+        }
+    }
+    ovs_mutex_unlock(&ufid_lock);
+
+    return ENOENT;
+}
+
+/* Get adjust_stats from ufid_to_tc hashmap.
+ *
+ * Returns 0 if successful and fills stats with adjust_stats.
+ * Otherwise returns the error.
+*/
+static int
+get_ufid_adjust_stats(const ovs_u128 *ufid, struct dpif_flow_stats *stats)
+{
+    size_t ufid_hash = hash_bytes(ufid, sizeof *ufid, 0);
+    struct ufid_tc_data *data;
+
+    ovs_mutex_lock(&ufid_lock);
+    HMAP_FOR_EACH_WITH_HASH (data, ufid_to_tc_node, ufid_hash, &ufid_to_tc) {
+        if (ovs_u128_equals(*ufid, data->ufid)) {
+            *stats = data->adjust_stats;
             ovs_mutex_unlock(&ufid_lock);
             return 0;
         }
@@ -461,7 +524,7 @@ delete_chains_from_netdev(struct netdev *netdev, struct tcf_id *id)
          */
         HMAP_FOR_EACH_POP (chain_node, node, &map) {
             id->chain = chain_node->chain;
-            tc_del_filter(id);
+            tc_del_flower_filter(id);
             free(chain_node);
         }
     }
@@ -482,7 +545,7 @@ netdev_tc_flow_flush(struct netdev *netdev)
             continue;
         }
 
-        err = tc_del_filter(&data->id);
+        err = tc_del_flower_filter(&data->id);
         if (!err) {
             del_ufid_tc_mapping_unlocked(&data->ufid);
         }
@@ -825,7 +888,11 @@ parse_tc_flower_to_actions__(struct tc_flower *flower, struct ofpbuf *buf,
             ct_offset = nl_msg_start_nested(buf, OVS_ACTION_ATTR_CT);
 
             if (action->ct.commit) {
-                nl_msg_put_flag(buf, OVS_CT_ATTR_COMMIT);
+                if (action->ct.force) {
+                    nl_msg_put_flag(buf, OVS_CT_ATTR_FORCE_COMMIT);
+                } else {
+                    nl_msg_put_flag(buf, OVS_CT_ATTR_COMMIT);
+                }
             }
 
             if (action->ct.zone) {
@@ -843,13 +910,13 @@ parse_tc_flower_to_actions__(struct tc_flower *flower, struct ofpbuf *buf,
                 struct {
                     ovs_u128 key;
                     ovs_u128 mask;
-                } *ct_label;
+                } ct_label = {
+                    .key = action->ct.label,
+                    .mask = action->ct.label_mask,
+                };
 
-                ct_label = nl_msg_put_unspec_uninit(buf,
-                                                    OVS_CT_ATTR_LABELS,
-                                                    sizeof *ct_label);
-                ct_label->key = action->ct.label;
-                ct_label->mask = action->ct.label_mask;
+                nl_msg_put_unspec(buf, OVS_CT_ATTR_LABELS,
+                                  &ct_label, sizeof ct_label);
             }
 
             if (action->ct.nat_type) {
@@ -1193,6 +1260,7 @@ netdev_tc_flow_dump_next(struct netdev_flow_dump *dump,
                         get_tc_qdisc_hook(netdev));
 
     while (nl_dump_next(dump->nl_dump, &nl_flow, rbuffer)) {
+        struct dpif_flow_stats adjust_stats;
         struct tc_flower flower;
 
         if (parse_netlink_to_tc_flower(&nl_flow, &id, &flower, dump->terse)) {
@@ -1208,6 +1276,10 @@ netdev_tc_flow_dump_next(struct netdev_flow_dump *dump,
             *ufid = *((ovs_u128 *) flower.act_cookie.data);
         } else if (!find_ufid(netdev, &id, ufid)) {
             continue;
+        }
+
+        if (!get_ufid_adjust_stats(ufid, &adjust_stats)) {
+            netdev_tc_adjust_stats(stats, &adjust_stats);
         }
 
         match->wc.masks.in_port.odp_port = u32_to_odp(UINT32_MAX);
@@ -1309,7 +1381,12 @@ parse_put_flow_ct_action(struct tc_flower *flower,
         NL_ATTR_FOR_EACH_UNSAFE (ct_attr, ct_left, ct, ct_len) {
             switch (nl_attr_type(ct_attr)) {
                 case OVS_CT_ATTR_COMMIT: {
-                        action->ct.commit = true;
+                    action->ct.commit = true;
+                }
+                break;
+                case OVS_CT_ATTR_FORCE_COMMIT: {
+                    action->ct.commit = true;
+                    action->ct.force = true;
                 }
                 break;
                 case OVS_CT_ATTR_ZONE: {
@@ -1339,15 +1416,20 @@ parse_put_flow_ct_action(struct tc_flower *flower,
                 break;
                 case OVS_CT_ATTR_LABELS: {
                     const struct {
-                        ovs_u128 key;
-                        ovs_u128 mask;
+                        ovs_32aligned_u128 key;
+                        ovs_32aligned_u128 mask;
                     } *ct_label;
 
                     ct_label = nl_attr_get_unspec(ct_attr, sizeof *ct_label);
-                    action->ct.label = ct_label->key;
-                    action->ct.label_mask = ct_label->mask;
+                    action->ct.label = get_32aligned_u128(&ct_label->key);
+                    action->ct.label_mask =
+                        get_32aligned_u128(&ct_label->mask);
                 }
                 break;
+                /* The following option we do not support in tc-ct, and should
+                 * not be ignored for proper operation. */
+                case OVS_CT_ATTR_HELPER:
+                    return EOPNOTSUPP;
             }
         }
 
@@ -2058,6 +2140,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     struct flow *mask = &match->wc.masks;
     const struct flow_tnl *tnl = &match->flow.tunnel;
     struct flow_tnl *tnl_mask = &mask->tunnel;
+    struct dpif_flow_stats adjust_stats;
     bool recirc_act = false;
     uint32_t block_id = 0;
     struct tcf_id id;
@@ -2347,14 +2430,16 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     }
 
     if ((chain || recirc_act) && !info->recirc_id_shared_with_tc) {
-        VLOG_ERR_RL(&error_rl, "flow_put: recirc_id sharing not supported");
+        VLOG_DBG_RL(&rl, "flow_put: recirc_id sharing not supported");
         return EOPNOTSUPP;
     }
 
+    memset(&adjust_stats, 0, sizeof adjust_stats);
     if (get_ufid_tc_mapping(ufid, &id) == 0) {
         VLOG_DBG_RL(&rl, "updating old handle: %d prio: %d",
                     id.handle, id.prio);
-        info->tc_modify_flow_deleted = !del_filter_and_ufid_mapping(&id, ufid);
+        info->tc_modify_flow_deleted = !del_filter_and_ufid_mapping(
+            &id, ufid, &adjust_stats);
     }
 
     prio = get_prio_for_tc_flower(&flower);
@@ -2372,8 +2457,9 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     if (!err) {
         if (stats) {
             memset(stats, 0, sizeof *stats);
+            netdev_tc_adjust_stats(stats, &adjust_stats);
         }
-        add_ufid_tc_mapping(netdev, ufid, &id);
+        add_ufid_tc_mapping(netdev, ufid, &id, &adjust_stats);
     }
 
     return err;
@@ -2414,6 +2500,13 @@ netdev_tc_flow_get(struct netdev *netdev,
     parse_tc_flower_to_match(netdev, &flower, match, actions,
                              stats, attrs, buf, false);
 
+    if (stats) {
+        struct dpif_flow_stats adjust_stats;
+
+        if (!get_ufid_adjust_stats(ufid, &adjust_stats)) {
+            netdev_tc_adjust_stats(stats, &adjust_stats);
+        }
+    }
     match->wc.masks.in_port.odp_port = u32_to_odp(UINT32_MAX);
     match->flow.in_port.odp_port = in_port;
     match_set_recirc_id(match, id.chain);
@@ -2426,7 +2519,6 @@ netdev_tc_flow_del(struct netdev *netdev OVS_UNUSED,
                    const ovs_u128 *ufid,
                    struct dpif_flow_stats *stats)
 {
-    struct tc_flower flower;
     struct tcf_id id;
     int error;
 
@@ -2435,16 +2527,7 @@ netdev_tc_flow_del(struct netdev *netdev OVS_UNUSED,
         return error;
     }
 
-    if (stats) {
-        memset(stats, 0, sizeof *stats);
-        if (!tc_get_flower(&id, &flower)) {
-            parse_tc_flower_to_stats(&flower, stats);
-        }
-    }
-
-    error = del_filter_and_ufid_mapping(&id, ufid);
-
-    return error;
+    return del_filter_and_ufid_mapping(&id, ufid, stats);
 }
 
 static int
@@ -2498,13 +2581,13 @@ probe_multi_mask_per_prio(int ifindex)
 
     id2 = tc_make_tcf_id(ifindex, block_id, prio, TC_INGRESS);
     error = tc_replace_flower(&id2, &flower);
-    tc_del_filter(&id1);
+    tc_del_flower_filter(&id1);
 
     if (error) {
         goto out;
     }
 
-    tc_del_filter(&id2);
+    tc_del_flower_filter(&id2);
 
     multi_mask_per_prio = true;
     VLOG_INFO("probe tc: multiple masks on single tc prio is supported.");
@@ -2556,7 +2639,7 @@ probe_ct_state_support(int ifindex)
         goto out_del;
     }
 
-    tc_del_filter(&id);
+    tc_del_flower_filter(&id);
     ct_state_support = OVS_CS_F_NEW |
                        OVS_CS_F_ESTABLISHED |
                        OVS_CS_F_TRACKED |
@@ -2570,7 +2653,7 @@ probe_ct_state_support(int ifindex)
         goto out_del;
     }
 
-    tc_del_filter(&id);
+    tc_del_flower_filter(&id);
 
     /* Test for ct_state INVALID support */
     memset(&flower, 0, sizeof flower);
@@ -2581,7 +2664,7 @@ probe_ct_state_support(int ifindex)
         goto out;
     }
 
-    tc_del_filter(&id);
+    tc_del_flower_filter(&id);
     ct_state_support |= OVS_CS_F_INVALID;
 
     /* Test for ct_state REPLY support */
@@ -2597,7 +2680,7 @@ probe_ct_state_support(int ifindex)
     ct_state_support |= OVS_CS_F_REPLY_DIR;
 
 out_del:
-    tc_del_filter(&id);
+    tc_del_flower_filter(&id);
 out:
     tc_add_del_qdisc(ifindex, false, 0, TC_INGRESS);
     VLOG_INFO("probe tc: supported ovs ct_state bits: 0x%x", ct_state_support);
@@ -2750,7 +2833,7 @@ netdev_tc_init_flow_api(struct netdev *netdev)
 
     /* fallback here if delete chains fail */
     if (!get_chain_supported) {
-        tc_del_filter(&id);
+        tc_del_flower_filter(&id);
     }
 
     /* make sure there is no ingress/egress qdisc */
