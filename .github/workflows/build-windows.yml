@@ -101,7 +101,7 @@ jobs:
           cp ./datapath-windows/x64/Win10${{ matrix.target }}/package/* /C/openvswitch/driver
           cp ./datapath-windows/x64/Win10${{ matrix.target }}/package.cer /C/openvswitch/driver
           cp ./datapath-windows/misc/* /C/openvswitch/driver
-      
+          cp ./datapath-windows/ovsext/x64/Win10${{ matrix.target }}/DBO_OVSE.pdb /C/openvswitch/driver
       - name: upload build artifacts
         uses: actions/upload-artifact@v2
         with:
