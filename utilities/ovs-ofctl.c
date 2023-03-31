@@ -173,7 +173,7 @@ main(int argc, char *argv[])
     ctx.argc = argc - optind;
     ctx.argv = argv + optind;
 
-    daemon_become_new_user(false);
+    daemon_become_new_user(false, false);
     if (read_only) {
         ovs_cmdl_run_command_read_only(&ctx, get_all_commands());
     } else {
@@ -2127,7 +2127,7 @@ monitor_vconn(struct vconn *vconn, bool reply_to_echo_requests,
     int error;
 
     daemon_save_fd(STDERR_FILENO);
-    daemonize_start(false);
+    daemonize_start(false, false);
     error = unixctl_server_create(unixctl_path, &server);
     if (error) {
         ovs_fatal(error, "failed to create unixctl server");
@@ -3087,6 +3087,10 @@ ofctl_ct_flush(struct ovs_cmdl_context *ctx)
             ovs_fatal(0, "Failed to parse ct-tuple: %s", ds_cstr(&ds));
         }
         args--;
+    }
+
+    if (args > 0) {
+        ovs_fatal(0, "Invalid arguments");
     }
 
     open_vconn(ctx->argv[1], &vconn);

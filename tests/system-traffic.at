@@ -1164,6 +1164,130 @@ OVS_WAIT_UNTIL([cat p0.pcap | grep -E "IP6 fc00:100::100 > fc00:100::1: GREv0, .
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
+AT_SETUP([datapath - ping over srv6 tunnel])
+OVS_CHECK_TUNNEL_TSO()
+OVS_CHECK_SRV6()
+
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns0)
+ADD_NAMESPACES(at_ns1)
+NS_EXEC([at_ns0], [sysctl -w net.ipv6.conf.default.seg6_enabled=1])
+NS_EXEC([at_ns0], [sysctl -w net.ipv4.conf.default.forwarding=1])
+NS_EXEC([at_ns0], [sysctl -w net.ipv6.conf.default.forwarding=1])
+NS_EXEC([at_ns0], [sysctl -w net.ipv6.conf.all.seg6_enabled=1])
+NS_EXEC([at_ns0], [sysctl -w net.ipv4.conf.all.forwarding=1])
+NS_EXEC([at_ns0], [sysctl -w net.ipv6.conf.all.forwarding=1])
+
+dnl Set up underlay link from host into the namespace 'at_ns0'
+dnl using veth pair. Kernel side tunnel endpoint (SID) is
+dnl 'fc00:a::1/128', so add it to the route.
+dnl Only IPPROTO_IPIP(4) and IPPROTO_ICMPV6(58) are needed in underlay link.
+ADD_BR([br-underlay])
+ADD_VETH(p0, at_ns0, br-underlay, "fc00::1/64", [], [], "nodad")
+AT_CHECK([ovs-ofctl add-flow br-underlay "priority=1,actions=drop"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "priority=100,ipv6,nw_proto=4,actions=normal"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "priority=100,ipv6,nw_proto=58,actions=normal"])
+AT_CHECK([ip addr add dev br-underlay "fc00::100/64" nodad])
+AT_CHECK([ip link set dev br-underlay up])
+AT_CHECK([ip route add fc00:a::1/128 dev br-underlay via fc00::1])
+
+dnl Set up tunnel endpoints on OVS outside the namespace.
+ADD_OVS_TUNNEL6([srv6], [br0], [at_srv6], [fc00:a::1], [10.100.100.100/24])
+AT_CHECK([ovs-vsctl set bridge br0 other_config:hwaddr=aa:55:aa:55:00:00])
+AT_CHECK([ip route add 10.1.1.0/24 dev br0 via 10.100.100.1])
+AT_CHECK([arp -s 10.100.100.1 aa:55:aa:55:00:01])
+AT_CHECK([ovs-ofctl add-flow br0 in_port=LOCAL,actions=output:at_srv6])
+AT_CHECK([ovs-ofctl add-flow br0 in_port=at_srv6,actions=mod_dl_dst:aa:55:aa:55:00:00,output:LOCAL])
+
+dnl Set up tunnel endpoints on the namespace 'at_ns0',
+dnl and overlay port on the namespace 'at_ns1'
+ADD_VETH_NS([at_ns0], [veth0], [10.1.1.2/24], [at_ns1], [veth1], [10.1.1.1/24])
+NS_CHECK_EXEC([at_ns0], [ip sr tunsrc set fc00:a::1])
+NS_CHECK_EXEC([at_ns0], [ip route add 10.100.100.0/24 encap seg6 mode encap segs fc00::100 dev p0])
+NS_CHECK_EXEC([at_ns0], [ip -6 route add fc00:a::1 encap seg6local action End.DX4 nh4 0.0.0.0 dev veth0])
+NS_CHECK_EXEC([at_ns1], [ip route add 10.100.100.0/24 via 10.1.1.2 dev veth1])
+
+dnl Linux seems to take a little time to get its IPv6 stack in order. Without
+dnl waiting, we get occasional failures due to the following error:
+dnl "connect: Cannot assign requested address"
+OVS_WAIT_UNTIL([ip netns exec at_ns0 ping6 -c 1 fc00::100])
+
+dnl First, check the underlay.
+NS_CHECK_EXEC([at_ns0], [ping6 -q -c 3 -i 0.3 -w 2 fc00::100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+dnl Okay, now check the overlay.
+NS_CHECK_EXEC([at_ns1], [ping -q -c 3 -i 0.3 -w 2 10.100.100.100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([datapath - ping6 over srv6 tunnel])
+OVS_CHECK_TUNNEL_TSO()
+OVS_CHECK_SRV6()
+
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns0)
+ADD_NAMESPACES(at_ns1)
+NS_EXEC([at_ns0], [sysctl -w net.ipv6.conf.default.seg6_enabled=1])
+NS_EXEC([at_ns0], [sysctl -w net.ipv6.conf.default.forwarding=1])
+NS_EXEC([at_ns0], [sysctl -w net.ipv6.conf.all.seg6_enabled=1])
+NS_EXEC([at_ns0], [sysctl -w net.ipv6.conf.all.forwarding=1])
+
+dnl Set up underlay link from host into the namespace 'at_ns0'
+dnl using veth pair. Kernel side tunnel endpoint (SID) is
+dnl 'fc00:a::1/128', so add it to the route.
+dnl Only IPPROTO_IPV6(41) and IPPROTO_ICMPV6(58) are needed in underlay link.
+ADD_BR([br-underlay])
+ADD_VETH(p0, at_ns0, br-underlay, "fc00::1/64", [], [], "nodad")
+AT_CHECK([ovs-ofctl add-flow br-underlay "priority=1,actions=drop"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "priority=100,ipv6,nw_proto=41,actions=normal"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "priority=100,ipv6,nw_proto=58,actions=normal"])
+AT_CHECK([ip addr add dev br-underlay "fc00::100/64" nodad])
+AT_CHECK([ip link set dev br-underlay up])
+AT_CHECK([ip -6 route add fc00:a::1/128 dev br-underlay via fc00::1])
+
+dnl Set up tunnel endpoints on OVS outside the namespace.
+ADD_OVS_TUNNEL6([srv6], [br0], [at_srv6], [fc00:a::1], [fc00:100::100/64])
+AT_CHECK([ovs-vsctl set bridge br0 other_config:hwaddr=aa:55:aa:55:00:00])
+AT_CHECK([ip addr add dev br0 fc00:100::100/64])
+AT_CHECK([ip -6 route add fc00:1::1/128 dev br0 via fc00:100::1])
+AT_CHECK([ip -6 neigh add fc00:100::1 lladdr aa:55:aa:55:00:01 dev br0])
+AT_CHECK([ovs-ofctl add-flow br0 in_port=LOCAL,actions=output:at_srv6])
+AT_CHECK([ovs-ofctl add-flow br0 in_port=at_srv6,actions=mod_dl_dst:aa:55:aa:55:00:00,output:LOCAL])
+
+dnl Set up tunnel endpoints on the namespace 'at_ns0',
+dnl and overlay port on the namespace 'at_ns1'
+ADD_VETH_NS([at_ns0], [veth0], [fc00:1::2/64], [at_ns1], [veth1], [fc00:1::1/64])
+NS_CHECK_EXEC([at_ns0], [ip sr tunsrc set fc00:a::1])
+NS_CHECK_EXEC([at_ns0], [ip -6 route add fc00:100::0/64 encap seg6 mode encap segs fc00::100 dev p0])
+NS_CHECK_EXEC([at_ns0], [ip -6 route add fc00:a::1 encap seg6local action End.DX6 nh6 :: dev veth0])
+NS_CHECK_EXEC([at_ns1], [ip -6 route add fc00:100::/64 via fc00:1::2 dev veth1])
+
+dnl Linux seems to take a little time to get its IPv6 stack in order. Without
+dnl waiting, we get occasional failures due to the following error:
+dnl "connect: Cannot assign requested address"
+OVS_WAIT_UNTIL([ip netns exec at_ns0 ping6 -c 1 fc00::100])
+OVS_WAIT_UNTIL([ip netns exec at_ns1 ping6 -c 1 fc00:100::100])
+
+dnl First, check the underlay.
+NS_CHECK_EXEC([at_ns0], [ping6 -q -c 3 -i 0.3 -w 2 fc00::100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+dnl Okay, now check the overlay.
+NS_CHECK_EXEC([at_ns1], [ping6 -q -c 3 -i 0.3 -w 2 fc00:100::100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
 AT_SETUP([datapath - clone action])
 OVS_TRAFFIC_VSWITCHD_START()
 
@@ -2360,8 +2484,10 @@ priority=100,in_port=2,icmp,action=ct(zone=5,commit),1
 ])
 
 AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
+dp=$(ovs-appctl dpctl/dump-dps)
 
 m4_foreach([FLUSH_CMD], [[ovs-appctl dpctl/flush-conntrack],
+                         [ovs-appctl dpctl/flush-conntrack $dp],
                          [ovs-ofctl ct-flush br0]], [
 AS_BOX([Testing with FLUSH_CMD])
 
@@ -2504,7 +2630,47 @@ udp,orig=(src=10.1.1.2,dst=10.1.1.1,sport=2,dport=1),reply=(src=10.1.1.1,dst=10.
 AT_CHECK([FLUSH_CMD zone=5 '' 'ct_nw_src=10.1.1.1'])
 
 AT_CHECK([ovs-appctl dpctl/dump-conntrack | grep "10\.1\.1\.1"], [1])
+
+dnl Test UDP from port 1 and 2, flush without arguments
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000200080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=2 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101020a0101010002000100080000 actions=resubmit(,0)"])
+
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | grep "10\.1\.1\.1" | sort], [0], [dnl
+udp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=1,dport=2),reply=(src=10.1.1.2,dst=10.1.1.1,sport=2,dport=1)
+udp,orig=(src=10.1.1.2,dst=10.1.1.1,sport=2,dport=1),reply=(src=10.1.1.1,dst=10.1.1.2,sport=1,dport=2),zone=5
 ])
+
+AT_CHECK([FLUSH_CMD])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | grep "10\.1\.1\.1"], [1])
+])
+
+dnl Test flush with invalid arguments
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack zone=invalid 'ct_nw_src=10.1.1.1' 'ct_nw_dst=10.1.1.1'], [2], [ignore], [stderr])
+AT_CHECK([grep -q "failed to parse zone" stderr])
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack zone=1 'ct_nw_src=10.1.1.1,invalid=invalid' 'ct_nw_dst=10.1.1.1'], [2], [ignore], [stderr])
+AT_CHECK([grep -q "invalid conntrack tuple field: invalid" stderr])
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack zone=1 'ct_nw_src=invalid' 'ct_nw_dst=10.1.1.1'], [2], [ignore], [stderr])
+AT_CHECK([grep -q "failed to parse field ct_nw_src" stderr])
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack zone=1 'ct_nw_src=10.1.1.1' 'ct_nw_dst=10.1.1.1' invalid], [2], [ignore], [stderr])
+AT_CHECK([grep -q "invalid arguments" stderr])
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack $dp zone=1 'ct_nw_src=10.1.1.1' 'ct_nw_dst=10.1.1.1' invalid], [2], [ignore], [stderr])
+AT_CHECK([grep -q "command takes at most 4 arguments" stderr])
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack $dp 'ct_nw_src=10.1.1.1' 'ct_nw_dst=10.1.1.1' invalid], [2], [ignore], [stderr])
+AT_CHECK([grep -q "invalid arguments" stderr])
+
+AT_CHECK([ovs-ofctl ct-flush br0 zone=1 'ct_nw_src=10.1.1.1' 'ct_nw_dst=10.1.1.1' invalid], [1], [ignore], [stderr])
+AT_CHECK([grep -q "command takes at most 4 arguments" stderr])
+
+AT_CHECK([ovs-ofctl ct-flush br0 'ct_nw_src=10.1.1.1' 'ct_nw_dst=10.1.1.1' invalid], [1], [ignore], [stderr])
+AT_CHECK([grep -q "Invalid arguments" stderr])
 
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
@@ -3581,7 +3747,7 @@ table=0,in_port=ovs-p1,ct_state=+trk+rel+rpl,icmp,actions=ovs-p0
 AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
 
 rm p0.pcap
-OVS_DAEMONIZE([tcpdump -l -U -i ovs-p0 -w p0.pcap 2> tcpdump0_err], [tcpdump0.pid])
+NETNS_DAEMONIZE([at_ns0], [tcpdump -l -U -i p0 -w p0.pcap 2> tcpdump0_err], [tcpdump0.pid])
 OVS_WAIT_UNTIL([grep "listening" tcpdump0_err])
 
 dnl Send UDP packet from 10.1.1.1:1234 to 10.1.1.240:80
@@ -6612,7 +6778,7 @@ table=0,in_port=ovs-p1,ct_state=+trk+rel+rpl,icmp6,actions=ovs-p0
 AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
 
 rm p0.pcap
-OVS_DAEMONIZE([tcpdump -l -U -i ovs-p0 -w p0.pcap 2> tcpdump0_err], [tcpdump0.pid])
+NETNS_DAEMONIZE([at_ns0], [tcpdump -l -U -i p0 -w p0.pcap 2> tcpdump0_err], [tcpdump0.pid])
 OVS_WAIT_UNTIL([grep "listening" tcpdump0_err])
 
 dnl Send UDP packet from [[fc00::1]]:1234 to [[fc00::240]]:80
@@ -7303,7 +7469,7 @@ table=2,in_port=ovs-server,ip,ct_state=+trk+rpl,actions=output:ovs-client
 AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
 
 rm server.pcap
-OVS_DAEMONIZE([tcpdump -l -U -i ovs-server -w server.pcap 2>tcpdump0_err], [tcpdump0.pid])
+NETNS_DAEMONIZE([server], [tcpdump -l -U -i server -w server.pcap 2>tcpdump0_err], [tcpdump0.pid])
 OVS_WAIT_UNTIL([grep "listening" tcpdump0_err])
 
 dnl Send UDP client->server
@@ -7345,7 +7511,7 @@ dnl Check the ICMP error in reply direction
 AT_CHECK([ovs-appctl dpctl/flush-conntrack zone=42])
 
 rm client.pcap
-OVS_DAEMONIZE([tcpdump -l -U -i ovs-client -w client.pcap 2>tcpdump1_err], [tcpdump1.pid])
+NETNS_DAEMONIZE([client], [tcpdump -l -U -i client -w client.pcap 2>tcpdump1_err], [tcpdump1.pid])
 OVS_WAIT_UNTIL([grep "listening" tcpdump1_err])
 
 dnl Send UDP client->server

@@ -706,6 +706,10 @@ char *ip_parse_cidr_len(const char *s, int *n, ovs_be32 *ip,
 #define IPPROTO_IGMP 2
 #endif
 
+#ifndef IPPROTO_IPIP
+#define IPPROTO_IPIP 4
+#endif
+
 #ifndef IPPROTO_UDPLITE
 #define IPPROTO_UDPLITE 136
 #endif
@@ -987,6 +991,15 @@ struct ovs_16aligned_ip6_frag {
     ovs_be16 ip6f_offlg;
     ovs_16aligned_be32 ip6f_ident;
 };
+
+#define IP6_RT_HDR_LEN 4
+struct ip6_rt_hdr {
+    uint8_t nexthdr;
+    uint8_t hdrlen;
+    uint8_t type;
+    uint8_t segments_left;
+};
+BUILD_ASSERT_DECL(IP6_RT_HDR_LEN == sizeof(struct ip6_rt_hdr));
 
 #define ICMP6_HEADER_LEN 4
 struct icmp6_header {
@@ -1513,6 +1526,17 @@ BUILD_ASSERT_DECL(sizeof(struct vxlanhdr) == 8);
 
 #define VXLAN_F_GPE  0x4000
 #define VXLAN_HF_GPE 0x04000000
+
+/* SRv6 protocol header. */
+#define IPV6_SRCRT_TYPE_4 4
+#define SRV6_BASE_HDR_LEN 8
+struct srv6_base_hdr {
+    struct ip6_rt_hdr rt_hdr;
+    uint8_t last_entry;
+    uint8_t flags;
+    ovs_be16 tag;
+};
+BUILD_ASSERT_DECL(sizeof(struct srv6_base_hdr) == SRV6_BASE_HDR_LEN);
 
 /* Input values for PACKET_TYPE macros have to be in host byte order.
  * The _BE postfix indicates result is in network byte order. Otherwise result
