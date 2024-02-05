@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "cooperative-multitasking.h"
 #include "file.h"
 #include "openvswitch/json.h"
 #include "jsonrpc.h"
@@ -181,6 +182,8 @@ ovsdb_trigger_run(struct ovsdb *db, long long int now)
     bool disconnect_all = false;
 
     LIST_FOR_EACH_SAFE (t, node, &db->triggers) {
+        cooperative_multitasking_yield();
+
         if (run_triggers
             || now - t->created >= t->timeout_msec
             || t->progress || t->txn_forward) {
@@ -275,6 +278,14 @@ ovsdb_trigger_try(struct ovsdb_trigger *t, long long int now)
                         "\"convert\" of database %s "
                         "(only the root role may convert databases)",
                         t->id, t->role, t->db->schema->name));
+                return false;
+            }
+
+            if (t->read_only) {
+                trigger_convert_error(
+                    t, ovsdb_error("not allowed", "conversion is not allowed "
+                                                  "for read-only database %s",
+                                                  t->db->schema->name));
                 return false;
             }
 

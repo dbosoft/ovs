@@ -204,6 +204,7 @@ class ODPFlow(Flow):
         """Generate the arguments for the action KVDecoders."""
         _decoders = {
             "drop": decode_flag,
+            "meter": decode_int,
             "lb_output": decode_int,
             "trunc": decode_int,
             "recirc": decode_int,
@@ -334,7 +335,30 @@ class ODPFlow(Flow):
                 )
             ),
             **ODPFlow._tnl_action_decoder_args(),
+            "hash": nested_kv_decoder(
+                KVDecoders(
+                    {
+                        "l4": decode_int,
+                        "sym_l4": decode_int,
+                    }
+                )
+            ),
         }
+
+        _decoders["sample"] = nested_kv_decoder(
+            KVDecoders(
+                {
+                    "sample": (lambda x: float(x.strip("%"))),
+                    "actions": nested_kv_decoder(
+                        KVDecoders(
+                            decoders=_decoders,
+                            default_free=decode_free_output,
+                        ),
+                        is_list=True,
+                    ),
+                }
+            )
+        )
 
         _decoders["clone"] = nested_kv_decoder(
             KVDecoders(decoders=_decoders, default_free=decode_free_output),
@@ -343,20 +367,6 @@ class ODPFlow(Flow):
 
         return {
             **_decoders,
-            "sample": nested_kv_decoder(
-                KVDecoders(
-                    {
-                        "sample": (lambda x: float(x.strip("%"))),
-                        "actions": nested_kv_decoder(
-                            KVDecoders(
-                                decoders=_decoders,
-                                default_free=decode_free_output,
-                            ),
-                            is_list=True,
-                        ),
-                    }
-                )
-            ),
             "check_pkt_len": nested_kv_decoder(
                 KVDecoders(
                     {
@@ -365,13 +375,15 @@ class ODPFlow(Flow):
                             KVDecoders(
                                 decoders=_decoders,
                                 default_free=decode_free_output,
-                            )
+                            ),
+                            is_list=True,
                         ),
                         "le": nested_kv_decoder(
                             KVDecoders(
                                 decoders=_decoders,
                                 default_free=decode_free_output,
-                            )
+                            ),
+                            is_list=True,
                         ),
                     }
                 )

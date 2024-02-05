@@ -23,6 +23,7 @@
 #include "openvswitch/ofp-ct.h"
 #include "openvswitch/ofp-parse.h"
 #include "openvswitch/vlog.h"
+#include "sset.h"
 
 VLOG_DEFINE_THIS_MODULE(ct_dpif);
 
@@ -31,6 +32,10 @@ struct flags {
     uint32_t flag;
     const char *name;
 };
+
+/* Protection for CT zone limit per datapath. */
+static struct sset ct_limit_protection =
+        SSET_INITIALIZER(&ct_limit_protection);
 
 static void ct_dpif_format_counters(struct ds *,
                                     const struct ct_dpif_counters *);
@@ -99,6 +104,65 @@ ct_dpif_dump_done(struct ct_dpif_dump_state *dump)
 
     return (dpif->dpif_class->ct_dump_done
             ? dpif->dpif_class->ct_dump_done(dpif, dump)
+            : EOPNOTSUPP);
+}
+
+/* Start dumping the expectations from the connection tracker.
+ *
+ * 'dump' must be the address of a pointer to a struct ct_dpif_dump_state,
+ * which should be passed (unaltered) to ct_exp_dpif_dump_{next,done}().
+ *
+ * If 'zone' is not NULL, it should point to an integer identifing a
+ * conntrack zone to which the dump will be limited.  If it is NULL,
+ * conntrack entries from all zones will be dumped.
+ *
+ * If there has been a problem the function returns a non-zero value
+ * that represents the error.  Otherwise it returns zero. */
+int
+ct_exp_dpif_dump_start(struct dpif *dpif, struct ct_dpif_dump_state **dump,
+                       const uint16_t *zone)
+{
+    int err;
+
+    err = (dpif->dpif_class->ct_exp_dump_start
+           ? dpif->dpif_class->ct_exp_dump_start(dpif, dump, zone)
+           : EOPNOTSUPP);
+
+    if (!err) {
+        (*dump)->dpif = dpif;
+    }
+
+    return err;
+}
+
+/* Dump one expectation and put it in 'entry'.
+ *
+ * 'dump' should have been initialized by ct_exp_dpif_dump_start().
+ *
+ * The function returns 0, if an entry has been dumped succesfully.
+ * Otherwise it returns a non-zero value which can be:
+ * - EOF: meaning that there are no more entries to dump.
+ * - an error value.
+ * In both cases, the user should call ct_exp_dpif_dump_done(). */
+int
+ct_exp_dpif_dump_next(struct ct_dpif_dump_state *dump,
+                      struct ct_dpif_exp *entry)
+{
+    struct dpif *dpif = dump->dpif;
+
+    return (dpif->dpif_class->ct_exp_dump_next
+            ? dpif->dpif_class->ct_exp_dump_next(dpif, dump, entry)
+            : EOPNOTSUPP);
+}
+
+/* Free resources used by 'dump', if any. */
+int
+ct_exp_dpif_dump_done(struct ct_dpif_dump_state *dump)
+{
+    struct dpif *dpif = dump->dpif;
+
+    return (dpif->dpif_class->ct_exp_dump_done
+            ? dpif->dpif_class->ct_exp_dump_done(dpif, dump)
             : EOPNOTSUPP);
 }
 
@@ -210,6 +274,15 @@ ct_dpif_entry_cmp(const struct ct_dpif_entry *entry,
         return false;
     }
 
+    if ((match->mark & match->mark_mask) != (entry->mark & match->mark_mask)) {
+        return false;
+    }
+
+    if (!ovs_u128_equals(ovs_u128_and(match->labels, match->labels_mask),
+                         ovs_u128_and(entry->labels, match->labels_mask))) {
+        return false;
+    }
+
     return true;
 }
 
@@ -236,8 +309,7 @@ ct_dpif_flush_tuple(struct dpif *dpif, const uint16_t *zone,
 
     /* If we have full five tuple in original and empty reply tuple just
      * do the flush over original tuple directly. */
-    if (ofp_ct_tuple_is_five_tuple(&match->tuple_orig, match->ip_proto) &&
-        ofp_ct_tuple_is_zero(&match->tuple_reply, match->ip_proto)) {
+    if (ofp_ct_match_is_five_tuple(match)) {
         struct ct_dpif_tuple tuple;
 
         ct_dpif_tuple_from_ofp_ct_tuple(&match->tuple_orig, &tuple,
@@ -339,23 +411,19 @@ ct_dpif_get_tcp_seq_chk(struct dpif *dpif, bool *enabled)
 }
 
 int
-ct_dpif_set_limits(struct dpif *dpif, const uint32_t *default_limit,
-                   const struct ovs_list *zone_limits)
+ct_dpif_set_limits(struct dpif *dpif, const struct ovs_list *zone_limits)
 {
     return (dpif->dpif_class->ct_set_limits
-            ? dpif->dpif_class->ct_set_limits(dpif, default_limit,
-                                              zone_limits)
+            ? dpif->dpif_class->ct_set_limits(dpif, zone_limits)
             : EOPNOTSUPP);
 }
 
 int
-ct_dpif_get_limits(struct dpif *dpif, uint32_t *default_limit,
-                   const struct ovs_list *zone_limits_in,
+ct_dpif_get_limits(struct dpif *dpif, const struct ovs_list *zone_limits_in,
                    struct ovs_list *zone_limits_out)
 {
     return (dpif->dpif_class->ct_get_limits
-            ? dpif->dpif_class->ct_get_limits(dpif, default_limit,
-                                              zone_limits_in,
+            ? dpif->dpif_class->ct_get_limits(dpif, zone_limits_in,
                                               zone_limits_out)
             : EOPNOTSUPP);
 }
@@ -460,6 +528,34 @@ ct_dpif_status_flags(uint32_t flags)
     default:
         return NULL;
     }
+}
+
+void
+ct_dpif_format_exp_entry(const struct ct_dpif_exp *entry, struct ds *ds)
+{
+    ct_dpif_format_ipproto(ds, entry->tuple_orig.ip_proto);
+
+    ds_put_cstr(ds, ",orig=(");
+    ct_dpif_format_tuple(ds, &entry->tuple_orig);
+    ds_put_cstr(ds, ")");
+
+    if (entry->zone) {
+        ds_put_format(ds, ",zone=%"PRIu16, entry->zone);
+    }
+    if (entry->mark) {
+        ds_put_format(ds, ",mark=%"PRIu32, entry->mark);
+    }
+    if (!ovs_u128_is_zero(entry->labels)) {
+        ovs_be128 value;
+
+        ds_put_cstr(ds, ",labels=");
+        value = hton128(entry->labels);
+        ds_put_hex(ds, &value, sizeof value);
+    }
+
+    ds_put_cstr(ds, ",parent=(");
+    ct_dpif_format_tuple(ds, &entry->tuple_parent);
+    ds_put_cstr(ds, ")");
 }
 
 void
@@ -767,7 +863,7 @@ ct_dpif_format_tcp_stat(struct ds * ds, int tcp_state, int conn_per_state)
 
 
 void
-ct_dpif_push_zone_limit(struct ovs_list *zone_limits, uint16_t zone,
+ct_dpif_push_zone_limit(struct ovs_list *zone_limits, int32_t zone,
                         uint32_t limit, uint32_t count)
 {
     struct ct_dpif_zone_limit *zone_limit = xmalloc(sizeof *zone_limit);
@@ -841,15 +937,21 @@ error:
 }
 
 void
-ct_dpif_format_zone_limits(uint32_t default_limit,
-                           const struct ovs_list *zone_limits, struct ds *ds)
+ct_dpif_format_zone_limits(const struct ovs_list *zone_limits, struct ds *ds)
 {
     struct ct_dpif_zone_limit *zone_limit;
 
-    ds_put_format(ds, "default limit=%"PRIu32, default_limit);
+    LIST_FOR_EACH (zone_limit, node, zone_limits) {
+        if (zone_limit->zone == OVS_ZONE_LIMIT_DEFAULT_ZONE) {
+            ds_put_format(ds, "default limit=%"PRIu32, zone_limit->limit);
+        }
+    }
 
     LIST_FOR_EACH (zone_limit, node, zone_limits) {
-        ds_put_format(ds, "\nzone=%"PRIu16, zone_limit->zone);
+        if (zone_limit->zone == OVS_ZONE_LIMIT_DEFAULT_ZONE) {
+            continue;
+        }
+        ds_put_format(ds, "\nzone=%"PRIu16, (uint16_t) zone_limit->zone);
         ds_put_format(ds, ",limit=%"PRIu32, zone_limit->limit);
         ds_put_format(ds, ",count=%"PRIu32, zone_limit->count);
     }
@@ -974,4 +1076,24 @@ ct_dpif_get_features(struct dpif *dpif, enum ct_features *features)
     return (dpif->dpif_class->ct_get_features
             ? dpif->dpif_class->ct_get_features(dpif, features)
             : EOPNOTSUPP);
+}
+
+void
+ct_dpif_set_zone_limit_protection(struct dpif *dpif, bool protected)
+{
+    if (sset_contains(&ct_limit_protection, dpif->full_name) == protected) {
+        return;
+    }
+
+    if (protected) {
+        sset_add(&ct_limit_protection, dpif->full_name);
+    } else {
+        sset_find_and_delete(&ct_limit_protection, dpif->full_name);
+    }
+}
+
+bool
+ct_dpif_is_zone_limit_protected(struct dpif *dpif)
+{
+    return sset_contains(&ct_limit_protection, dpif->full_name);
 }

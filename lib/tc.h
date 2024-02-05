@@ -105,6 +105,30 @@ struct tc_cookie {
     size_t len;
 };
 
+struct tc_tunnel_gbp {
+    ovs_be16 id;
+    uint8_t flags;
+    bool id_present;
+};
+
+struct tc_flower_tunnel {
+    struct {
+        ovs_be32 ipv4_src;
+        ovs_be32 ipv4_dst;
+    } ipv4;
+    struct {
+        struct in6_addr ipv6_src;
+        struct in6_addr ipv6_dst;
+    } ipv6;
+    uint8_t tos;
+    uint8_t ttl;
+    ovs_be16 tp_src;
+    ovs_be16 tp_dst;
+    struct tc_tunnel_gbp gbp;
+    ovs_be64 id;
+    struct tun_metadata metadata;
+};
+
 struct tc_flower_key {
     ovs_be16 eth_type;
     uint8_t ip_proto;
@@ -161,22 +185,7 @@ struct tc_flower_key {
         uint8_t rewrite_tclass;
     } ipv6;
 
-    struct {
-        struct {
-            ovs_be32 ipv4_src;
-            ovs_be32 ipv4_dst;
-        } ipv4;
-        struct {
-            struct in6_addr ipv6_src;
-            struct in6_addr ipv6_dst;
-        } ipv6;
-        uint8_t tos;
-        uint8_t ttl;
-        ovs_be16 tp_src;
-        ovs_be16 tp_dst;
-        ovs_be64 id;
-        struct tun_metadata metadata;
-    } tunnel;
+    struct tc_flower_tunnel tunnel;
 };
 
 enum tc_action_type {
@@ -199,6 +208,27 @@ enum nat_type {
     TC_NAT_SRC,
     TC_NAT_DST,
     TC_NAT_RESTORE,
+};
+
+struct tc_action_encap {
+    bool id_present;
+    ovs_be64 id;
+    /* ovs_be16 tp_src;  Could have been here, but there is no
+     * TCA_TUNNEL_KEY_ENC_ attribute for it in the kernel. */
+    ovs_be16 tp_dst;
+    uint8_t tos;
+    uint8_t ttl;
+    uint8_t no_csum;
+    struct {
+        ovs_be32 ipv4_src;
+        ovs_be32 ipv4_dst;
+    } ipv4;
+    struct {
+        struct in6_addr ipv6_src;
+        struct in6_addr ipv6_dst;
+    } ipv6;
+    struct tun_metadata data;
+    struct tc_tunnel_gbp gbp;
 };
 
 struct tc_action {
@@ -224,24 +254,7 @@ struct tc_action {
             uint8_t bos;
         } mpls;
 
-        struct {
-            bool id_present;
-            ovs_be64 id;
-            ovs_be16 tp_src;
-            ovs_be16 tp_dst;
-            uint8_t tos;
-            uint8_t ttl;
-            uint8_t no_csum;
-            struct {
-                ovs_be32 ipv4_src;
-                ovs_be32 ipv4_dst;
-            } ipv4;
-            struct {
-                struct in6_addr ipv6_src;
-                struct in6_addr ipv6_dst;
-            } ipv6;
-            struct tun_metadata data;
-        } encap;
+        struct tc_action_encap encap;
 
         struct {
             uint16_t zone;

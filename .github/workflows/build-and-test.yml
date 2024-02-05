@@ -5,19 +5,19 @@ on: [push, pull_request]
 jobs:
   build-dpdk:
     env:
-      dependencies: gcc libnuma-dev ninja-build
+      dependencies: gcc libbpf-dev libnuma-dev libpcap-dev ninja-build pkgconf
       CC: gcc
-      DPDK_GIT: https://dpdk.org/git/dpdk-stable
-      DPDK_VER: 22.11.1
+      DPDK_GIT: https://dpdk.org/git/dpdk
+      DPDK_VER: 23.11
     name: dpdk gcc
     outputs:
       dpdk_key: ${{ steps.gen_dpdk_key.outputs.key }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
     - name: checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: update PATH
       run:  |
@@ -30,7 +30,7 @@ jobs:
       # This also allows us to use cache from any branch as long as version
       # and a way we're building DPDK stays the same.
       run:  |
-        grep -irE 'RTE_|DPDK|meson|ninja' .ci/dpdk-* > dpdk-ci-signature
+        cat .ci/dpdk-* > dpdk-ci-signature
         grep -rwE 'DPDK_GIT|DPDK_VER' .github/ >> dpdk-ci-signature
         if [ "${DPDK_VER##refs/*/}" != "${DPDK_VER}" ]; then
             git ls-remote --heads $DPDK_GIT $DPDK_VER >> dpdk-ci-signature
@@ -45,14 +45,14 @@ jobs:
 
     - name: cache
       id: dpdk_cache
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: dpdk-dir
         key:  ${{ steps.gen_dpdk_key.outputs.key }}
 
     - name: set up python
       if: steps.dpdk_cache.outputs.cache-hit != 'true'
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
 
@@ -76,19 +76,21 @@ jobs:
     env:
       dependencies: |
         automake libtool gcc bc libjemalloc2 libjemalloc-dev libssl-dev \
-        llvm-dev libnuma-dev libpcap-dev selinux-policy-dev libbpf-dev
-      ASAN:        ${{ matrix.asan }}
-      UBSAN:       ${{ matrix.ubsan }}
+        llvm-dev libnuma-dev libpcap-dev selinux-policy-dev libbpf-dev \
+        lftp libreswan
       CC:          ${{ matrix.compiler }}
       DPDK:        ${{ matrix.dpdk }}
       DPDK_SHARED: ${{ matrix.dpdk_shared }}
       LIBS:        ${{ matrix.libs }}
       M32:         ${{ matrix.m32 }}
       OPTS:        ${{ matrix.opts }}
+      SANITIZERS:  ${{ matrix.sanitizers }}
+      STD:         ${{ matrix.std }}
       TESTSUITE:   ${{ matrix.testsuite }}
+      TEST_RANGE:  ${{ matrix.test_range }}
 
     name: linux ${{ join(matrix.*, ' ') }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     strategy:
@@ -101,13 +103,15 @@ jobs:
             opts:         --disable-ssl
 
           - compiler:     gcc
+            std:          c99
+          - compiler:     clang
+            std:          c99
+
+          - compiler:     gcc
             testsuite:    test
           - compiler:     clang
+            sanitizers:   address,undefined
             testsuite:    test
-            asan:         asan
-          - compiler:     clang
-            testsuite:    test
-            ubsan:        ubsan
 
           - compiler:     gcc
             testsuite:    test
@@ -117,10 +121,10 @@ jobs:
             opts:         --enable-shared
 
           - compiler:     gcc
-            testsuite:    test
+            testsuite:    check check-dpdk
             dpdk:         dpdk
           - compiler:     clang
-            testsuite:    test
+            testsuite:    check check-dpdk
             dpdk:         dpdk
 
           - compiler:     gcc
@@ -158,9 +162,52 @@ jobs:
             m32:          m32
             opts:         --disable-ssl
 
+          - compiler:     gcc
+            testsuite:    check-ovsdb-cluster
+
+          - compiler:     gcc
+            testsuite:    check-kernel
+            test_range:   "-100"
+          - compiler:     gcc
+            testsuite:    check-kernel
+            test_range:   "100-"
+
+          - compiler:     clang
+            sanitizers:   address,undefined
+            testsuite:    check-kernel
+            test_range:   "-100"
+          - compiler:     clang
+            sanitizers:   address,undefined
+            testsuite:    check-kernel
+            test_range:   "100-"
+
+          - compiler:     gcc
+            testsuite:    check-offloads
+            test_range:   "-100"
+          - compiler:     gcc
+            testsuite:    check-offloads
+            test_range:   "100-"
+
+          - compiler:     gcc
+            dpdk:         dpdk
+            testsuite:    check-system-userspace
+
+          - compiler:     clang
+            sanitizers:   address,undefined
+            dpdk:         dpdk
+            testsuite:    check-system-userspace
+
+          - compiler:     gcc
+            dpdk:         dpdk
+            testsuite:    check-system-tso
+
+          - compiler:     gcc
+            dpdk:         dpdk
+            testsuite:    check-afxdp
+
     steps:
     - name: checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: update PATH
       run:  |
@@ -168,13 +215,13 @@ jobs:
         echo "$HOME/.local/bin" >> $GITHUB_PATH
 
     - name: set up python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
 
     - name: cache
       if:   matrix.dpdk != '' || matrix.dpdk_shared != ''
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: dpdk-dir
         key:  ${{ needs.build-dpdk.outputs.dpdk_key }}
@@ -183,10 +230,10 @@ jobs:
       run:  sudo apt update || true
     - name: install common dependencies
       run:  sudo apt install -y ${{ env.dependencies }}
-    - name: install libunbound libunwind
+    - name: install libunbound libunwind python3-unbound
       # GitHub Actions doesn't have 32-bit versions of these libraries.
       if:   matrix.m32 == ''
-      run:  sudo apt install -y libunbound-dev libunwind-dev
+      run:  sudo apt install -y libunbound-dev libunwind-dev python3-unbound
     - name: install 32-bit libraries
       if:   matrix.m32 != ''
       run:  sudo apt install -y gcc-multilib
@@ -200,21 +247,135 @@ jobs:
     - name: copy logs on failure
       if: failure() || cancelled()
       run: |
-        # upload-artifact@v2 throws exceptions if it tries to upload socket
+        # upload-artifact throws exceptions if it tries to upload socket
         # files and we could have some socket files in testsuite.dir.
-        # Also, upload-artifact@v2 doesn't work well enough with wildcards.
+        # Also, upload-artifact doesn't work well enough with wildcards.
         # So, we're just archiving everything here to avoid any issues.
         mkdir logs
         cp config.log ./logs/
         cp -r ./*/_build/sub/tests/testsuite.* ./logs/ || true
-        tar -czvf logs.tgz logs/
+        sudo cp -r ./tests/*testsuite.* ./logs/ || true
+        sudo tar -czvf logs.tgz logs/
 
     - name: upload logs on failure
       if: failure() || cancelled()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: logs-linux-${{ join(matrix.*, '-') }}
         path: logs.tgz
+
+  build-clang-analyze:
+    needs: build-dpdk
+    env:
+      dependencies: |
+        automake bc clang-tools libbpf-dev libnuma-dev libpcap-dev \
+        libunbound-dev libunwind-dev libssl-dev libtool llvm-dev
+      CC:   clang
+      DPDK: dpdk
+      CLANG_ANALYZE: true
+    name: clang-analyze
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: get base branch sha
+      id: base_branch
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        EVENT_BEFORE: ${{ github.event.before }}
+        FORCED_PUSH: ${{ github.event.forced }}
+      run: |
+        if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          echo "sha=$BASE_SHA" >> $GITHUB_OUTPUT
+        else
+          if [ "$EVENT_BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || [ "$FORCED_PUSH" = true ]; then
+            BASE_SHA=HEAD~1
+            MIN_DISTANCE=1000
+            git remote add upstream https://github.com/openvswitch/ovs.git
+            git fetch upstream
+            for upstream_head in $(git ls-remote --heads upstream main master dpdk-latest branch-2.17 branch-[3456789]* | cut -f 1); do
+              CURR_BASE=$(git merge-base ${upstream_head} HEAD 2>/dev/null)
+              if [ ${CURR_BASE} ]; then
+                DISTANCE=$(git log --oneline ${CURR_BASE}..HEAD | wc -l);
+                if test ${MIN_DISTANCE} -gt ${DISTANCE}; then
+                  BASE_SHA=${CURR_BASE}
+                  MIN_DISTANCE=${DISTANCE}
+                fi
+              fi
+            done
+            echo "sha=$BASE_SHA" >> $GITHUB_OUTPUT
+          else
+            echo "sha=$EVENT_BEFORE" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+    - name: checkout base branch
+      env:
+        BASE_SHA: ${{ steps.base_branch.outputs.sha }}
+      run: |
+        cp -r $(pwd)/. /tmp/base_ovs_main && mv /tmp/base_ovs_main ./
+        cd $(pwd)/base_ovs_main
+        git checkout ${BASE_SHA}
+
+    - name: update PATH
+      run: |
+        echo "$HOME/bin"        >> $GITHUB_PATH
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: generate cache key
+      id: cache_key
+      run: |
+        ver=$(${CC} -v 2>&1 | grep ' version ' | \
+              sed 's/.*version \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/g')
+        echo "key=${CC}-${ver}-analyze-$(git -C base_ovs_main rev-parse HEAD)" \
+          >> $GITHUB_OUTPUT
+
+    - name: check for analyzer result cache
+      id: clang_cache
+      uses: actions/cache@v4
+      with:
+        path: base-clang-analyzer-results
+        key:  ${{ steps.cache_key.outputs.key }}
+
+    - name: set up python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+
+    - name: get cached dpdk-dir
+      uses: actions/cache/restore@v4
+      with:
+        path: dpdk-dir
+        key:  ${{ needs.build-dpdk.outputs.dpdk_key }}
+
+    - name: update APT cache
+      run:  sudo apt update || true
+
+    - name: install common dependencies
+      run:  sudo apt install -y ${{ env.dependencies }}
+
+    - name: prepare
+      run:  ./.ci/linux-prepare.sh
+
+    - name: build base reference
+      if: steps.clang_cache.outputs.cache-hit != 'true'
+      run:  ./.ci/linux-build.sh
+
+    - name: save cache
+      uses: actions/cache/save@v4
+      if: steps.clang_cache.outputs.cache-hit != 'true'
+      with:
+        path: base-clang-analyzer-results
+        key:  ${{ steps.cache_key.outputs.key }}
+
+    - name: build
+      run:  ./.ci/linux-build.sh
 
   build-osx:
     env:
@@ -230,13 +391,13 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: update PATH
       run:  |
         echo "$HOME/bin"        >> $GITHUB_PATH
         echo "$HOME/.local/bin" >> $GITHUB_PATH
     - name: set up python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
     - name: install dependencies
@@ -247,7 +408,7 @@ jobs:
       run:  ./.ci/osx-build.sh
     - name: upload logs on failure
       if: failure()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: logs-osx-clang---disable-ssl
         path: config.log
@@ -271,7 +432,7 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: update PATH
       run:  |
@@ -293,7 +454,7 @@ jobs:
       run:  ./.ci/linux-build.sh
 
     - name: upload deb packages
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: deb-packages-${{ matrix.dpdk }}-dpdk
         path: '/home/runner/work/ovs/*.deb'
@@ -301,7 +462,7 @@ jobs:
   build-linux-rpm:
     name: linux rpm fedora
     runs-on: ubuntu-latest
-    container: fedora:37
+    container: fedora:39
     timeout-minutes: 30
 
     strategy:
@@ -309,7 +470,7 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: install dependencies
       run: |
         dnf install -y rpm-build dnf-plugins-core
@@ -328,7 +489,7 @@ jobs:
       run:  dnf install -y rpm/rpmbuild/RPMS/*/*.rpm
 
     - name: upload rpm packages
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: rpm-packages
         path: |

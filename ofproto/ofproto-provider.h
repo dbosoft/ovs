@@ -1921,6 +1921,19 @@ struct ofproto_class {
     /* Deletes the timeout policy associated with 'zone' in datapath type
      * 'dp_type'. */
     void (*ct_del_zone_timeout_policy)(const char *dp_type, uint16_t zone);
+
+    /* Updates the CT zone limit for specified zone. Setting 'zone' to
+     * 'OVS_ZONE_LIMIT_DEFAULT_ZONE' represents the default zone.
+     * 'NULL' passed as 'limit' indicates that the limit should be removed for
+     * the specified zone. The caller must ensure that the 'limit' value is
+     * within proper range (0 - UINT32_MAX). */
+    void (*ct_zone_limit_update)(const char *dp_type, int32_t zone,
+                                 int64_t *limit);
+
+    /* Sets the CT zone limit protection to "protected" for the specified
+     * datapath type. */
+    void (*ct_zone_limit_protection_update)(const char *dp_type,
+                                            bool protected);
 };
 
 extern const struct ofproto_class ofproto_dpif_class;
@@ -2027,9 +2040,11 @@ enum ofperr ofproto_flow_mod_init_for_learn(struct ofproto *,
                                             struct ofproto_flow_mod *)
     OVS_EXCLUDED(ofproto_mutex);
 enum ofperr ofproto_flow_mod_learn(struct ofproto_flow_mod *, bool keep_ref,
-                                   unsigned limit, bool *below_limit)
+                                   unsigned limit, bool *below_limit,
+                                   long long int last_used)
     OVS_EXCLUDED(ofproto_mutex);
-enum ofperr ofproto_flow_mod_learn_refresh(struct ofproto_flow_mod *ofm);
+enum ofperr ofproto_flow_mod_learn_refresh(struct ofproto_flow_mod *ofm,
+                                           long long int last_used);
 enum ofperr ofproto_flow_mod_learn_start(struct ofproto_flow_mod *ofm)
     OVS_REQUIRES(ofproto_mutex);
 void ofproto_flow_mod_learn_revert(struct ofproto_flow_mod *ofm)

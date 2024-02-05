@@ -6,11 +6,13 @@ set -x
 CFLAGS_FOR_OVS="-g -O2"
 SPARSE_FLAGS=""
 EXTRA_OPTS="--enable-Werror"
+JOBS=${JOBS:-"-j4"}
 
 function install_dpdk()
 {
-    local VERSION_FILE="dpdk-dir/cached-version"
-    local DPDK_LIB=$(pwd)/dpdk-dir/build/lib/x86_64-linux-gnu
+    local DPDK_INSTALL_DIR="$(pwd)/dpdk-dir"
+    local VERSION_FILE="${DPDK_INSTALL_DIR}/cached-version"
+    local DPDK_LIB=${DPDK_INSTALL_DIR}/lib/x86_64-linux-gnu
 
     if [ "$DPDK_SHARED" ]; then
         EXTRA_OPTS="$EXTRA_OPTS --with-dpdk=shared"
@@ -22,14 +24,17 @@ function install_dpdk()
     # Export the following path for pkg-config to find the .pc file.
     export PKG_CONFIG_PATH=$DPDK_LIB/pkgconfig/:$PKG_CONFIG_PATH
 
+    # Expose dpdk binaries.
+    export PATH=$(pwd)/dpdk-dir/build/bin:$PATH
+
     if [ ! -f "${VERSION_FILE}" ]; then
-        echo "Could not find DPDK in $(pwd)/dpdk-dir"
+        echo "Could not find DPDK in $DPDK_INSTALL_DIR"
         return 1
     fi
 
     # Update the library paths.
     sudo ldconfig
-    echo "Found cached DPDK $(cat ${VERSION_FILE}) build in $(pwd)/dpdk-dir"
+    echo "Found cached DPDK $(cat ${VERSION_FILE}) build in $DPDK_INSTALL_DIR"
 }
 
 function configure_ovs()
@@ -43,7 +48,32 @@ function build_ovs()
     configure_ovs $OPTS
     make selinux-policy
 
-    make -j4
+    make ${JOBS}
+}
+
+function clang_analyze()
+{
+    [ -d "./base-clang-analyzer-results" ] && cache_build=false \
+                                           || cache_build=true
+    if [ "$cache_build" = true ]; then
+        # If this is a cache build, proceed to the base branch's directory.
+        pushd base_ovs_main
+    fi;
+
+    configure_ovs $OPTS
+
+    make clean
+    scan-build -o ./clang-analyzer-results -sarif --use-cc=${CC} make ${JOBS}
+
+    if [ "$cache_build" = true ]; then
+        # Move results, so it will be picked up by the cache.
+        mv ./clang-analyzer-results ../base-clang-analyzer-results
+        popd
+    else
+        # Only do the compare on the none cache builds.
+        sarif --check note diff ./base-clang-analyzer-results \
+                                ./clang-analyzer-results
+    fi;
 }
 
 if [ "$DEB_PACKAGE" ]; then
@@ -82,6 +112,10 @@ if [ "$DPDK" ] || [ "$DPDK_SHARED" ]; then
     install_dpdk
 fi
 
+if [ "$STD" ]; then
+    CFLAGS_FOR_OVS="${CFLAGS_FOR_OVS} -std=$STD"
+fi
+
 if [ "$CC" = "clang" ]; then
     CFLAGS_FOR_OVS="${CFLAGS_FOR_OVS} -Wno-error=unused-command-line-argument"
 elif [ "$M32" ]; then
@@ -94,31 +128,48 @@ else
     CFLAGS_FOR_OVS="${CFLAGS_FOR_OVS} ${SPARSE_FLAGS}"
 fi
 
-if [ "$ASAN" ]; then
-    # This will override default option configured in tests/atlocal.in.
+if [ "$SANITIZERS" ]; then
+    # This will override default ASAN options configured in tests/atlocal.in.
     export ASAN_OPTIONS='detect_leaks=1'
-    CFLAGS_ASAN="-fno-omit-frame-pointer -fno-common -fsanitize=address"
-    CFLAGS_FOR_OVS="${CFLAGS_FOR_OVS} ${CFLAGS_ASAN}"
-fi
-
-if [ "$UBSAN" ]; then
-    # Use the default options configured in tests/atlocal.in, in UBSAN_OPTIONS.
-    CFLAGS_UBSAN="-fno-omit-frame-pointer -fno-common -fsanitize=undefined"
-    CFLAGS_FOR_OVS="${CFLAGS_FOR_OVS} ${CFLAGS_UBSAN}"
+    CFLAGS_FOR_SAN="-fno-omit-frame-pointer -fno-common -fsanitize=$SANITIZERS"
+    CFLAGS_FOR_OVS="${CFLAGS_FOR_OVS} ${CFLAGS_FOR_SAN}"
 fi
 
 OPTS="${EXTRA_OPTS} ${OPTS} $*"
 
-if [ "$TESTSUITE" ]; then
+if [ "$CLANG_ANALYZE" ]; then
+    clang_analyze
+    exit 0
+fi
+
+if [ "$TESTSUITE" = 'test' ]; then
     # 'distcheck' will reconfigure with required options.
     # Now we only need to prepare the Makefile without sparse-wrapped CC.
     configure_ovs
 
     export DISTCHECK_CONFIGURE_FLAGS="$OPTS"
-    make distcheck -j4 CFLAGS="${CFLAGS_FOR_OVS}" \
-        TESTSUITEFLAGS=-j4 RECHECK=yes
+    make distcheck ${JOBS} CFLAGS="${CFLAGS_FOR_OVS}" \
+        TESTSUITEFLAGS=${JOBS} RECHECK=yes
 else
     build_ovs
+    for testsuite in $TESTSUITE; do
+        run_as_root=
+        if [ "$testsuite" != "check" ] && \
+           [ "$testsuite" != "check-ovsdb-cluster" ] ; then
+            run_as_root="sudo -E PATH=$PATH GITHUB_ACTIONS=$GITHUB_ACTIONS"
+            sudo ip netns add ovs-system-test-ns
+            # Some system tests may rely on traffic loopback.
+            sudo ip -netns ovs-system-test-ns link set dev lo up
+            run_as_root="${run_as_root} ip netns exec ovs-system-test-ns"
+        fi
+        if [ "${testsuite##*dpdk}" != "$testsuite" ]; then
+            sudo sh -c 'echo 1024 > /proc/sys/vm/nr_hugepages' || true
+            [ "$(cat /proc/sys/vm/nr_hugepages)" = '1024' ]
+            export DPDK_EAL_OPTIONS="--lcores 0@1,1@1,2@1"
+        fi
+        $run_as_root make $testsuite TESTSUITEFLAGS="${JOBS} ${TEST_RANGE}" \
+                                     RECHECK=yes
+    done
 fi
 
 exit 0

@@ -170,12 +170,13 @@ class OFPFlow(Flow):
         args = {
             "table": decode_int,
             "duration": decode_time,
-            "n_packet": decode_int,
+            "n_packets": decode_int,
             "n_bytes": decode_int,
             "cookie": decode_int,
             "idle_timeout": decode_time,
             "hard_timeout": decode_time,
             "hard_age": decode_time,
+            "idle_age": decode_time,
         }
         return KVDecoders(args)
 

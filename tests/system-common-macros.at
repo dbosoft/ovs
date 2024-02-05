@@ -276,18 +276,23 @@ m4_define([NETNS_DAEMONIZE],
 m4_define([OVS_CHECK_FIREWALL],
     [AT_SKIP_IF([systemctl status firewalld 2>&1 | grep running > /dev/null])])
 
-# OVS_START_L7([namespace], [protocol])
+# OVS_START_L7([namespace], [protocol], [port])
 #
-# Start a server serving 'protocol' within 'namespace'. The server will exit
-# when the test finishes.
+# Start a server serving 'protocol' on port 'port' within 'namespace'.
+# If 'port' is not specified, the standard one for 'protocol' will be used.
+# The server will exit when the test finishes.
 #
 m4_define([OVS_START_L7],
    [PIDFILE=$(mktemp $2XXX.pid)
-    NETNS_DAEMONIZE([$1], [[$PYTHON3 $srcdir/test-l7.py $2]], [$PIDFILE])
+    NETNS_DAEMONIZE([$1], [[$PYTHON3 $srcdir/test-l7.py $2 $3]], [$PIDFILE])
 
     dnl netstat doesn't print http over IPv6 as "http6"; drop the number.
     PROTO=$(echo $2 | sed -e 's/\([[a-zA-Z]]*\).*/\1/')
-    OVS_WAIT_UNTIL([NS_EXEC([$1], [netstat -l | grep $PROTO])])
+    if test -z "$3"; then
+        OVS_WAIT_UNTIL([NS_EXEC([$1], [netstat -l | grep $PROTO])])
+    else
+        OVS_WAIT_UNTIL([NS_EXEC([$1], [netstat -ln | grep :$3])])
+    fi
    ]
 )
 
@@ -296,6 +301,12 @@ m4_define([OVS_START_L7],
 # Clear the duration from the piped input which would differ from test to test
 #
 m4_define([OFPROTO_CLEAR_DURATION_IDLE], [[sed -e 's/duration=.*s,/duration=<cleared>,/g' -e 's/idle_age=[0-9]*,/idle_age=<cleared>,/g']])
+
+# OVS_CHECK_TC_QDISC()
+#
+# Macro to skip tests when tc qdisc can't be applied on a OVS port.
+m4_define([OVS_CHECK_TC_QDISC],
+    [AT_SKIP_IF([test $HAVE_TC = no])])
 
 # OVS_CHECK_TUNNEL_TSO()
 #
@@ -359,3 +370,7 @@ m4_define([OVS_CHECK_IPROUTE_ENCAP],
 # OVS_CHECK_CT_CLEAR()
 m4_define([OVS_CHECK_CT_CLEAR],
     [AT_SKIP_IF([! grep -q "Datapath supports ct_clear action" ovs-vswitchd.log])])
+
+# OVS_CHECK_GITHUB_ACTION
+m4_define([OVS_CHECK_GITHUB_ACTION],
+    [AT_SKIP_IF([test "$GITHUB_ACTIONS" = "true"])])

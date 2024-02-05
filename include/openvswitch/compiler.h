@@ -38,6 +38,22 @@
 #endif
 
 #if __GNUC__ && !__CHECKER__
+#define OVS_RETURNS_NONNULL __attribute__((returns_nonnull))
+#else
+#define OVS_RETURNS_NONNULL
+#endif
+
+#ifndef typeof
+#define typeof __typeof__
+#endif
+
+#ifndef __cplusplus
+#ifndef asm
+#define asm __asm__
+#endif
+#endif
+
+#if __GNUC__ && !__CHECKER__
 #define OVS_UNUSED __attribute__((__unused__))
 #define OVS_PRINTF_FORMAT(FMT, ARG1) __attribute__((__format__(printf, FMT, ARG1)))
 #define OVS_SCANF_FORMAT(FMT, ARG1) __attribute__((__format__(scanf, FMT, ARG1)))

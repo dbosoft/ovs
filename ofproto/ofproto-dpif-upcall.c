@@ -53,13 +53,17 @@
 VLOG_DEFINE_THIS_MODULE(ofproto_dpif_upcall);
 
 COVERAGE_DEFINE(dumped_duplicate_flow);
+COVERAGE_DEFINE(dumped_inconsistent_flow);
 COVERAGE_DEFINE(dumped_new_flow);
 COVERAGE_DEFINE(handler_duplicate_upcall);
 COVERAGE_DEFINE(revalidate_missed_dp_flow);
 COVERAGE_DEFINE(ukey_dp_change);
 COVERAGE_DEFINE(ukey_invalid_stat_reset);
+COVERAGE_DEFINE(upcall_flow_limit_grew);
 COVERAGE_DEFINE(upcall_flow_limit_hit);
 COVERAGE_DEFINE(upcall_flow_limit_kill);
+COVERAGE_DEFINE(upcall_flow_limit_reduced);
+COVERAGE_DEFINE(upcall_flow_limit_scaled);
 COVERAGE_DEFINE(upcall_ukey_contention);
 COVERAGE_DEFINE(upcall_ukey_replace);
 
@@ -258,6 +262,7 @@ enum ukey_state {
     UKEY_CREATED = 0,
     UKEY_VISIBLE,       /* Ukey is in umap, datapath flow install is queued. */
     UKEY_OPERATIONAL,   /* Ukey is in umap, datapath flow is installed. */
+    UKEY_INCONSISTENT,  /* Ukey is in umap, datapath flow is inconsistent. */
     UKEY_EVICTING,      /* Ukey is in umap, datapath flow delete is queued. */
     UKEY_EVICTED,       /* Ukey is in umap, datapath flow is deleted. */
     UKEY_DELETED,       /* Ukey removed from umap, ukey free is deferred. */
@@ -988,7 +993,7 @@ udpif_revalidator(void *arg)
             udpif->reval_exit = latch_is_set(&udpif->exit_latch);
 
             start_time = time_msec();
-            if (!udpif->reval_exit) {
+            if (!udpif->reval_exit && !udpif->pause) {
                 bool terse_dump;
 
                 terse_dump = udpif_use_ufid(udpif);
@@ -998,10 +1003,15 @@ udpif_revalidator(void *arg)
             }
         }
 
-        /* Wait for the leader to start the flow dump. */
+        /* Wait for the leader to reach this point. */
         ovs_barrier_block(&udpif->reval_barrier);
         if (udpif->pause) {
             revalidator_pause(revalidator);
+            if (!udpif->reval_exit) {
+                /* The main thread resumed all validators, but the leader
+                 * didn't start the dump, go to next iteration. */
+                continue;
+            }
         }
 
         if (udpif->reval_exit) {
@@ -1032,17 +1042,20 @@ udpif_revalidator(void *arg)
             udpif->dump_duration = duration;
             if (duration > 2000) {
                 flow_limit /= duration / 1000;
+                COVERAGE_INC(upcall_flow_limit_scaled);
             } else if (duration > 1300) {
                 flow_limit = flow_limit * 3 / 4;
+                COVERAGE_INC(upcall_flow_limit_reduced);
             } else if (duration < 1000 &&
                        flow_limit < n_flows * 1000 / duration) {
                 flow_limit += 1000;
+                COVERAGE_INC(upcall_flow_limit_grew);
             }
             flow_limit = MIN(ofproto_flow_limit, MAX(flow_limit, 1000));
             atomic_store_relaxed(&udpif->flow_limit, flow_limit);
 
             if (duration > 2000) {
-                VLOG_INFO("Spent an unreasonably long %lldms dumping flows",
+                VLOG_WARN("Spent an unreasonably long %lldms dumping flows",
                           duration);
             }
 
@@ -1999,6 +2012,10 @@ transition_ukey_at(struct udpif_key *ukey, enum ukey_state dst,
      * UKEY_VISIBLE -> UKEY_EVICTED
      *  A handler attempts to install the flow, but the datapath rejects it.
      *  Consider that the datapath has already destroyed it.
+     * UKEY_OPERATIONAL -> UKEY_INCONSISTENT
+     *  A revalidator modifies the flow with error returns.
+     * UKEY_INCONSISTENT -> UKEY_EVICTING
+     *  A revalidator decides to evict the datapath flow.
      * UKEY_OPERATIONAL -> UKEY_EVICTING
      *  A revalidator decides to evict the datapath flow.
      * UKEY_EVICTING    -> UKEY_EVICTED
@@ -2006,8 +2023,9 @@ transition_ukey_at(struct udpif_key *ukey, enum ukey_state dst,
      * UKEY_EVICTED     -> UKEY_DELETED
      *  A revalidator has removed the ukey from the umap and is deleting it.
      */
-    if (ukey->state == dst - 1 || (ukey->state == UKEY_VISIBLE &&
-                                   dst < UKEY_DELETED)) {
+    if (ukey->state == dst - 1 ||
+       (ukey->state == UKEY_VISIBLE && dst < UKEY_DELETED) ||
+       (ukey->state == UKEY_OPERATIONAL && dst == UKEY_EVICTING)) {
         ukey->state = dst;
     } else {
         struct ds ds = DS_EMPTY_INITIALIZER;
@@ -2339,6 +2357,27 @@ exit:
     return result;
 }
 
+static void
+log_unexpected_stats_jump(struct udpif_key *ukey,
+                          const struct dpif_flow_stats *stats)
+    OVS_REQUIRES(ukey->mutex)
+{
+    static struct vlog_rate_limit rll = VLOG_RATE_LIMIT_INIT(1, 5);
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    struct ofpbuf *actions;
+
+    odp_format_ufid(&ukey->ufid, &ds);
+    ds_put_cstr(&ds, ", ");
+    odp_flow_key_format(ukey->key, ukey->key_len, &ds);
+    ds_put_cstr(&ds, ", actions:");
+    actions = ovsrcu_get(struct ofpbuf *, &ukey->actions);
+    format_odp_actions(&ds, actions->data, actions->size, NULL);
+    VLOG_WARN_RL(&rll, "Unexpected jump in packet stats from %"PRIu64
+                 " to %"PRIu64" when handling ukey %s",
+                 ukey->stats.n_packets, stats->n_packets, ds_cstr(&ds));
+    ds_destroy(&ds);
+}
+
 /* Verifies that the datapath actions of 'ukey' are still correct, and pushes
  * 'stats' for it.
  *
@@ -2372,18 +2411,15 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
 
     push.used = stats->used;
     push.tcp_flags = stats->tcp_flags;
-    push.n_packets = (stats->n_packets > ukey->stats.n_packets
-                      ? stats->n_packets - ukey->stats.n_packets
-                      : 0);
-    push.n_bytes = (stats->n_bytes > ukey->stats.n_bytes
-                    ? stats->n_bytes - ukey->stats.n_bytes
-                    : 0);
+    push.n_packets = stats->n_packets - ukey->stats.n_packets;
+    push.n_bytes = stats->n_bytes - ukey->stats.n_bytes;
 
     if (stats->n_packets < ukey->stats.n_packets &&
         ukey->stats.n_packets < UINT64_THREE_QUARTERS) {
         /* Report cases where the packet counter is lower than the previous
          * instance, but exclude the potential wrapping of an uint64_t. */
         COVERAGE_INC(ukey_invalid_stat_reset);
+        log_unexpected_stats_jump(ukey, stats);
     }
 
     if (need_revalidate) {
@@ -2472,25 +2508,30 @@ push_dp_ops(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
 
     for (i = 0; i < n_ops; i++) {
         struct ukey_op *op = &ops[i];
-        struct dpif_flow_stats *push, *stats, push_buf;
 
-        stats = op->dop.flow_del.stats;
-        push = &push_buf;
+        if (op->dop.error) {
+            if (op->ukey) {
+                ovs_mutex_lock(&op->ukey->mutex);
+                if (op->dop.type == DPIF_OP_FLOW_DEL) {
+                    transition_ukey(op->ukey, UKEY_EVICTED);
+                } else {
+                    /* Modification of the flow failed. */
+                    transition_ukey(op->ukey, UKEY_INCONSISTENT);
+                }
+                ovs_mutex_unlock(&op->ukey->mutex);
+            }
+            continue;
+        }
 
         if (op->dop.type != DPIF_OP_FLOW_DEL) {
             /* Only deleted flows need their stats pushed. */
             continue;
         }
 
-        if (op->dop.error) {
-            /* flow_del error, 'stats' is unusable. */
-            if (op->ukey) {
-                ovs_mutex_lock(&op->ukey->mutex);
-                transition_ukey(op->ukey, UKEY_EVICTED);
-                ovs_mutex_unlock(&op->ukey->mutex);
-            }
-            continue;
-        }
+        struct dpif_flow_stats *push, *stats, push_buf;
+
+        stats = op->dop.flow_del.stats;
+        push = &push_buf;
 
         if (op->ukey) {
             ovs_mutex_lock(&op->ukey->mutex);
@@ -2839,6 +2880,15 @@ revalidate(struct revalidator *revalidator)
                 continue;
             }
 
+            if (ukey->state == UKEY_INCONSISTENT) {
+                ukey->dump_seq = dump_seq;
+                reval_op_init(&ops[n_ops++], UKEY_DELETE, udpif, ukey,
+                              &recircs, &odp_actions);
+                ovs_mutex_unlock(&ukey->mutex);
+                COVERAGE_INC(dumped_inconsistent_flow);
+                continue;
+            }
+
             if (ukey->state <= UKEY_OPERATIONAL) {
                 /* The flow is now confirmed to be in the datapath. */
                 transition_ukey(ukey, UKEY_OPERATIONAL);
@@ -2927,13 +2977,14 @@ revalidator_sweep__(struct revalidator *revalidator, bool purge)
             }
             ukey_state = ukey->state;
             if (ukey_state == UKEY_OPERATIONAL
+                || (ukey_state == UKEY_INCONSISTENT)
                 || (ukey_state == UKEY_VISIBLE && purge)) {
                 struct recirc_refs recircs = RECIRC_REFS_EMPTY_INITIALIZER;
                 bool seq_mismatch = (ukey->dump_seq != dump_seq
                                      && ukey->reval_seq != reval_seq);
                 enum reval_result result;
 
-                if (purge) {
+                if (purge || ukey_state == UKEY_INCONSISTENT) {
                     result = UKEY_DELETE;
                 } else if (!seq_mismatch) {
                     result = UKEY_KEEP;
@@ -3177,10 +3228,18 @@ upcall_unixctl_purge(struct unixctl_conn *conn, int argc OVS_UNUSED,
     struct udpif *udpif;
 
     LIST_FOR_EACH (udpif, list_node, &all_udpifs) {
+        bool wake_up = false;
         int n;
 
+        if (!latch_is_set(&udpif->pause_latch)) {
+            udpif_pause_revalidators(udpif);
+            wake_up = true;
+        }
         for (n = 0; n < udpif->n_revalidators; n++) {
             revalidator_purge(&udpif->revalidators[n]);
+        }
+        if (wake_up) {
+            udpif_resume_revalidators(udpif);
         }
     }
     unixctl_command_reply(conn, "");

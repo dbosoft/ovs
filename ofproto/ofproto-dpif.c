@@ -220,6 +220,7 @@ static void ofproto_unixctl_init(void);
 static void ct_zone_config_init(struct dpif_backer *backer);
 static void ct_zone_config_uninit(struct dpif_backer *backer);
 static void ct_zone_timeout_policy_sweep(struct dpif_backer *backer);
+static void ct_zone_limits_commit(struct dpif_backer *backer);
 
 static inline struct ofproto_dpif *
 ofproto_dpif_cast(const struct ofproto *ofproto)
@@ -513,6 +514,7 @@ type_run(const char *type)
 
     process_dpif_port_changes(backer);
     ct_zone_timeout_policy_sweep(backer);
+    ct_zone_limits_commit(backer);
 
     return 0;
 }
@@ -1255,7 +1257,7 @@ check_ct_eventmask(struct dpif_backer *backer)
 
     /* Compose a dummy UDP packet. */
     dp_packet_init(&packet, 0);
-    flow_compose(&packet, &flow, NULL, 64);
+    flow_compose(&packet, &flow, NULL, 64, false);
 
     /* Execute the actions.  On older datapaths this fails with EINVAL, on
      * newer datapaths it succeeds. */
@@ -1348,7 +1350,7 @@ check_ct_timeout_policy(struct dpif_backer *backer)
 
     /* Compose a dummy UDP packet. */
     dp_packet_init(&packet, 0);
-    flow_compose(&packet, &flow, NULL, 64);
+    flow_compose(&packet, &flow, NULL, 64, false);
 
     /* Execute the actions.  On older datapaths this fails with EINVAL, on
      * newer datapaths it succeeds. */
@@ -2161,8 +2163,7 @@ port_destruct(struct ofport *port_, bool del)
     struct ofproto_dpif *ofproto = ofproto_dpif_cast(port->up.ofproto);
     const char *devname = netdev_get_name(port->up.netdev);
     const char *netdev_type = netdev_get_type(port->up.netdev);
-    char namebuf[NETDEV_VPORT_NAME_BUFSIZE];
-    const char *dp_port_name;
+    struct dpif_port dpif_port;
 
     ofproto->backer->need_revalidate = REV_RECONFIGURE;
     xlate_txn_start();
@@ -2176,9 +2177,13 @@ port_destruct(struct ofport *port_, bool del)
         del = dpif_cleanup_required(ofproto->backer->dpif);
     }
 
-    dp_port_name = netdev_vport_get_dpif_port(port->up.netdev, namebuf,
-                                              sizeof namebuf);
-    if (del && dpif_port_exists(ofproto->backer->dpif, dp_port_name)) {
+    /* Don't try to delete ports that are not part of the datapath. */
+    if (del && port->odp_port == ODPP_NONE) {
+        del = false;
+    }
+
+    if (del && !dpif_port_query_by_number(ofproto->backer->dpif,
+                                          port->odp_port, &dpif_port, false)) {
         /* The underlying device is still there, so delete it.  This
          * happens when the ofproto is being destroyed, since the caller
          * assumes that removal of attached ports will happen as part of
@@ -2186,6 +2191,7 @@ port_destruct(struct ofport *port_, bool del)
         if (!port->is_tunnel) {
             dpif_port_del(ofproto->backer->dpif, port->odp_port, false);
         }
+        dpif_port_destroy(&dpif_port);
     } else if (del) {
         /* The underlying device is already deleted (e.g. tunctl -d).
          * Calling dpif_port_remove to do local cleanup for the netdev */
@@ -4379,15 +4385,20 @@ ofproto_dpif_get_tables_version(struct ofproto_dpif *ofproto)
  * a reference.
  *
  * 'flow' is non-const to allow for temporary modifications during the lookup.
- * Any changes are restored before returning. */
+ * Any changes are restored before returning.
+ *
+ * 'conj_flows' is an optional parameter.  If it is non-null, the matching
+ * conjunctive flows are inserted. */
 static struct rule_dpif *
 rule_dpif_lookup_in_table(struct ofproto_dpif *ofproto, ovs_version_t version,
                           uint8_t table_id, struct flow *flow,
-                          struct flow_wildcards *wc)
+                          struct flow_wildcards *wc,
+                          struct hmapx *conj_flows)
 {
     struct classifier *cls = &ofproto->up.tables[table_id].cls;
     return rule_dpif_cast(rule_from_cls_rule(classifier_lookup(cls, version,
-                                                               flow, wc)));
+                                                               flow, wc,
+                                                               conj_flows)));
 }
 
 void
@@ -4429,7 +4440,10 @@ ofproto_dpif_credit_table_stats(struct ofproto_dpif *ofproto, uint8_t table_id,
  * 'in_port'.  This is needed for resubmit action support.
  *
  * 'flow' is non-const to allow for temporary modifications during the lookup.
- * Any changes are restored before returning. */
+ * Any changes are restored before returning.
+ *
+ * 'conj_flows' is an optional parameter.  If it is non-null, the matching
+ * conjunctive flows are inserted. */
 struct rule_dpif *
 rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
                             ovs_version_t version, struct flow *flow,
@@ -4437,7 +4451,8 @@ rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
                             const struct dpif_flow_stats *stats,
                             uint8_t *table_id, ofp_port_t in_port,
                             bool may_packet_in, bool honor_table_miss,
-                            struct xlate_cache *xcache)
+                            struct xlate_cache *xcache,
+                            struct hmapx *conj_flows)
 {
     ovs_be16 old_tp_src = flow->tp_src, old_tp_dst = flow->tp_dst;
     ofp_port_t old_in_port = flow->in_port.ofp_port;
@@ -4493,7 +4508,8 @@ rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
          next_id++, next_id += (next_id == TBL_INTERNAL))
     {
         *table_id = next_id;
-        rule = rule_dpif_lookup_in_table(ofproto, version, next_id, flow, wc);
+        rule = rule_dpif_lookup_in_table(ofproto, version, next_id, flow, wc,
+                                         conj_flows);
         if (stats) {
             struct oftable *tbl = &ofproto->up.tables[next_id];
             unsigned long orig;
@@ -4876,7 +4892,7 @@ packet_xlate(struct ofproto *ofproto_, struct ofproto_packet_out *opo)
             if (entry->type == XC_LEARN) {
                 struct ofproto_flow_mod *ofm = entry->learn.ofm;
 
-                error = ofproto_flow_mod_learn_refresh(ofm);
+                error = ofproto_flow_mod_learn_refresh(ofm, time_msec());
                 if (error) {
                     goto error_out;
                 }
@@ -5518,6 +5534,8 @@ ct_zone_config_init(struct dpif_backer *backer)
     cmap_init(&backer->ct_zones);
     hmap_init(&backer->ct_tps);
     ovs_list_init(&backer->ct_tp_kill_list);
+    ovs_list_init(&backer->ct_zone_limits_to_add);
+    ovs_list_init(&backer->ct_zone_limits_to_del);
     clear_existing_ct_timeout_policies(backer);
 }
 
@@ -5541,6 +5559,8 @@ ct_zone_config_uninit(struct dpif_backer *backer)
     id_pool_destroy(backer->tp_ids);
     cmap_destroy(&backer->ct_zones);
     hmap_destroy(&backer->ct_tps);
+    ct_dpif_free_zone_limits(&backer->ct_zone_limits_to_add);
+    ct_dpif_free_zone_limits(&backer->ct_zone_limits_to_del);
 }
 
 static void
@@ -5619,6 +5639,50 @@ ct_del_zone_timeout_policy(const char *datapath_type, uint16_t zone_id)
         ct_zone_remove_and_destroy(backer, ct_zone);
         backer->need_revalidate = REV_RECONFIGURE;
     }
+}
+
+static void
+ct_zone_limit_update(const char *datapath_type, int32_t zone_id,
+                     int64_t *limit)
+{
+    struct dpif_backer *backer = shash_find_data(&all_dpif_backers,
+                                                 datapath_type);
+    if (!backer) {
+        return;
+    }
+
+    if (limit) {
+        ct_dpif_push_zone_limit(&backer->ct_zone_limits_to_add, zone_id,
+                                *limit, 0);
+    } else {
+        ct_dpif_push_zone_limit(&backer->ct_zone_limits_to_del, zone_id, 0, 0);
+    }
+}
+
+static void
+ct_zone_limits_commit(struct dpif_backer *backer)
+{
+    if (!ovs_list_is_empty(&backer->ct_zone_limits_to_add)) {
+        ct_dpif_set_limits(backer->dpif, &backer->ct_zone_limits_to_add);
+        ct_dpif_free_zone_limits(&backer->ct_zone_limits_to_add);
+    }
+
+    if (!ovs_list_is_empty(&backer->ct_zone_limits_to_del)) {
+        ct_dpif_del_limits(backer->dpif, &backer->ct_zone_limits_to_del);
+        ct_dpif_free_zone_limits(&backer->ct_zone_limits_to_del);
+    }
+}
+
+static void
+ct_zone_limit_protection_update(const char *datapath_type, bool protected)
+{
+    struct dpif_backer *backer = shash_find_data(&all_dpif_backers,
+                                                 datapath_type);
+    if (!backer) {
+        return;
+    }
+
+    ct_dpif_set_zone_limit_protection(backer->dpif, protected);
 }
 
 static void
@@ -6108,7 +6172,7 @@ ofproto_unixctl_mcast_snooping_show(struct unixctl_conn *conn,
         return;
     }
 
-    ds_put_cstr(&ds, " port  VLAN  GROUP                Age\n");
+    ds_put_cstr(&ds, " port  VLAN  protocol  GROUP                Age\n");
     ovs_rwlock_rdlock(&ofproto->ms->rwlock);
     LIST_FOR_EACH (grp, group_node, &ofproto->ms->group_lru) {
         LIST_FOR_EACH(b, bundle_node, &grp->bundle_lru) {
@@ -6117,7 +6181,9 @@ ofproto_unixctl_mcast_snooping_show(struct unixctl_conn *conn,
             bundle = b->port;
             ofputil_port_to_string(ofbundle_get_a_port(bundle)->up.ofp_port,
                                    NULL, name, sizeof name);
-            ds_put_format(&ds, "%5s  %4d  ", name, grp->vlan);
+            ds_put_format(&ds, "%5s  %4d  %-8s  ", name, grp->vlan,
+                          mcast_snooping_group_protocol_str(
+                              grp->protocol_version));
             ipv6_format_mapped(&grp->addr, &ds);
             ds_put_format(&ds, "         %3d\n",
                           mcast_bundle_age(ofproto->ms, b));
@@ -6131,8 +6197,9 @@ ofproto_unixctl_mcast_snooping_show(struct unixctl_conn *conn,
         bundle = mrouter->port;
         ofputil_port_to_string(ofbundle_get_a_port(bundle)->up.ofp_port,
                                NULL, name, sizeof name);
-        ds_put_format(&ds, "%5s  %4d  querier             %3d\n",
+        ds_put_format(&ds, "%5s  %4d  %-8s  querier             %3d\n",
                       name, mrouter->vlan,
+                      mcast_snooping_group_protocol_str(-1),
                       mcast_mrouter_age(ofproto->ms, mrouter));
     }
     ovs_rwlock_unlock(&ofproto->ms->rwlock);
@@ -6676,7 +6743,8 @@ ofproto_dpif_add_internal_flow(struct ofproto_dpif *ofproto,
 
     rule = rule_dpif_lookup_in_table(ofproto,
                                      ofproto_dpif_get_tables_version(ofproto),
-                                     TBL_INTERNAL, &match->flow, &match->wc);
+                                     TBL_INTERNAL, &match->flow, &match->wc,
+                                     NULL);
     if (rule) {
         *rulep = &rule->up;
     } else {
@@ -6910,4 +6978,6 @@ const struct ofproto_class ofproto_dpif_class = {
     ct_flush,                   /* ct_flush */
     ct_set_zone_timeout_policy,
     ct_del_zone_timeout_policy,
+    ct_zone_limit_update,
+    ct_zone_limit_protection_update,
 };

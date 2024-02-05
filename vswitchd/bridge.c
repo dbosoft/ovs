@@ -157,6 +157,8 @@ struct aa_mapping {
 /* Internal representation of conntrack zone configuration table in OVSDB. */
 struct ct_zone {
     uint16_t zone_id;
+    int64_t limit;              /* Limit of allowed entries. '-1' if not
+                                 * specified. */
     struct simap tp;            /* A map from timeout policy attribute to
                                  * timeout value. */
     struct hmap_node node;      /* Node in 'struct datapath' 'ct_zones'
@@ -168,14 +170,15 @@ struct ct_zone {
 
 /* Internal representation of datapath configuration table in OVSDB. */
 struct datapath {
-    char *type;                 /* Datapath type. */
-    struct hmap ct_zones;       /* Map of 'struct ct_zone' elements, indexed
-                                 * by 'zone'. */
-    struct hmap_node node;      /* Node in 'all_datapaths' hmap. */
-    struct smap caps;           /* Capabilities. */
-    unsigned int last_used;     /* The last idl_seqno that this 'datapath'
-                                 * used in OVSDB. This number is used for
-                                 * garbage collection. */
+    char *type;                     /* Datapath type. */
+    struct hmap ct_zones;           /* Map of 'struct ct_zone' elements,
+                                     * indexed by 'zone'. */
+    struct hmap_node node;          /* Node in 'all_datapaths' hmap. */
+    struct smap caps;               /* Capabilities. */
+    unsigned int last_used;         /* The last idl_seqno that this 'datapath'
+                                     * used in OVSDB. This number is used for
+                                     * garbage collection. */
+    int64_t ct_zone_default_limit;  /* Default CT limit for all zones. */
 };
 
 /* All bridges, indexed by name. */
@@ -662,6 +665,7 @@ ct_zone_alloc(uint16_t zone_id, struct ovsrec_ct_timeout_policy *tp_cfg)
     struct ct_zone *ct_zone = xzalloc(sizeof *ct_zone);
 
     ct_zone->zone_id = zone_id;
+    ct_zone->limit = -1;
     simap_init(&ct_zone->tp);
     get_timeout_policy_from_ovsrec(&ct_zone->tp, tp_cfg);
     return ct_zone;
@@ -670,6 +674,14 @@ ct_zone_alloc(uint16_t zone_id, struct ovsrec_ct_timeout_policy *tp_cfg)
 static void
 ct_zone_remove_and_destroy(struct datapath *dp, struct ct_zone *ct_zone)
 {
+    if (!simap_is_empty(&ct_zone->tp)) {
+        ofproto_ct_del_zone_timeout_policy(dp->type, ct_zone->zone_id);
+    }
+
+    if (ct_zone->limit > -1) {
+        ofproto_ct_zone_limit_update(dp->type, ct_zone->zone_id, NULL);
+    }
+
     hmap_remove(&dp->ct_zones, &ct_zone->node);
     simap_destroy(&ct_zone->tp);
     free(ct_zone);
@@ -706,6 +718,7 @@ datapath_create(const char *type)
 {
     struct datapath *dp = xzalloc(sizeof *dp);
     dp->type = xstrdup(type);
+    dp->ct_zone_default_limit = -1;
     hmap_init(&dp->ct_zones);
     hmap_insert(&all_datapaths, &dp->node, hash_string(type, 0));
     smap_init(&dp->caps);
@@ -722,6 +735,12 @@ datapath_destroy(struct datapath *dp)
             ct_zone_remove_and_destroy(dp, ct_zone);
         }
 
+        if (dp->ct_zone_default_limit > -1) {
+            ofproto_ct_zone_limit_update(dp->type, OVS_ZONE_LIMIT_DEFAULT_ZONE,
+                                         NULL);
+        }
+
+        ofproto_ct_zone_limit_protection_update(dp->type, false);
         hmap_remove(&all_datapaths, &dp->node);
         hmap_destroy(&dp->ct_zones);
         free(dp->type);
@@ -734,6 +753,7 @@ static void
 ct_zones_reconfigure(struct datapath *dp, struct ovsrec_datapath *dp_cfg)
 {
     struct ct_zone *ct_zone;
+    bool protected = false;
 
     /* Add new 'ct_zone's or update existing 'ct_zone's based on the database
      * state. */
@@ -743,29 +763,55 @@ ct_zones_reconfigure(struct datapath *dp, struct ovsrec_datapath *dp_cfg)
         struct ovsrec_ct_timeout_policy *tp_cfg = zone_cfg->timeout_policy;
 
         ct_zone = ct_zone_lookup(&dp->ct_zones, zone_id);
-        if (ct_zone) {
-            struct simap new_tp = SIMAP_INITIALIZER(&new_tp);
-            get_timeout_policy_from_ovsrec(&new_tp, tp_cfg);
-            if (update_timeout_policy(&ct_zone->tp, &new_tp)) {
-                ofproto_ct_set_zone_timeout_policy(dp->type, ct_zone->zone_id,
-                                                   &ct_zone->tp);
-            }
-        } else {
+        if (!ct_zone) {
             ct_zone = ct_zone_alloc(zone_id, tp_cfg);
             hmap_insert(&dp->ct_zones, &ct_zone->node, hash_int(zone_id, 0));
-            ofproto_ct_set_zone_timeout_policy(dp->type, ct_zone->zone_id,
-                                               &ct_zone->tp);
         }
+
+        struct simap new_tp = SIMAP_INITIALIZER(&new_tp);
+        get_timeout_policy_from_ovsrec(&new_tp, tp_cfg);
+
+        if (update_timeout_policy(&ct_zone->tp, &new_tp)) {
+            if (simap_count(&ct_zone->tp)) {
+                ofproto_ct_set_zone_timeout_policy(dp->type, ct_zone->zone_id,
+                                                   &ct_zone->tp);
+            } else {
+                ofproto_ct_del_zone_timeout_policy(dp->type, ct_zone->zone_id);
+            }
+        }
+
+        int64_t desired_limit = zone_cfg->limit ? *zone_cfg->limit : -1;
+        if (ct_zone->limit != desired_limit) {
+            ofproto_ct_zone_limit_update(dp->type, zone_id, zone_cfg->limit);
+            ct_zone->limit = desired_limit;
+        }
+
         ct_zone->last_used = idl_seqno;
+
+        protected = protected || !!zone_cfg->limit;
     }
 
     /* Purge 'ct_zone's no longer found in the database. */
     HMAP_FOR_EACH_SAFE (ct_zone, node, &dp->ct_zones) {
         if (ct_zone->last_used != idl_seqno) {
-            ofproto_ct_del_zone_timeout_policy(dp->type, ct_zone->zone_id);
             ct_zone_remove_and_destroy(dp, ct_zone);
         }
     }
+
+    /* Reconfigure default CT zone limit if needed. */
+    int64_t default_limit = dp_cfg->ct_zone_default_limit
+                            ? *dp_cfg->ct_zone_default_limit
+                            : -1;
+
+    if (dp->ct_zone_default_limit != default_limit) {
+        ofproto_ct_zone_limit_update(dp->type, OVS_ZONE_LIMIT_DEFAULT_ZONE,
+                                     dp_cfg->ct_zone_default_limit);
+        dp->ct_zone_default_limit = default_limit;
+    }
+
+    protected = protected || !!dp_cfg->ct_zone_default_limit;
+
+    ofproto_ct_zone_limit_protection_update(dp->type, protected);
 }
 
 static void
@@ -1560,11 +1606,11 @@ bridge_configure_ipfix(struct bridge *br)
         be_opts.enable_tunnel_sampling = smap_get_bool(&be_cfg->other_config,
                                              "enable-tunnel-sampling", true);
 
-        be_opts.enable_input_sampling = !smap_get_bool(&be_cfg->other_config,
-                                              "enable-input-sampling", false);
+        be_opts.enable_input_sampling = smap_get_bool(&be_cfg->other_config,
+                                              "enable-input-sampling", true);
 
-        be_opts.enable_output_sampling = !smap_get_bool(&be_cfg->other_config,
-                                              "enable-output-sampling", false);
+        be_opts.enable_output_sampling = smap_get_bool(&be_cfg->other_config,
+                                              "enable-output-sampling", true);
 
         virtual_obs_id = smap_get(&be_cfg->other_config, "virtual_obs_id");
         be_opts.virtual_obs_id = nullable_xstrdup(virtual_obs_id);
@@ -1694,11 +1740,12 @@ port_configure_stp(const struct ofproto *ofproto, struct port *port,
     if (config_str) {
         port_s->path_cost = strtoul(config_str, NULL, 10);
     } else {
-        enum netdev_features current;
-        unsigned int mbps;
+        uint32_t mbps;
 
-        netdev_get_features(iface->netdev, &current, NULL, NULL, NULL);
-        mbps = netdev_features_to_bps(current, NETDEV_DEFAULT_BPS) / 1000000;
+        netdev_get_speed(iface->netdev, &mbps, NULL);
+        if (!mbps) {
+            mbps = NETDEV_DEFAULT_BPS / 1000000;
+        }
         port_s->path_cost = stp_convert_speed_to_cost(mbps);
     }
 
@@ -1777,11 +1824,12 @@ port_configure_rstp(const struct ofproto *ofproto, struct port *port,
     if (config_str) {
         port_s->path_cost = strtoul(config_str, NULL, 10);
     } else {
-        enum netdev_features current;
-        unsigned int mbps;
+        uint32_t mbps;
 
-        netdev_get_features(iface->netdev, &current, NULL, NULL, NULL);
-        mbps = netdev_features_to_bps(current, NETDEV_DEFAULT_BPS) / 1000000;
+        netdev_get_speed(iface->netdev, &mbps, NULL);
+        if (!mbps) {
+            mbps = NETDEV_DEFAULT_BPS / 1000000;
+        }
         port_s->path_cost = rstp_convert_speed_to_cost(mbps);
     }
 
@@ -2418,6 +2466,7 @@ iface_refresh_netdev_status(struct iface *iface)
     struct eth_addr mac;
     int64_t bps, mtu_64, ifindex64, link_resets;
     int mtu, error;
+    uint32_t mbps;
 
     if (iface_is_synthetic(iface)) {
         return;
@@ -2456,14 +2505,19 @@ iface_refresh_netdev_status(struct iface *iface)
     ovsrec_interface_set_link_resets(iface->cfg, &link_resets, 1);
 
     error = netdev_get_features(iface->netdev, &current, NULL, NULL, NULL);
-    bps = !error ? netdev_features_to_bps(current, 0) : 0;
-    if (bps) {
+    if (!error) {
         ovsrec_interface_set_duplex(iface->cfg,
                                     netdev_features_is_full_duplex(current)
                                     ? "full" : "half");
-        ovsrec_interface_set_link_speed(iface->cfg, &bps, 1);
     } else {
         ovsrec_interface_set_duplex(iface->cfg, NULL);
+    }
+
+    netdev_get_speed(iface->netdev, &mbps, NULL);
+    if (mbps) {
+        bps = mbps * 1000000ULL;
+        ovsrec_interface_set_link_speed(iface->cfg, &bps, 1);
+    } else {
         ovsrec_interface_set_link_speed(iface->cfg, NULL, 0);
     }
 

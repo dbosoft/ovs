@@ -146,10 +146,6 @@ $(srcdir)/tests/fuzz-regression-list.at: tests/automake.mk
 	    echo "TEST_FUZZ_REGRESSION([$$basename])"; \
 	done > $@.tmp && mv $@.tmp $@
 
-EXTRA_DIST += $(MFEX_AUTOVALIDATOR_TESTS)
-MFEX_AUTOVALIDATOR_TESTS = \
-	tests/mfex_fuzzy.py
-
 OVSDB_CLUSTER_TESTSUITE_AT = \
 	tests/ovsdb-cluster-testsuite.at \
 	tests/ovsdb-execution.at \
@@ -215,8 +211,7 @@ AUTOTEST_PATH = utilities:vswitchd:ovsdb:vtep:tests:ipsec:$(PTHREAD_WIN32_DIR_DL
 check-local:
 	set $(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH); \
 	"$$@" $(TESTSUITEFLAGS) || \
-	(test -z "$$(find $(TESTSUITE_DIR) -name 'asan.*')" && \
-	 test -z "$$(find $(TESTSUITE_DIR) -name 'ubsan.*')" && \
+	(test -z "$$(find $(TESTSUITE_DIR) -name 'sanitizers.*')" && \
 	 test X'$(RECHECK)' = Xyes && "$$@" --recheck)
 
 # Python Coverage support.
@@ -455,10 +450,12 @@ tests_ovstest_SOURCES = \
 	tests/test-barrier.c \
 	tests/test-bundle.c \
 	tests/test-byte-order.c \
+	tests/test-byteq.c \
 	tests/test-classifier.c \
 	tests/test-ccmap.c \
 	tests/test-cmap.c \
 	tests/test-conntrack.c \
+	tests/test-cooperative-multitasking.c \
 	tests/test-csum.c \
 	tests/test-flows.c \
 	tests/test-hash.c \
@@ -521,8 +518,9 @@ tests_test_type_props_SOURCES = tests/test-type-props.c
 CHECK_PYFILES = \
 	tests/appctl.py \
 	tests/flowgen.py \
-	tests/mfex_fuzzy.py \
+	tests/genpkts.py \
 	tests/ovsdb-monitor-sort.py \
+	tests/system-dpdk-find-device.py \
 	tests/test-daemon.py \
 	tests/test-dpparse.py \
 	tests/test-json.py \

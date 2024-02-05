@@ -84,8 +84,10 @@ EXTRA_DIST = \
 	.ci/osx-build.sh \
 	.ci/osx-prepare.sh \
 	.cirrus.yml \
+	.editorconfig \
 	.github/workflows/build-and-test.yml \
 	.github/workflows/build-windows.yml \
+	.readthedocs.yaml \
 	appveyor.yml \
 	boot.sh \
 	poc/builders/Vagrantfile \
@@ -370,7 +372,7 @@ ALL_LOCAL += manpage-check
 manpage-check: $(man_MANS) $(dist_man_MANS) $(noinst_man_MANS)
 	@error=false; \
 	for manpage in $?; do \
-	  LANG=en_US.UTF-8 groff -w mac -w delim -w escape -w input -w missing -w tab -T utf8 -man -p -z $$manpage >$@.tmp 2>&1; \
+	  LANG=en_US.UTF-8 groff -t -w mac -w delim -w escape -w input -w missing -w tab -T utf8 -man -p -z $$manpage >$@.tmp 2>&1; \
 	  if grep warning: $@.tmp; then error=:; fi; \
 	  rm -f $@.tmp; \
 	done; \
@@ -417,7 +419,7 @@ endif
 CLEANFILES += flake8-check
 
 -include manpages.mk
-manpages.mk: $(MAN_ROOTS) build-aux/sodepends.py python/build/soutil.py
+manpages.mk: $(MAN_ROOTS) build-aux/sodepends.py python/ovs_build_helpers/soutil.py
 	@PYTHONPATH=$$PYTHONPATH$(psep)$(srcdir)/python $(PYTHON3) $(srcdir)/build-aux/sodepends.py -I. -I$(srcdir) $(MAN_ROOTS) >$(@F).tmp
 	@if cmp -s $(@F).tmp $@; then \
 	  touch $@; \

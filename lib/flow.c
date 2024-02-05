@@ -935,6 +935,10 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
         nw_proto = nh->ip_proto;
         nw_frag = ipv4_get_nw_frag(nh);
         data_pull(&data, &size, ip_len);
+        dp_packet_hwol_set_tx_ipv4(packet);
+        if (dp_packet_ip_checksum_good(packet)) {
+            dp_packet_hwol_set_tx_ip_csum(packet);
+        }
     } else if (dl_type == htons(ETH_TYPE_IPV6)) {
         const struct ovs_16aligned_ip6_hdr *nh = data;
         ovs_be32 tc_flow;
@@ -948,6 +952,7 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
         }
         data_pull(&data, &size, sizeof *nh);
 
+        dp_packet_hwol_set_tx_ipv6(packet);
         plen = ntohs(nh->ip6_plen);
         dp_packet_set_l2_pad_size(packet, size - plen);
         size = plen;   /* Never pull padding. */
@@ -1049,6 +1054,11 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
                     } else if (dl_type == htons(ETH_TYPE_IPV6)) {
                         dp_packet_update_rss_hash_ipv6_tcp_udp(packet);
                     }
+                    dp_packet_ol_l4_csum_check_partial(packet);
+                    if (dp_packet_l4_checksum_good(packet)
+                        || dp_packet_ol_l4_csum_partial(packet)) {
+                        dp_packet_hwol_set_csum_tcp(packet);
+                    }
                 }
             }
         } else if (OVS_LIKELY(nw_proto == IPPROTO_UDP)) {
@@ -1064,6 +1074,11 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
                 } else if (dl_type == htons(ETH_TYPE_IPV6)) {
                     dp_packet_update_rss_hash_ipv6_tcp_udp(packet);
                 }
+                dp_packet_ol_l4_csum_check_partial(packet);
+                if (dp_packet_l4_checksum_good(packet)
+                    || dp_packet_ol_l4_csum_partial(packet)) {
+                    dp_packet_hwol_set_csum_udp(packet);
+                }
             }
         } else if (OVS_LIKELY(nw_proto == IPPROTO_SCTP)) {
             if (OVS_LIKELY(size >= SCTP_HEADER_LEN)) {
@@ -1073,6 +1088,11 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
                 miniflow_push_be16(mf, tp_dst, sctp->sctp_dst);
                 miniflow_push_be16(mf, ct_tp_src, ct_tp_src);
                 miniflow_push_be16(mf, ct_tp_dst, ct_tp_dst);
+                dp_packet_ol_l4_csum_check_partial(packet);
+                if (dp_packet_l4_checksum_good(packet)
+                    || dp_packet_ol_l4_csum_partial(packet)) {
+                    dp_packet_hwol_set_csum_sctp(packet);
+                }
             }
         } else if (OVS_LIKELY(nw_proto == IPPROTO_ICMP)) {
             if (OVS_LIKELY(size >= ICMP_HEADER_LEN)) {
@@ -3191,6 +3211,7 @@ flow_compose_l4_csum(struct dp_packet *p, const struct flow *flow,
             tcp->tcp_csum = 0;
             tcp->tcp_csum = csum_finish(csum_continue(pseudo_hdr_csum,
                                                       tcp, l4_len));
+            dp_packet_ol_set_l4_csum_good(p);
         } else if (flow->nw_proto == IPPROTO_UDP) {
             struct udp_header *udp = dp_packet_l4(p);
 
@@ -3200,6 +3221,7 @@ flow_compose_l4_csum(struct dp_packet *p, const struct flow *flow,
             if (!udp->udp_csum) {
                 udp->udp_csum = htons(0xffff);
             }
+            dp_packet_ol_set_l4_csum_good(p);
         } else if (flow->nw_proto == IPPROTO_ICMP) {
             struct icmp_header *icmp = dp_packet_l4(p);
 
@@ -3247,9 +3269,12 @@ packet_expand(struct dp_packet *p, const struct flow *flow, size_t size)
             struct ip_header *ip = dp_packet_l3(p);
 
             ip->ip_tot_len = htons(p->l4_ofs - p->l3_ofs + l4_len);
-            ip->ip_csum = 0;
-            ip->ip_csum = csum(ip, sizeof *ip);
-
+            if (dp_packet_hwol_tx_ip_csum(p)) {
+                dp_packet_ol_reset_ip_csum_good(p);
+            } else {
+                dp_packet_ip_set_header_csum(p, false);
+                dp_packet_ol_set_ip_csum_good(p);
+            }
             pseudo_hdr_csum = packet_csum_pseudoheader(ip);
         } else { /* ETH_TYPE_IPV6 */
             struct ovs_16aligned_ip6_hdr *nh = dp_packet_l3(p);
@@ -3275,6 +3300,8 @@ packet_expand(struct dp_packet *p, const struct flow *flow, size_t size)
  * (This is useful only for testing, obviously, and the packet isn't really
  * valid.  Lots of fields are just zeroed.)
  *
+ * If 'bad_csum' is true, the final IP checksum is invalid.
+ *
  * For packets whose protocols can encapsulate arbitrary L7 payloads, 'l7' and
  * 'l7_len' determine that payload:
  *
@@ -3287,7 +3314,7 @@ packet_expand(struct dp_packet *p, const struct flow *flow, size_t size)
  *      from 'l7'. */
 void
 flow_compose(struct dp_packet *p, const struct flow *flow,
-             const void *l7, size_t l7_len)
+             const void *l7, size_t l7_len, bool bad_csum)
 {
     /* Add code to this function (or its callees) for emitting new fields or
      * protocols.  (This isn't essential, so it can be skipped for initial
@@ -3338,6 +3365,18 @@ flow_compose(struct dp_packet *p, const struct flow *flow,
         ip->ip_tot_len = htons(p->l4_ofs - p->l3_ofs + l4_len);
         /* Checksum has already been zeroed by put_zeros call. */
         ip->ip_csum = csum(ip, sizeof *ip);
+
+        if (bad_csum) {
+            /*
+             * Internet checksum is a sum complement to zero, so any other
+             * value will result in an invalid checksum. Here, we flip one
+             * bit.
+             */
+            ip->ip_csum ^= (OVS_FORCE ovs_be16) 0x1;
+            dp_packet_ip_checksum_bad(p);
+        } else {
+            dp_packet_ol_set_ip_csum_good(p);
+        }
 
         pseudo_hdr_csum = packet_csum_pseudoheader(ip);
         flow_compose_l4_csum(p, flow, pseudo_hdr_csum);

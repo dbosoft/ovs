@@ -324,8 +324,8 @@ A user can use this option to set a minimum frequency of Rx queue to PMD
 reassignment due to PMD Auto Load Balance. For example, this could be set
 (in min) such that a reassignment is triggered at most every few hours.
 
-PMD load based sleeping (Experimental)
---------------------------------------
+PMD load based sleeping
+-----------------------
 
 PMD threads constantly poll Rx queues which are assigned to them. In order to
 reduce the CPU cycles they use, they can sleep for small periods of time
@@ -334,7 +334,12 @@ when there is no load or very-low load on all the Rx queues they poll.
 This can be enabled by setting the max requested sleep time (in microseconds)
 for a PMD thread::
 
-    $ ovs-vsctl set open_vswitch . other_config:pmd-maxsleep=50
+    $ ovs-vsctl set open_vswitch . other_config:pmd-sleep-max=50
+
+.. note::
+
+    Previous config name 'pmd-maxsleep' is deprecated and will be removed in a
+    future release.
 
 With a non-zero max value a PMD may request to sleep by an incrementing amount
 of time up to the maximum time. If at any point the threshold of at least half
@@ -369,6 +374,36 @@ system configuration (e.g. enabling processor C-states) and workloads.
     the processor is in a low-power state it may result in some lost packets or
     extra latency before the PMD thread returns to processing packets at full
     rate.
+
+Maximum sleep values can also be set for individual PMD threads using
+key:value pairs in the form of core:max_sleep. Any PMD thread that has been
+assigned a specified value will use that. Any PMD thread that does not have
+a specified value will use the current global value.
+
+Specified values for individual PMD threads can be added or removed at
+any time.
+
+For example, to set PMD threads on cores 8 and 9 to never request a load based
+sleep and all others PMD threads to be able to request a max sleep of
+50 microseconds (us)::
+
+    $ ovs-vsctl set open_vswitch . other_config:pmd-sleep-max=50,8:0,9:0
+
+The max sleep value for each PMD thread can be checked in the logs or with::
+
+    $ ovs-appctl dpif-netdev/pmd-sleep-show
+    pmd thread numa_id 0 core_id 8:
+      max sleep:    0 us
+    pmd thread numa_id 1 core_id 9:
+      max sleep:    0 us
+    pmd thread numa_id 0 core_id 10:
+      max sleep:   50 us
+    pmd thread numa_id 1 core_id 11:
+      max sleep:   50 us
+    pmd thread numa_id 0 core_id 12:
+      max sleep:   50 us
+    pmd thread numa_id 1 core_id 13:
+      max sleep:   50 us
 
 .. _ovs-vswitchd(8):
     http://openvswitch.org/support/dist-docs/ovs-vswitchd.8.html

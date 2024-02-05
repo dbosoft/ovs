@@ -1,5 +1,5 @@
 version: 1.0.{build}
-image: Visual Studio 2019
+image: Previous Visual Studio 2019
 branches:
   only:
   - master
@@ -29,7 +29,7 @@ init:
 
     cd C:\openvswitch
 
-    git clone https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
+    git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
 
     python3 -m pip install pypiwin32 --disable-pip-version-check
 

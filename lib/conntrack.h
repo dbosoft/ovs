@@ -92,7 +92,7 @@ int conntrack_execute(struct conntrack *ct, struct dp_packet_batch *pkt_batch,
                       ovs_be16 dl_type, bool force, bool commit, uint16_t zone,
                       const uint32_t *setmark,
                       const struct ovs_key_ct_labels *setlabel,
-                      ovs_be16 tp_src, ovs_be16 tp_dst, const char *helper,
+                      const char *helper,
                       const struct nat_action_info_t *nat_action_info,
                       long long now, uint32_t tp_id);
 void conntrack_clear(struct dp_packet *packet);
@@ -100,7 +100,10 @@ void conntrack_clear(struct dp_packet *packet);
 struct conntrack_dump {
     struct conntrack *ct;
     unsigned bucket;
-    struct cmap_position cm_pos;
+    union {
+        struct cmap_position cm_pos;
+        struct hmap_position hmap_pos;
+    };
     bool filter_zone;
     uint16_t zone;
 };
@@ -119,10 +122,13 @@ struct timeout_policy {
 
 enum {
     INVALID_ZONE = -2,
-    DEFAULT_ZONE = -1, /* Default zone for zone limit management. */
+    DEFAULT_ZONE = OVS_ZONE_LIMIT_DEFAULT_ZONE, /* Default zone for zone
+                                                 * limit management. */
     MIN_ZONE = 0,
     MAX_ZONE = 0xFFFF,
 };
+
+BUILD_ASSERT_DECL(DEFAULT_ZONE > INVALID_ZONE && DEFAULT_ZONE < MIN_ZONE);
 
 struct ct_dpif_entry;
 struct ct_dpif_tuple;
@@ -131,6 +137,11 @@ int conntrack_dump_start(struct conntrack *, struct conntrack_dump *,
                          const uint16_t *pzone, int *);
 int conntrack_dump_next(struct conntrack_dump *, struct ct_dpif_entry *);
 int conntrack_dump_done(struct conntrack_dump *);
+
+int conntrack_exp_dump_start(struct conntrack *, struct conntrack_dump *,
+                             const uint16_t *);
+int conntrack_exp_dump_next(struct conntrack_dump *, struct ct_dpif_exp *);
+int conntrack_exp_dump_done(struct conntrack_dump *);
 
 int conntrack_flush(struct conntrack *, const uint16_t *zone);
 int conntrack_flush_tuple(struct conntrack *, const struct ct_dpif_tuple *,
@@ -146,6 +157,6 @@ struct ipf *conntrack_ipf_ctx(struct conntrack *ct);
 struct conntrack_zone_limit zone_limit_get(struct conntrack *ct,
                                            int32_t zone);
 int zone_limit_update(struct conntrack *ct, int32_t zone, uint32_t limit);
-int zone_limit_delete(struct conntrack *ct, uint16_t zone);
+int zone_limit_delete(struct conntrack *ct, int32_t zone);
 
 #endif /* conntrack.h */
