@@ -17,7 +17,7 @@ function configure_ovs()
 
 OPTS="${EXTRA_OPTS} ${OPTS} $*"
 configure_ovs $OPTS
-make -j || { cat config.log; exit 1; }
+make || { cat config.log; exit 1; }
 
 if [ "$TESTSUITE" ]; then
     if ! make check RECHECK=yes; then
