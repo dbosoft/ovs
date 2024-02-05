@@ -6,7 +6,7 @@ jobs:
   build-windows:
     name: windows ${{ join(matrix.*, ' ') }}
     env:
-      OPTS: --with-vstudiotarget=${{ matrix.target }} --with-vstudiotargetver=Win10 --prefix=C:/openvswitch/usr --localstatedir=C:/ProgramData/openvswitch/var --sysconfdir=C:/ProgramData/openvswitch/etc --enable-ssl --with-openssl=c:/OpenSSL-Win64 ${{ matrix.opts }}
+      OPTS: --with-vstudiotarget=${{ matrix.target }} --with-vstudiotargetver=Win10 --prefix=C:/openvswitch/usr --localstatedir=C:/ProgramData/openvswitch/var --sysconfdir=C:/ProgramData/openvswitch/etc --disable-ssl ${{ matrix.opts }}
       TESTSUITE: ${{ matrix.testsuite }}
     
     runs-on: windows-latest
