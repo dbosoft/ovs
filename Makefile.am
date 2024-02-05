@@ -79,11 +79,14 @@ EXTRA_DIST = \
 	.ci/dpdk-prepare.sh \
 	.ci/linux-build.sh \
 	.ci/linux-prepare.sh \
+	.ci/windows-build.sh \
+	.ci/windows-prepare.sh \
 	.ci/osx-build.sh \
 	.ci/osx-prepare.sh \
 	.cirrus.yml \
 	.editorconfig \
 	.github/workflows/build-and-test.yml \
+	.github/workflows/build-windows.yml \
 	.readthedocs.yaml \
 	appveyor.yml \
 	boot.sh \

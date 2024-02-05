@@ -15,15 +15,15 @@ init:
 
     mkdir C:\openvswitch\driver
 
-    $source = "https://slproweb.com/download/Win64OpenSSL-1_0_2u.exe"
+    $source = "https://slproweb.com/download/Win64OpenSSL-1_1_1s.exe"
 
-    $destination = "C:\ovs-build-downloads\Win64OpenSSL-1_0_2u.exe"
+    $destination = "C:\ovs-build-downloads\Win64OpenSSL-1_1_1s.exe"
 
     Invoke-WebRequest $source -OutFile $destination
 
     cd C:\ovs-build-downloads
 
-    .\Win64OpenSSL-1_0_2u.exe /silent /verysilent /sp- /suppressmsgboxes
+    .\Win64OpenSSL-1_1_1s.exe /silent /verysilent /sp- /suppressmsgboxes
 
     Start-Sleep -s 30
 
