@@ -42,11 +42,6 @@ jobs:
       # pypiwin32 has to be installed with a Windows python version therefore
       # this step will configure python first on Windows and exports
       # its location for MSYS bash.  
-      - name: install openssl
-        shell: cmd
-        run: |
-            choco install openssl -y
-            mklink /j C:\OpenSSL-Win64 "c:\Program Files\OpenSSL-Win64"
       - name: configure python in Windows cmdline
         shell: cmd
         run: |
