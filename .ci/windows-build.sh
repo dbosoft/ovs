@@ -12,6 +12,7 @@ CONFIGURATION=$1
     --with-vstudiotarget="${CONFIGURATION}" || (cat config.log && exit 1)
 
 make -j4
-make datapath_windows_analyze
+make datapath_windows_analyze_win10
+make datapath_windows_analyze_win8
 make install
 make windows_installer
