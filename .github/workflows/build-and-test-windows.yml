@@ -92,7 +92,7 @@ jobs:
         shell: cmd
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
       
-      - name: prepare
+      - name: generate build script
         run: |
           cat > $RUNNER_TEMP/build.sh <<EOF
           #!/bin/bash
@@ -102,6 +102,7 @@ jobs:
             #mv $(which python3) $(which python3)_copy
 
             cd /c/pthreads4w-code && nmake all install
+            cd $GITHUB_WORKSPACE
 
             ./boot.sh
             ./configure CC=build-aux/cccl LD="$(which link)" \
