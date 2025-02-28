@@ -50,8 +50,8 @@ jobs:
       - name: install openssl
         shell: powershell
         run: | 
-            Remove-Item -Recurse -Force -Path C:/OpenSSL-Win64
-            New-Item -ItemType Directory -Force -Path C:\ovs-build-downloads
+            Remove-Item -Recurse -Force -Path C:/OpenSSL-Win64 -ErrorAction Continue
+            New-Item -ItemType Directory -Force -Path "$RUNNER_TEMP\ovs-build-downloads
         
             # Find and download the latest stable OpenSSl 3.0.
             $URL = "https://raw.githubusercontent.com/slproweb/opensslhashes/master/win32_openssl_hashes.json"
