@@ -103,6 +103,16 @@ jobs:
 
             cd /c/pthreads4w-code && nmake all install
 
+            ./boot.sh
+            ./configure CC=build-aux/cccl LD="$(which link)" \
+                LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
+                --prefix=C:/openvswitch/usr --localstatedir=C:/openvswitch/var \
+                --sysconfdir=C:/openvswitch/etc --with-pthread=c:/PTHREADS-BUILT/ \
+                --enable-ssl --with-openssl=C:/OpenSSL-Win64 \
+                -with-vstudiotargetver=Win10 \
+                --with-vstudiotarget="Release"
+
+            make -j4
           EOF
           chmod +x $RUNNER_TEMP/build.sh 
           cat $RUNNER_TEMP/build.sh 
