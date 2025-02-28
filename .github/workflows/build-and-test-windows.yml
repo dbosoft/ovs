@@ -51,6 +51,8 @@ jobs:
         shell: powershell
         run: | 
             $RUNNER_TEMP = $env:RUNNER_TEMP
+            $ProgressPreference = 'SilentlyContinue'
+
             Remove-Item -Recurse -Force -Path C:/OpenSSL-Win64 -ErrorAction Continue
             New-Item -ItemType Directory -Force -Path "$RUNNER_TEMP\ovs-build-downloads"
         
@@ -80,7 +82,7 @@ jobs:
                 Write-Host "Using cached:" $destination
             } else {
                 Write-Host "Downloading:" $source.url
-                Invoke-WebRequest $source.url -OutFile $destination -ProgressPreference SilentlyContinue
+                Invoke-WebRequest $source.url -OutFile $destination
             }
         
             Write-Host "Installing:" $destination
@@ -115,7 +117,7 @@ jobs:
         uses: actions/upload-artifact@v4.6.1
         with:
           name: logs-windows-${{ join(matrix.*, '-') }}
-          path: config.log
+          path: ./config.log
       - name: install
         run: |
 
