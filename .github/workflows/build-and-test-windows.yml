@@ -83,7 +83,7 @@ jobs:
             }
         
             Write-Host "Installing:" $destination
-            Start-Process -FilePath $destination -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes" -Wait
+            Start-Process -FilePath $destination  -Wait -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes"
      
       - name: clone pthread
         shell: cmd
