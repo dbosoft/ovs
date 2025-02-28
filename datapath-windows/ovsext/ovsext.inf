@@ -9,6 +9,7 @@ ClassGUID   = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider    = %OVS%
 CatalogFile = ovsext.cat
 DriverVer   = 10/10/2013,1.0
+PnpLockdown = 1
 
 [Manufacturer]
 %OVS%=OVS,NTx86,NTia64,NTamd64
