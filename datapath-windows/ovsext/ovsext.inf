@@ -12,44 +12,57 @@ DriverVer   = 10/10/2013,1.0
 PnpLockdown = 1
 
 [Manufacturer]
-%OVS%=OVS,NTx86,NTia64,NTamd64
+%OVS%=OVS,NTamd64,NTamd64.10.0...19044
 
-[OVS.NTx86]
-%OVSExt_Desc%=Install, OVSExt
+; Model section for Windows 10 21H2 (build 19044) or newer. This also includes
+; Server 2022 and Windows 11. These OS will use run from driver store (DIRID 13).
+; 
+; According to the documentation, run from driver store (DIRID 13) should work
+; with build 16299 or 17134 or later. In reality, the service installation fails
+; on Server 2019 (build 17763). Windows 10 21H2 (build 19044) is the oldest non-LTSC
+; build which is still supported.
+[OVS.NTamd64.10.0...19044]
+%OVSExt_Desc% = OVS_Install, OVSExt
 
-[OVS.NTia64]
-%OVSExt_Desc%=Install, OVSExt
-
+; Model section for older versions of Windows
 [OVS.NTamd64]
-%OVSExt_Desc%=Install, OVSExt
+%OVSExt_Desc% = OVS_Install_Fallback, OVSExt
 
 ;-------------------------------------------------------------------------
 ; Installation Section
 ;-------------------------------------------------------------------------
-[Install]
-AddReg=Inst_Ndi
-Characteristics=0x40000
-NetCfgInstanceId="{583CC151-73EC-4A6A-8B47-578297AD7623}"
-Copyfiles = OVSExt.copyfiles.sys
+[OVS_Install]
+AddReg           = OVS_Install_Ndi
+Characteristics  = 0x40000
+NetCfgInstanceId = "{583CC151-73EC-4A6A-8B47-578297AD7623}"
+Copyfiles        = OVS_Install_Files
+
+[OVS_Install_Fallback]
+AddReg           = OVS_Install_Ndi
+Characteristics  = 0x40000
+NetCfgInstanceId = "{583CC151-73EC-4A6A-8B47-578297AD7623}"
+Copyfiles        = OVS_Install_Fallback_Files
 
 [SourceDisksNames]
-1=%OVSExt_Desc%,"",,
+1 = %OVSExt_Desc%
 
 [SourceDisksFiles]
-OVSExt.sys=1
+OVSExt.sys = 1
 
 [DestinationDirs]
-DefaultDestDir=12
-OVSExt.copyfiles.sys=12
+OVS_Install_Files          = 13
+OVS_Install_Fallback_Files = 12
 
-[OVSExt.copyfiles.sys]
+[OVS_Install_Files]
 OVSExt.sys,,,2
 
+[OVS_Install_Fallback_Files]
+OVSExt.sys,,,2
 
 ;-------------------------------------------------------------------------
 ; Ndi installation support
 ;-------------------------------------------------------------------------
-[Inst_Ndi]
+[OVS_Install_Ndi]
 HKR, Ndi,Service,,"OVSExt"
 HKR, Ndi,CoServices,0x00010000,"OVSExt"
 HKR, Ndi,HelpText,,%OVSExt_HelpText%
@@ -61,13 +74,27 @@ HKR, Ndi\Interfaces, FilterMediaTypes,,"vmnetextension"
 HKR, Ndi,FilterRunType, 0x00010001, 2 ; optional
 
 ;-------------------------------------------------------------------------
-; Service installation support, common.EventLog here is to demonstrate how to
-; write an enent log
+; Service installation
 ;-------------------------------------------------------------------------
-[Install.Services]
-AddService=OVSExt,,OVSExt_Service_Inst;, common.EventLog
+[OVS_Install.Services]
+AddService = OVSExt,,OVS_Install_AddService
 
-[OVSExt_Service_Inst]
+[OVS_Install_AddService]
+DisplayName     = %OVSExt_Desc%
+ServiceType     = 1 ;SERVICE_KERNEL_DRIVER
+StartType       = 1 ;SERVICE_SYSTEM_START
+ErrorControl    = 1 ;SERVICE_ERROR_NORMAL
+ServiceBinary   = %13%\OVSExt.sys
+LoadOrderGroup  = NDIS
+Description     = %OVSExt_Desc%
+
+[OVS_Install.Remove.Services]
+DelService=OVSExt,0x200
+
+[OVS_Install_Fallback.Services]
+AddService = OVSExt,,OVS_Install_Fallback_AddService
+
+[OVS_Install_Fallback_AddService]
 DisplayName     = %OVSExt_Desc%
 ServiceType     = 1 ;SERVICE_KERNEL_DRIVER
 StartType       = 1 ;SERVICE_SYSTEM_START
@@ -76,7 +103,7 @@ ServiceBinary   = %12%\OVSExt.sys
 LoadOrderGroup  = NDIS
 Description     = %OVSExt_Desc%
 
-[Install.Remove.Services]
+[OVS_Install_Fallback.Remove.Services]
 DelService=OVSExt,0x200
 
 [Strings]
