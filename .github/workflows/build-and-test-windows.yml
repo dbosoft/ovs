@@ -50,6 +50,7 @@ jobs:
       - name: install openssl
         shell: powershell
         run: | 
+            $RUNNER_TEMP = $env:RUNNER_TEMP
             Remove-Item -Recurse -Force -Path C:/OpenSSL-Win64 -ErrorAction Continue
             New-Item -ItemType Directory -Force -Path "$RUNNER_TEMP\ovs-build-downloads"
         
@@ -79,7 +80,7 @@ jobs:
                 Write-Host "Using cached:" $destination
             } else {
                 Write-Host "Downloading:" $source.url
-                Invoke-WebRequest $source.url -OutFile $destination
+                Invoke-WebRequest $source.url -OutFile $destination -ProgressPreference SilentlyContinue
             }
         
             Write-Host "Installing:" $destination
@@ -90,10 +91,25 @@ jobs:
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
       
       - name: prepare
+        shell: msys2
+        run: |
+          cat ~/build.sh << 'EOF'
+          #!/bin/bash
+          set -e
+            # Use an MSVC linker and a Windows version of Python.
+            mv $(which link) $(which link)_copy
+            mv $(which python3) $(which python3)_copy
+
+            cd /c/pthreads4w-code && nmake all install
+
+          EOF
+          chmod +x ~/build.sh
+          cat ~/build.sh 
+      - name: build
         shell: cmd
         run: |
-          
-
+          @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
+          C:\msys64\msys2_shell.cmd -here -defterm -no-start -use-full-path -c "~/build.sh 2>&1"    
       - name: upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4.6.1
