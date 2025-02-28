@@ -59,9 +59,9 @@ OvsAllocateAlignedMemory(size_t size, UINT16 align)
          * XXX: NdisAllocateMemory*() functions don't talk anything about
          * alignment. Hence using ExAllocatePool*();
          */
-        return (VOID *)ExAllocatePoolWithTagPriority(NonPagedPoolNx, size,
-                                                     OVS_MEMORY_TAG,
-                                                     NormalPoolPriority);
+        return (VOID *)ExAllocatePoolPriorityUninitialized(NonPagedPoolNx, size,
+            OVS_MEMORY_TAG,
+            NormalPoolPriority);
     }
 
     /* Invalid user input. */
