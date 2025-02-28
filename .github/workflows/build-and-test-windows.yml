@@ -33,11 +33,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: base-devel git mingw-w64-ucrt-x86_64-toolchain autotools automake autoconf libtool make patch 
-      - name: install msys tools
-        run: |
-            mkdir -p /var/cache/pacman/pkg/
-            pacman -S --noconfirm --needed automake autoconf libtool make patch    
+          install: base-devel git mingw-w64-ucrt-x86_64-toolchain autotools autoreconf 
       - name: set up python
         uses: actions/setup-python@v2
         with:
