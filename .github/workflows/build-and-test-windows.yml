@@ -102,7 +102,7 @@ jobs:
             #mv $(which python3) $(which python3)_copy
 
             cd /c/pthreads4w-code && nmake all install
-            cd $GITHUB_WORKSPACE
+            cd "$GITHUB_WORKSPACE"
 
             ./boot.sh
             ./configure CC=build-aux/cccl LD="$(which link)" \
