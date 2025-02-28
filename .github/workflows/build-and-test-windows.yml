@@ -94,7 +94,7 @@ jobs:
       
       - name: prepare
         run: |
-          cat ~/build.sh << 'EOF'
+          cat > ~/build.sh <<EOF
           #!/bin/bash
           set -e
             # Use an MSVC linker and a Windows version of Python.
