@@ -83,8 +83,7 @@ jobs:
             }
         
             Write-Host "Installing:" $destination
-            Start-Process -FilePath $destination `
-                -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes" -Wait
+            Start-Process -FilePath $destination -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes" -Wait
       - name: clone pthread
         shell: cmd
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
@@ -96,8 +95,6 @@ jobs:
           path: config.log
       - name: install
         run: |
-          source ~/.visualstudio.sh 
-          source ~/.pythonenv.sh
           make install
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
