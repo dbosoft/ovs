@@ -87,9 +87,8 @@ jobs:
             }
         
             Write-Host "Installing:" $destination
-            Start-Process -FilePath $destination  -Wait -ArgumentList '/silent /verysilent /sp- /suppressmsgboxes'
+            Start-Process -FilePath $destination -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes /DIR=C:\OpenSSL-Win64"  -Wait 
             get-item -Path "C:\OpenSSL-Win64"
-            get-item -Path "C:\Program Files\OpenSSL-Win64"
       - name: clone pthread
         shell: cmd
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
