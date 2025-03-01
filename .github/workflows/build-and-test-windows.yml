@@ -36,7 +36,7 @@ jobs:
           update: true
           install: base-devel git mingw-w64-ucrt-x86_64-toolchain autotools         
       - name: set up python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: '3.x'  
 
@@ -49,6 +49,7 @@ jobs:
             python -m pip install --upgrade pip
             pip install pypiwin32
             
+            echo Python location: %pythonLocation%
             echo export pythonLocation="%pythonLocation%" > c:\msys64\home\%USERNAME%\.pythonenv.sh
             echo export PYTHONPATH="%cd%\python;%cd%\ovs\python;%pythonLocation%\Lib;%pythonLocation%\DLLs;%pythonLocation%\Lib\lib-tk" >> c:\msys64\home\%USERNAME%\.pythonenv.sh
             echo ".pythonenv.sh was generated in c:\msys64\home\%USERNAME%"
