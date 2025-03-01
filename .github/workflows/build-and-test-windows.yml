@@ -6,7 +6,7 @@ jobs:
   build-windows:
     name: windows ${{ join(matrix.*, ' ') }}
     env:
-      OPTS: --with-vstudiotarget=${{ matrix.target }} --with-vstudiotargetver=Win10 ${{ matrix.opts }}
+      OPTS: --with-vstudiotarget=${{ matrix.target }} ${{ matrix.opts }}
       TESTSUITE: ${{ matrix.testsuite }}
     
     runs-on: windows-latest
@@ -117,12 +117,12 @@ jobs:
             ./configure CC=build-aux/cccl LD="\`which link\`" \
                 LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
                 --prefix=C:/openvswitch/usr \
-                --localstatedir=C:/openvswitch/var \
-                --sysconfdir=C:/openvswitch/etc \
+                --localstatedir=C:/ProgramData/openvswitch/var \
+                --sysconfdir=C:/ProgramData/openvswitch/etc \
                 --with-pthread=c:/PTHREADS-BUILT/ \
                 --enable-ssl --with-openssl=C:/OpenSSL-Win64 \
                 -with-vstudiotargetver=Win10 \
-                --with-vstudiotarget="Release"
+                $OPTS"
 
             make -j4
             make datapath_windows_analyze_win10
@@ -140,12 +140,11 @@ jobs:
         uses: actions/upload-artifact@v4.6.1
         with:
           name: logs-windows-${{ join(matrix.*, '-') }}
+          if-no-files-found: ignore
           path: ./config.log
-      - name: install
-        run: |
 
-          #--prefix=C:/openvswitch/usr --localstatedir=C:/ProgramData/openvswitch/var --sysconfdir=C:/ProgramData/openvswitch/etc
-          make install
+      - name: package
+        run: |
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
           cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
           mkdir /C/openvswitch/driver
@@ -153,6 +152,7 @@ jobs:
           cp ./datapath-windows/x64/Win10${{ matrix.target }}/package.cer /C/openvswitch/driver
           cp ./datapath-windows/misc/* /C/openvswitch/driver
           cp ./datapath-windows/ovsext/x64/Win10${{ matrix.target }}/DBO_OVSE.pdb /C/openvswitch/driver
+          mv /C/openvswitch/driver/ovsext.inf /C/openvswitch/driver/DBO_OVSE.inf
       - name: upload build artifacts
         uses: actions/upload-artifact@v4.6.1
         with:
