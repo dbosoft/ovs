@@ -100,11 +100,7 @@ jobs:
       
       - name: disable link in MSYS
         run: mv $(which link) $(which link)_copy
-             
-             if [ -f /ucrt64/bin/python3 ]; then
-               echo "disabling python3 in /ucrt64/bin/python3"
-               mv /ucrt64/bin/python3 /ucrt64/bin/python3_off
-             fi
+             mv /ucrt64/bin/python3 /ucrt64/bin/python3_off
       - name: build pthread  
         shell: cmd
         run: |
@@ -119,8 +115,10 @@ jobs:
             ./boot.sh
             ./configure CC=build-aux/cccl LD="\`which link\`" \
                 LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
-                --prefix=C:/openvswitch/usr --localstatedir=C:/openvswitch/var \
-                --sysconfdir=C:/openvswitch/etc --with-pthread=c:/PTHREADS-BUILT/ \
+                --prefix=C:/openvswitch/usr \
+                --localstatedir=C:/openvswitch/var \
+                --sysconfdir=C:/openvswitch/etc \
+                --with-pthread=c:/PTHREADS-BUILT/ \
                 --enable-ssl --with-openssl=C:/OpenSSL-Win64 \
                 -with-vstudiotargetver=Win10 \
                 --with-vstudiotarget="Release"
