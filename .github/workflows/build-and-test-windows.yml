@@ -122,7 +122,7 @@ jobs:
                 --with-pthread=c:/PTHREADS-BUILT/ \
                 --enable-ssl --with-openssl=C:/OpenSSL-Win64 \
                 -with-vstudiotargetver=Win10 \
-                $OPTS"
+                "$OPTS"
 
             make -j4
             make datapath_windows_analyze_win10
