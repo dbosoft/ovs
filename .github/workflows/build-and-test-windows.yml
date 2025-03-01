@@ -33,7 +33,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: base-devel git mingw-w64-ucrt-x86_64-toolchain autotools 
+          install: base-devel git mingw-w64-ucrt-x86_64-toolchain autotools         
       - name: set up python
         uses: actions/setup-python@v2
         with:
@@ -96,10 +96,12 @@ jobs:
         run: mv $(which link) $(which link)_copy
             
       - name: build pthread
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}      
         shell: cmd
         run: |
           @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
-          C:\msys64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "cd /c/pthreads4w-code && nmake all install 2>&1"             
+          $env:MSYS2_LOCATION\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "cd /c/pthreads4w-code && nmake all install 2>&1"             
       - name: generate build script
         run: |
           cat > $RUNNER_TEMP/build.sh <<EOF
@@ -122,9 +124,11 @@ jobs:
           cat $RUNNER_TEMP/build.sh 
       - name: build
         shell: cmd
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}         
         run: |
           @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
-          C:\msys64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "$RUNNER_TEMP/build.sh 2>&1"    
+          $env:MSYS2_LOCATION\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "$RUNNER_TEMP/build.sh 2>&1"    
       - name: upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4.6.1
