@@ -99,8 +99,9 @@ jobs:
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
       
       - name: disable link in MSYS
-        run: mv $(which link) $(which link)_copy
-             mv /ucrt64/bin/python3 /ucrt64/bin/python3_off
+        run: |
+          mv $(which link) $(which link)_copy
+          mv /ucrt64/bin/python3 /ucrt64/bin/python3_off
       - name: build pthread  
         shell: cmd
         run: |
