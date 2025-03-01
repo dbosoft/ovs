@@ -32,9 +32,9 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
+          release: false
           update: true
           install: base-devel git mingw-w64-ucrt-x86_64-toolchain autotools         
-          location: c:\msys
       - name: set up python
         uses: actions/setup-python@v2
         with:
@@ -88,7 +88,8 @@ jobs:
         
             Write-Host "Installing:" $destination
             Start-Process -FilePath $destination  -Wait -ArgumentList '/silent /verysilent /sp- /suppressmsgboxes'
-     
+            get-item -Path "C:\OpenSSL-Win64"
+            get-item -Path "C:\Program Files\OpenSSL-Win64"
       - name: clone pthread
         shell: cmd
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
@@ -100,7 +101,7 @@ jobs:
         shell: cmd
         run: |
           @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
-          c:\msys\MSYS64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "cd /c/pthreads4w-code && nmake all install 2>&1"             
+          c:\MSYS64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "cd /c/pthreads4w-code && nmake all install 2>&1"             
       - name: generate build script
         run: |
           cat > $RUNNER_TEMP/build.sh <<EOF
@@ -125,7 +126,7 @@ jobs:
         shell: cmd     
         run: |
           @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
-          c:\msys\MSYS64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "$RUNNER_TEMP/build.sh 2>&1"    
+          c:\MSYS64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "$RUNNER_TEMP/build.sh 2>&1"    
       - name: upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4.6.1
