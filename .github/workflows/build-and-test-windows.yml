@@ -100,7 +100,16 @@ jobs:
       
       - name: disable link in MSYS
         run: mv $(which link) $(which link)_copy
-            
+             
+             if [ -f $(which python3) ]; then
+               echo "disabling python3 in $(which python3)"
+               mv $(which python3) $(which python3)_copy
+             fi
+
+              if [ -f $(which python) ]; then
+                echo "disabling python in $(which python)"
+                mv $(which python) $(which python)_copy
+              fi
       - name: build pthread  
         shell: cmd
         run: |
