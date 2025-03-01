@@ -92,18 +92,19 @@ jobs:
         shell: cmd
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
       
+      - name: disable link in MSYS
+        run: mv $(which link) $(which link)_copy
+            
+      - name: build pthread
+        shell: cmd
+        run: |
+          @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
+          C:\msys64\msys2_shell.cmd -here -defterm -no-start -use-full-path -c "cd /c/pthreads4w-code && nmake all install 2>&1"             
       - name: generate build script
         run: |
           cat > $RUNNER_TEMP/build.sh <<EOF
           #!/bin/bash
           set -e
-            # Use an MSVC linker and a Windows version of Python.
-            mv $(which link) $(which link)_copy
-            #mv $(which python3) $(which python3)_copy
-
-            cd /c/pthreads4w-code && nmake all install
-            cd '$GITHUB_WORKSPACE'
-
             ./boot.sh
             ./configure CC=build-aux/cccl LD="$(which link)" \
                 LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
@@ -114,6 +115,8 @@ jobs:
                 --with-vstudiotarget="Release"
 
             make -j4
+            make datapath_windows_analyze_win10
+            make install
           EOF
           chmod +x $RUNNER_TEMP/build.sh 
           cat $RUNNER_TEMP/build.sh 
