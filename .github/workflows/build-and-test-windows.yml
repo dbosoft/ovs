@@ -108,7 +108,7 @@ jobs:
           set -e
             link = \`which link\`
             ./boot.sh
-            ./configure CC=build-aux/cccl LD="\$link" \
+            ./configure CC=build-aux/cccl LD="$link" \
                 LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
                 --prefix=C:/openvswitch/usr --localstatedir=C:/openvswitch/var \
                 --sysconfdir=C:/openvswitch/etc --with-pthread=c:/PTHREADS-BUILT/ \
