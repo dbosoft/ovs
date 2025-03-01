@@ -99,7 +99,7 @@ jobs:
         shell: cmd
         run: |
           @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
-          C:\msys64\msys2_shell.cmd -here -defterm -no-start -use-full-path -c "cd /c/pthreads4w-code && nmake all install 2>&1"             
+          C:\msys64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "cd /c/pthreads4w-code && nmake all install 2>&1"             
       - name: generate build script
         run: |
           cat > $RUNNER_TEMP/build.sh <<EOF
@@ -124,7 +124,7 @@ jobs:
         shell: cmd
         run: |
           @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
-          C:\msys64\msys2_shell.cmd -here -defterm -no-start -use-full-path -c "$RUNNER_TEMP/build.sh 2>&1"    
+          C:\msys64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "$RUNNER_TEMP/build.sh 2>&1"    
       - name: upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4.6.1
