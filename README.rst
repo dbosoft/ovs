@@ -2,9 +2,9 @@
    start-after/end-before lines found in 'Documentation/intro/what-is-ovs'
    are kept up-to-date.
 
-============
-Open vSwitch
-============
+===========================
+Open vSwitch (dbosoft fork)
+===========================
 
 .. image:: https://github.com/openvswitch/ovs/workflows/Build%20and%20Test/badge.svg
     :target: https://github.com/openvswitch/ovs/actions
@@ -48,6 +48,22 @@ a kernel module.  This userspace implementation should be easier to port than
 the kernel-based switch. OVS in userspace can access Linux or DPDK devices.
 Note Open vSwitch with userspace datapath and non DPDK devices is considered
 experimental and comes with a cost in performance.
+
+Why dbosoft fork?
+-----------------
+
+We have forked openvswitch to build it for current windows versions and to 
+work on upstream patches.  
+The source is used in https://github.com/dbosoft/ovn as part of our OVN package
+for eryph - https://github.com/eryph-org/eryph.
+
+Changes compared to upstream:
+- Build for Windows 10 and above (this includes Windows Server 2016)
+- Customized kernel driver for unique signing by Microsoft
+  (signed drivers are not included here)
+
+The installer package is not supported by this fork. But you can download the 
+binaries from the build actions. 
 
 What's here?
 ------------
