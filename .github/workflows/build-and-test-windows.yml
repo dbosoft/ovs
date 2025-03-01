@@ -49,9 +49,9 @@ jobs:
             python -m pip install --upgrade pip
             pip install pypiwin32
             
-            echo export pythonLocation="%pythonLocation%" > %RUNNER_TEMP%\msys64\home\%USERNAME%\.pythonenv.sh
-            echo export PYTHONPATH="%cd%\python;%cd%\ovs\python;%pythonLocation%\Lib;%pythonLocation%\DLLs;%pythonLocation%\Lib\lib-tk" >> %RUNNER_TEMP%\msys64\home\%USERNAME%\.pythonenv.sh
-            echo ".pythonenv.sh was generated in %RUNNER_TEMP%\msys64\home\%USERNAME%"
+            echo export pythonLocation="%pythonLocation%" > c:\msys64\home\%USERNAME%\.pythonenv.sh
+            echo export PYTHONPATH="%cd%\python;%cd%\ovs\python;%pythonLocation%\Lib;%pythonLocation%\DLLs;%pythonLocation%\Lib\lib-tk" >> c:\msys64\home\%USERNAME%\.pythonenv.sh
+            echo ".pythonenv.sh was generated in c:\msys64\home\%USERNAME%"
       - name: install openssl
         shell: powershell
         run: | 
