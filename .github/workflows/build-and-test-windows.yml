@@ -120,6 +120,30 @@ jobs:
                 Get-Content "$RUNNER_TEMP\wdk-install.log" -Tail 50 -ErrorAction SilentlyContinue
                 exit 1
             }
+            # Install the WDK Visual Studio extension. wdksetup.exe places
+            # the .vsix but does not register it with VS in headless installs
+            # like CI. Without this, MSBuild can't find the
+            # WindowsKernelModeDriver10.0 property sheet that tells it where
+            # the km/ headers live, so ovsext.vcxproj fails with
+            # "Cannot open include file: 'ndis.h'".
+            $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\WDK.vsix' -ErrorAction SilentlyContinue
+            if (-not $vsix) {
+                $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix' -Recurse -Filter 'WDK.vsix' -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+            if (-not $vsix) {
+                Write-Host "WDK.vsix not found after install:"
+                Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix' -Recurse -ErrorAction SilentlyContinue | Format-Table FullName
+                exit 1
+            }
+            Write-Host "Installing WDK VSIX: $($vsix.FullName)"
+            $vsixInstaller = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\VSIXInstaller.exe'
+            $proc = Start-Process -FilePath $vsixInstaller `
+                -ArgumentList '/quiet','/admin', $vsix.FullName -Wait -PassThru
+            Write-Host "VSIXInstaller exit code: $($proc.ExitCode)"
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 1001) {
+                # 1001 == already installed; treat as success
+                exit 1
+            }
       - name: clone pthread
         shell: cmd
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
