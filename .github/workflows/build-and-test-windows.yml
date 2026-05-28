@@ -9,7 +9,11 @@ jobs:
       OPTS: --with-vstudiotarget=${{ matrix.target }} ${{ matrix.opts }}
       TESTSUITE: ${{ matrix.testsuite }}
     
-    runs-on: windows-latest
+    # windows-latest currently maps to windows-2025, which dropped the WDK
+    # (kept the VSIX though). windows-2022 still preinstalls both. Pin until
+    # windows-2022 is deprecated, at which point switch to wdksetup.exe-in-CI
+    # or EWDK ISO. See actions/runner-images for current image inventories.
+    runs-on: windows-2022
     timeout-minutes: 60
     
     strategy:
@@ -94,56 +98,6 @@ jobs:
             Write-Host "Installing:" $destination
             Start-Process -FilePath $destination -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes /DIR=C:\OpenSSL-Win64"  -Wait
             get-item -Path "C:\OpenSSL-Win64"
-      - name: install WDK
-        shell: powershell
-        run: |
-            # windows-latest no longer ships the Windows Driver Kit. The OVS
-            # kernel datapath driver build needs ndis.h etc., so install the
-            # WDK on demand. Microsoft does not ship a VS workload or
-            # component ID for the WDK; it's a separate standalone installer.
-            $RUNNER_TEMP = $env:RUNNER_TEMP
-            $ProgressPreference = 'SilentlyContinue'
-            $url = 'https://go.microsoft.com/fwlink/?linkid=2249371'  # WDK for Win11 24H2
-            $installer = "$RUNNER_TEMP\wdksetup.exe"
-            Write-Host "Downloading WDK from $url"
-            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $installer
-            Write-Host "Running WDK installer (silent)"
-            $proc = Start-Process -FilePath $installer `
-                -ArgumentList '/features','+','/q','/norestart','/log',"$RUNNER_TEMP\wdk-install.log" `
-                -Wait -PassThru
-            Write-Host "WDK installer exit code: $($proc.ExitCode)"
-            if (Test-Path 'C:\Program Files (x86)\Windows Kits\10\Include') {
-                Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' | Format-Table Name
-            }
-            if ($proc.ExitCode -ne 0) {
-                Write-Host "Install log tail:"
-                Get-Content "$RUNNER_TEMP\wdk-install.log" -Tail 50 -ErrorAction SilentlyContinue
-                exit 1
-            }
-            # Install the WDK Visual Studio extension. wdksetup.exe places
-            # the .vsix but does not register it with VS in headless installs
-            # like CI. Without this, MSBuild can't find the
-            # WindowsKernelModeDriver10.0 property sheet that tells it where
-            # the km/ headers live, so ovsext.vcxproj fails with
-            # "Cannot open include file: 'ndis.h'".
-            $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\WDK.vsix' -ErrorAction SilentlyContinue
-            if (-not $vsix) {
-                $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix' -Recurse -Filter 'WDK.vsix' -ErrorAction SilentlyContinue | Select-Object -First 1
-            }
-            if (-not $vsix) {
-                Write-Host "WDK.vsix not found after install:"
-                Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix' -Recurse -ErrorAction SilentlyContinue | Format-Table FullName
-                exit 1
-            }
-            Write-Host "Installing WDK VSIX: $($vsix.FullName)"
-            $vsixInstaller = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\VSIXInstaller.exe'
-            $proc = Start-Process -FilePath $vsixInstaller `
-                -ArgumentList '/quiet','/admin', $vsix.FullName -Wait -PassThru
-            Write-Host "VSIXInstaller exit code: $($proc.ExitCode)"
-            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 1001) {
-                # 1001 == already installed; treat as success
-                exit 1
-            }
       - name: clone pthread
         shell: cmd
         run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
