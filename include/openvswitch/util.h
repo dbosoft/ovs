@@ -91,6 +91,8 @@ OVS_NO_RETURN void ovs_assert_failure(const char *, const char *, const char *);
 #define OVS_TYPEOF(OBJECT) typeof(OBJECT)
 #elif defined (__cplusplus)
 #define OVS_TYPEOF(OBJECT) decltype(OBJECT)
+#elif defined (_MSC_VER)
+#define OVS_TYPEOF(OBJECT) __typeof__(OBJECT)
 #else
 #define OVS_TYPEOF(OBJECT) void *
 #endif
