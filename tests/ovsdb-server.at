@@ -61,6 +61,7 @@ AT_BANNER([ovsdb-server miscellaneous features])
 
 AT_SETUP([truncating corrupted database log])
 AT_KEYWORDS([ovsdb server positive unix])
+AT_SKIP_IF([test "$IS_WIN32" = "yes"])
 ordinal_schema > schema
 AT_CHECK([ovsdb-tool create db schema], [0], [stdout], [ignore])
 dnl Do one transaction and save the output.
@@ -106,6 +107,7 @@ AT_CLEANUP
 
 AT_SETUP([truncating database log with bad transaction])
 AT_KEYWORDS([ovsdb server positive unix])
+AT_SKIP_IF([test "$IS_WIN32" = "yes"])
 ordinal_schema > schema
 AT_CHECK([ovsdb-tool create db schema], [0], [stdout], [ignore])
 dnl Do one transaction and save the output.
@@ -247,10 +249,17 @@ AT_CHECK([ovsdb-client list-tables unix:db.sock constraints], [0], [ignore], [ig
 AT_CHECK([ovsdb-client list-tables unix:db.sock ordinals], [0], [ignore], [ignore])
 
 # Add an already added database.
-AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/add-db db2], 2, [],
+if test $IS_WIN32 = "yes"; then
+  AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/add-db db2], 2, [],
+  [I/O error: db2: failed to lock lockfile (Resource deadlock avoided)
+ovs-appctl: ovsdb-server: server returned an error
+])
+else
+  AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/add-db db2], 2, [],
   [ovsdb error: db2: already open
 ovs-appctl: ovsdb-server: server returned an error
 ])
+fi
 
 # Add a non-existing database.
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/add-db db3], 2, [], [stderr])
@@ -465,6 +474,7 @@ AT_CLEANUP
 
 AT_SETUP([ovsdb-server/add-db with --monitor])
 AT_KEYWORDS([ovsdb server positive])
+AT_SKIP_IF([test "$IS_WIN32" = "yes"])
 
 # This test intentionally causes SIGSEGV, so make sanitizers ignore it.
 ASAN_OPTIONS=$ASAN_OPTIONS:handle_segv=0; export ASAN_OPTIONS
@@ -503,6 +513,7 @@ AT_CLEANUP
 
 AT_SETUP([ovsdb-server/add-db and remove-db with --monitor])
 AT_KEYWORDS([ovsdb server positive])
+AT_SKIP_IF([test "$IS_WIN32" = "yes"])
 
 # This test intentionally causes SIGSEGV, so make sanitizers ignore it.
 ASAN_OPTIONS=$ASAN_OPTIONS:handle_segv=0; export ASAN_OPTIONS
@@ -612,14 +623,22 @@ AT_CHECK([ovsdb-server --detach --no-chdir --log-file --pidfile db], [0], [ignor
 
 AT_CHECK([test ! -e socket1])
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/add-remote punix:socket1])
-OVS_WAIT_UNTIL([test -S socket1])
+if test "$IS_WIN32" = "yes"; then
+  OVS_WAIT_UNTIL([test -e socket1])
+else
+  OVS_WAIT_UNTIL([test -S socket1])
+fi
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/list-remotes],
   [0], [punix:socket1
 ])
 
 AT_CHECK([test ! -e socket2])
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/add-remote punix:socket2])
-OVS_WAIT_UNTIL([test -S socket2])
+if test "$IS_WIN32" = "yes"; then
+  OVS_WAIT_UNTIL([test -e socket2])
+else
+  OVS_WAIT_UNTIL([test -S socket2])
+fi
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/list-remotes],
   [0], [punix:socket1
 punix:socket2
@@ -632,7 +651,11 @@ ovs-appctl: ovsdb-server: server returned an error
 
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/remove-remote punix:socket1])
 OVS_WAIT_UNTIL([test ! -e socket1])
-AT_CHECK([test -S socket2])
+if test "$IS_WIN32" = "yes"; then
+  AT_CHECK([test -e socket2])
+else
+  AT_CHECK([test -S socket2])
+fi
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/list-remotes],
   [0], [punix:socket2
 ])
@@ -667,7 +690,11 @@ AT_CHECK([sed -i'back' '/"remotes"/a\
                     "punix:socket1": {}
                     ' config.json])
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/reload])
-OVS_WAIT_UNTIL([test -S socket1])
+if test "$IS_WIN32" = "yes"; then
+  OVS_WAIT_UNTIL([test -e socket1])
+else
+  OVS_WAIT_UNTIL([test -S socket1])
+fi
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/list-remotes],
   [0], [punix:socket1
 ])
@@ -677,7 +704,11 @@ AT_CHECK([sed -i'back' '/"remotes"/a\
                     "punix:socket2": {},
                     ' config.json])
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/reload])
-OVS_WAIT_UNTIL([test -S socket2])
+if test "$IS_WIN32" = "yes"; then
+  OVS_WAIT_UNTIL([test -e socket2])
+else
+  OVS_WAIT_UNTIL([test -S socket2])
+fi
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/list-remotes],
   [0], [punix:socket1
 punix:socket2
@@ -694,7 +725,11 @@ AT_CHECK([sed -i'back' '/punix:socket1/d' config.json])
 AT_CHECK([sed -i'back' 's/"punix:socket2": {},/"punix:socket2": {}/' config.json])
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/reload])
 OVS_WAIT_UNTIL([test ! -e socket1])
-AT_CHECK([test -S socket2])
+if test "$IS_WIN32" = "yes"; then
+  AT_CHECK([test -e socket2])
+else
+  AT_CHECK([test -S socket2])
+fi
 AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/list-remotes],
   [0], [punix:socket2
 ])
@@ -709,6 +744,7 @@ AT_CLEANUP
 
 AT_SETUP([ovsdb-server/add-remote with --monitor])
 AT_KEYWORDS([ovsdb server positive])
+AT_SKIP_IF([test "$IS_WIN32" = "yes"])
 
 # This test intentionally causes SIGSEGV, so make sanitizers ignore it.
 ASAN_OPTIONS=$ASAN_OPTIONS:handle_segv=0; export ASAN_OPTIONS
@@ -747,6 +783,7 @@ AT_CLEANUP
 
 AT_SETUP([ovsdb-server/add-remote and remove-remote with --monitor])
 AT_KEYWORDS([ovsdb server positive])
+AT_SKIP_IF([test "$IS_WIN32" = "yes"])
 
 # This test intentionally causes SIGSEGV, so make sanitizers ignore it.
 ASAN_OPTIONS=$ASAN_OPTIONS:handle_segv=0; export ASAN_OPTIONS
@@ -790,7 +827,10 @@ AT_CLEANUP
 AT_SETUP([SSL/TLS db: implementation])
 AT_KEYWORDS([ovsdb server positive ssl tls $5])
 AT_SKIP_IF([test "$HAVE_OPENSSL" = no])
-PKIDIR="$abs_top_builddir/tests"
+# For this test, we pass PKIDIR through a ovsdb-tool transact and
+# msys on Windows does not convert the path style automatically.
+# So, do that forcefully with a 'pwd -W' (called through pwd() function).
+PKIDIR="$(cd $abs_top_builddir/tests && pwd)"
 AT_SKIP_IF([expr "$PKIDIR" : ".*[[       '\"
 \\]]"])
 AT_DATA([schema],
@@ -929,7 +969,10 @@ AT_CLEANUP
 AT_SETUP([SSL/TLS db: implementation (TLSv1.3 only)])
 AT_KEYWORDS([ovsdb server positive ssl tls $5])
 AT_SKIP_IF([test "$HAVE_OPENSSL" = no])
-PKIDIR="$abs_top_builddir/tests"
+# For this test, we pass PKIDIR through a ovsdb-tool transact and
+# msys on Windows does not convert the path style automatically.
+# So, do that forcefully with a 'pwd -W' (called through pwd() function).
+PKIDIR="$(cd $abs_top_builddir/tests && pwd)"
 AT_SKIP_IF([expr "$PKIDIR" : ".*[[       '\"
 \\]]"])
 AT_DATA([schema],
@@ -1013,9 +1056,11 @@ ovsdb_check_online_compaction() {
     dnl the database and the lockfile, creating the target of each symlink rather
     dnl than replacing the symlinks with regular files.
     mkdir dir
-    ln -s dir/db db
-    ln -s dir/.db.~lock~ .db.~lock~
-    AT_SKIP_IF([test ! -h db || test ! -h .db.~lock~])
+    if test "$IS_WIN32" = "no"; then
+        ln -s dir/db db
+        ln -s dir/.db.~lock~ .db.~lock~
+        AT_SKIP_IF([test ! -h db || test ! -h .db.~lock~])
+    fi
     AT_CHECK([if test $model = standalone; then
                   ovsdb-tool create db schema
               else
@@ -1106,10 +1151,12 @@ ovs-appctl: ovsdb-server: server returned an error
 ])
     dnl Make sure that "db" is still a symlink to dir/db instead of getting
     dnl replaced by a regular file, ditto for .db.~lock~.
-    AT_CHECK([test -h db])
-    AT_CHECK([test -h .db.~lock~])
-    AT_CHECK([test -f dir/db])
-    AT_CHECK([test -f dir/.db.~lock~])
+    if test "$IS_WIN32" = "no"; then
+        AT_CHECK([test -h db])
+        AT_CHECK([test -h .db.~lock~])
+        AT_CHECK([test -f dir/db])
+        AT_CHECK([test -f dir/.db.~lock~])
+    fi
 
     # We can't fully re-check the contents of the database log, because the
     # order of the records is not predictable, but there should only be 4 lines
@@ -1201,9 +1248,11 @@ ovsdb_check_online_conversion() {
     dnl the database and the lockfile, creating the target of each symlink
     dnl rather than replacing the symlinks with regular files.
     mkdir dir
-    ln -s dir/db db
-    ln -s dir/.db.~lock~ .db.~lock~
-    AT_SKIP_IF([test ! -h db || test ! -h .db.~lock~])
+    if test "$IS_WIN32" = "no"; then
+        ln -s dir/db db
+        ln -s dir/.db.~lock~ .db.~lock~
+        AT_SKIP_IF([test ! -h db || test ! -h .db.~lock~])
+    fi
     AT_CHECK([if test $model = standalone; then
                   ovsdb-tool create db schema
               else
@@ -1445,10 +1494,12 @@ _uuid                                number
 
     dnl Make sure that "db" is still a symlink to dir/db instead of getting
     dnl replaced by a regular file, ditto for .db.~lock~.
-    AT_CHECK([test -h db])
-    AT_CHECK([test -h .db.~lock~])
-    AT_CHECK([test -f dir/db])
-    AT_CHECK([test -f dir/.db.~lock~])
+    if test "$IS_WIN32" = "no"; then
+        AT_CHECK([test -h db])
+        AT_CHECK([test -h .db.~lock~])
+        AT_CHECK([test -f dir/db])
+        AT_CHECK([test -f dir/.db.~lock~])
+    fi
 
     OVSDB_SERVER_SHUTDOWN
 }
@@ -1812,6 +1863,7 @@ AT_BANNER([OVSDB -- transactions on transient ovsdb-server])
 # TITLE is provided to AT_SETUP and KEYWORDS to AT_KEYWORDS.
 m4_define([OVSDB_CHECK_EXECUTION], 
   [AT_SETUP([$1])
+   AT_SKIP_IF([test "$IS_WIN32" = "yes"])
    AT_KEYWORDS([ovsdb server positive transient $5])
    $2 > schema
    AT_CHECK([ovsdb-tool create db schema], [0], [stdout], [ignore])

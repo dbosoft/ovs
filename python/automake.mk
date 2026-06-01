@@ -26,6 +26,7 @@ ovs_pyfiles = \
 	python/ovs/db/schema.py \
 	python/ovs/db/types.py \
 	python/ovs/fatal_signal.py \
+	python/ovs/fcntl_win.py \
 	python/ovs/flow/__init__.py \
 	python/ovs/flow/decoders.py \
 	python/ovs/flow/filter.py \
@@ -50,7 +51,8 @@ ovs_pyfiles = \
 	python/ovs/unixctl/server.py \
 	python/ovs/util.py \
 	python/ovs/version.py \
-	python/ovs/vlog.py
+	python/ovs/vlog.py \
+	python/ovs/winutils.py
 
 ovs_pytests = \
 	python/ovs/tests/test_decoders.py \

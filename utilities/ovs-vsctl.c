@@ -25,7 +25,6 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sysexits.h>
 #include <unistd.h>
 
 #include "db-ctl-base.h"
@@ -56,6 +55,15 @@
 #include "util.h"
 
 VLOG_DEFINE_THIS_MODULE(vsctl);
+
+/* Post OVSDB reload error reported. */
+#ifdef _WIN32
+#include <WinError.h>
+#define EXIT_POSTDB_ERROR ERROR_BAD_ARGUMENTS
+#else
+#include <sysexits.h>
+#define EXIT_POSTDB_ERROR EX_DATAERR
+#endif
 
 struct vsctl_context;
 
@@ -209,7 +217,7 @@ main(int argc, char *argv[])
             if (do_vsctl(args, commands, n_commands, idl, &postdb_err)) {
                 free(args);
                 if (postdb_err) {
-                    exit(EX_DATAERR);
+                    exit(EXIT_POSTDB_ERROR);
                 }
 
                 exit(EXIT_SUCCESS);

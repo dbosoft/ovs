@@ -16,8 +16,7 @@ Post-v3.7.0
      * AVX512-optimized DPIF input processing.
    - Windows:
      * The previously deprecated Windows kernel datapath implementation is
-       now fully removed as well as support for running or building userspace
-       components of Open vSwitch on the Windows platform.
+       now fully removed.
 
 
 v3.7.0 - 16 Feb 2026

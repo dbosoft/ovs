@@ -114,6 +114,7 @@ test_byteq_fast_forward(void)
 static void
 test_byteq_write_read(void)
 {
+#ifndef _WIN32
     int fd[2];
     pid_t childpid;
     int rc;
@@ -150,6 +151,7 @@ test_byteq_write_read(void)
             ovs_assert(byteq_get(&bq) == input[i]);
         }
     }
+#endif /* _WIN32 */
 }
 
 static void
