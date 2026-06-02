@@ -63,13 +63,28 @@ function Invoke-MsysBash([string]$body) {
   finally { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
 }
 
-# 1. Generate the suite from the manifest + repoint atconfig abs_* at THIS checkout.
+# 1. Generate the suite from the manifest + repoint atconfig abs_* at THIS checkout,
+#    and generate the test-PKI certs the ssl/tls tests need (ovs-pki via OpenSSL; the
+#    Windows chmod/ACL shim in ovs-pki.in is required for this to work).
+$opensslBin = To-Msys (Join-Path $OpenSslDir 'bin')
 Invoke-MsysBash @"
 set -e
 cd '$repoMsys'
 /usr/bin/autom4te --language=autotest -I . -o tests/windows-testsuite tests/windows-testsuite.at
 chmod +x tests/windows-testsuite
 sed -i -E "s#^(abs_top_srcdir=).*#\1'$repoMsys'#; s#^(abs_top_builddir=).*#\1'$repoMsys'#; s#^(abs_srcdir=).*#\1'$repoMsys/tests'#; s#^(abs_builddir=).*#\1'$repoMsys/tests'#" tests/atconfig
+if [ ! -e tests/testpki-cacert.pem ]; then
+    export PATH='$opensslBin':"\$PATH"
+    P="sh utilities/ovs-pki.in --dir=tests/pki --log=tests/ovs-pki.log"
+    \$P init && \$P req+sign tests/pki/test && \$P req+sign tests/pki/test2
+    cp tests/pki/switchca/cacert.pem tests/testpki-cacert.pem
+    cp tests/pki/test-cert.pem       tests/testpki-cert.pem
+    cp tests/pki/test-req.pem        tests/testpki-req.pem
+    cp tests/pki/test-privkey.pem    tests/testpki-privkey.pem
+    cp tests/pki/test2-cert.pem      tests/testpki-cert2.pem
+    cp tests/pki/test2-req.pem       tests/testpki-req2.pem
+    cp tests/pki/test2-privkey.pem   tests/testpki-privkey2.pem
+fi
 "@ | Out-Null
 
 if ($List) {
