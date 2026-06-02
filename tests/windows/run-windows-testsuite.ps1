@@ -70,8 +70,15 @@ $opensslBin = To-Msys (Join-Path $OpenSslDir 'bin')
 Invoke-MsysBash @"
 set -e
 cd '$repoMsys'
-/usr/bin/autom4te --language=autotest -I . -o tests/windows-testsuite tests/windows-testsuite.at
-chmod +x tests/windows-testsuite
+# Generate to the conventional name 'testsuite' (NOT 'windows-testsuite'): the
+# autotest per-group verbose log is named '<suite>.log', and the upstream
+# check_logs helper (tests/ofproto-macros.at) only excludes 'testsuite.log'
+# from its '*.log' scan.  A 'windows-testsuite.log' sitting in the group dir
+# would be scanned and its captured WARN/ERR lines (e.g. an expected
+# test-stream connect failure) reported as spurious failures.  Both names are
+# gitignored; this just reuses the stale autotools-generated artifact slot.
+/usr/bin/autom4te --language=autotest -I . -o tests/testsuite tests/windows-testsuite.at
+chmod +x tests/testsuite
 sed -i -E "s#^(abs_top_srcdir=).*#\1'$repoMsys'#; s#^(abs_top_builddir=).*#\1'$repoMsys'#; s#^(abs_srcdir=).*#\1'$repoMsys/tests'#; s#^(abs_builddir=).*#\1'$repoMsys/tests'#" tests/atconfig
 if [ ! -e tests/testpki-cacert.pem ]; then
     export PATH='$opensslBin':"\$PATH"
@@ -88,7 +95,7 @@ fi
 "@ | Out-Null
 
 if ($List) {
-  Invoke-MsysBash "cd '$repoMsys' && sh tests/windows-testsuite -C tests -l"
+  Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests -l"
   exit $LASTEXITCODE
 }
 
@@ -100,7 +107,7 @@ if (Test-Path $kf) { $exclKw = Get-Content $kf | ForEach-Object { ($_ -replace '
 $exclTitle = @(); $tf = Join-Path $PSScriptRoot 'excluded-tests.txt'
 if (Test-Path $tf) { $exclTitle = Get-Content $tf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
 
-$listing = Invoke-MsysBash "cd '$repoMsys' && sh tests/windows-testsuite -C tests -l"
+$listing = Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests -l"
 $tests = @(); $cur = $null
 foreach ($ln in $listing) {
   if ($ln -match '^\s*(\d+):\s+[A-Za-z0-9_.\-]+\.at:\d+\s+(.*?)\s*$') {
@@ -121,5 +128,5 @@ Write-Host "windows-testsuite: running $($run.Count), skipping $skip (feature/me
 
 # 3. Run the complement (or an explicit -Groups override).
 $sel = if ($Groups.Trim()) { $Groups.Trim() } else { ($run -join ' ') }
-Invoke-MsysBash "cd '$repoMsys' && sh tests/windows-testsuite -C tests AUTOTEST_PATH='$ap' $sel -j$Jobs"
+Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests AUTOTEST_PATH='$ap' $sel -j$Jobs"
 exit $LASTEXITCODE
