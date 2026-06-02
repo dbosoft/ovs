@@ -39,6 +39,10 @@ m4_include([tests/ovs-macros.at])
 m4_include([tests/ovsdb-macros.at])
 m4_include([tests/ofproto-macros.at])
 
+dnl ---- Windows harness shims, kept OUT of upstream ovs-macros.at (resync cost 0).
+dnl Defines IS_WIN32 + the pwd/diff/kill shims the POSIX-sh suite needs on Windows.
+m4_include([tests/windows/windows-shell-helpers.at])
+
 dnl ---- Tier-S1 build-smoke: daemon lifecycle proof (run a curated -k subset) ----
 dnl ovsdb.at is the SINGLE OVSDB entry point — it already m4_includes the whole
 dnl ovsdb-*.at family.  Do NOT also include any individual ovsdb-*.at (autom4te
@@ -49,10 +53,11 @@ m4_include([tests/ovs-vswitchd.at])    dnl vswitchd start/stop, add-br/add-port 
 m4_include([tests/ofproto.at])         dnl ofproto start + basic flow add/dump (dummy dp)
 
 dnl ---- Tier-S2: broad userspace / protocol / dummy-datapath coverage ----------
-dnl Run broadly and triage (NOT pre-filtered by IS_WIN32 tags — many untagged tests
-dnl run fine on Windows).  Each file's genuinely-incompatible cases self-skip via
-dnl their own AT_SKIP_IF([IS_WIN32]); the rest are expected to pass on the dummy
-dnl datapath / pure-lib paths.  Standalone test binaries these need (test-ovsdb,
+dnl Run broadly over UNCHANGED upstream bodies (no AT_SKIP_IF([IS_WIN32]) patched
+dnl in — that would fork the fragments).  Many cases pass on the dummy datapath /
+dnl pure-lib paths; the genuinely-incompatible ones are excluded at the RUNNER
+dnl level (see tests/windows/known-failures, applied via run-windows-testsuite.ps1),
+dnl not by editing the .at files.  Standalone test binaries these need (test-ovsdb,
 dnl test-stream, test-type-props, test-lib, test-strtok_r) are built by CMakeLists.
 m4_include([tests/library.at])           dnl ovstest print/compare wrappers
 m4_include([tests/heap.at])
