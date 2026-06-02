@@ -168,7 +168,13 @@ test_refuse_connection(struct ovs_cmdl_context *ctx)
     } else if (!strcmp(type, "unix")) {
         CHECK_ERRNO(error, EPIPE);
     } else if (!strcmp(type, "ssl")) {
-        if (error != EPROTO && error != ECONNRESET && error != ETIMEDOUT) {
+        if (error != EPROTO && error != ECONNRESET && error != ETIMEDOUT
+#ifdef _WIN32
+            /* Windows reports the refused TCP connection underneath the SSL
+             * layer as ECONNREFUSED rather than timing out. */
+            && error != ECONNREFUSED
+#endif
+            ) {
             ovs_fatal(0, "unexpected vconn_connect() return value %d (%s)",
                       error, ovs_strerror(error));
         }
@@ -201,7 +207,9 @@ test_accept_then_close(struct ovs_cmdl_context *ctx)
     if (!strcmp(type, "tcp") || !strcmp(type, "unix")) {
         if (error != ECONNRESET && error != EPIPE
 #ifdef _WIN32
-            && error != WSAECONNRESET
+            /* Aborting a just-accepted connection can surface as
+             * WSAECONNABORTED (translated to ECONNABORTED) on Windows. */
+            && error != ECONNABORTED
 #endif
             ) {
             ovs_fatal(0, "unexpected vconn_connect() return value %d (%s)",

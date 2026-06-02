@@ -564,6 +564,11 @@ ovs_strerror(int error)
     switch (error) {
     case ECONNRESET:
         return "Connection reset by peer";
+    case EPROTO:
+        /* MSVC renders this lowercase ("protocol error"); the POSIX/glibc
+         * wording is capitalized and some testsuite log filters match it
+         * literally. */
+        return "Protocol error";
     }
 #endif
 

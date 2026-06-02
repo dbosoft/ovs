@@ -97,35 +97,11 @@ fd_connect(struct stream *stream)
     return retval;
 }
 
-#ifdef _WIN32
-/* sock_errno() returns Winsock WSAE* codes (>= 10000).  Stream errors flow out of
- * recv()/send() and are rendered by consumers (e.g. jsonrpc) with ovs_strerror(),
- * which only understands C errno values and therefore prints any WSA* code as
- * "Unknown error".  Translate the codes recv()/send() can produce to their errno
- * equivalents, so a peer reset becomes ECONNRESET ("Connection reset by peer")
- * rather than an unrecognized WSA code. */
-static int
-sock_errno_to_errno(int error)
-{
-    switch (error) {
-    case WSAEWOULDBLOCK:  return EAGAIN;
-    case WSAECONNRESET:   return ECONNRESET;
-    case WSAECONNABORTED: return ECONNABORTED;
-    case WSAECONNREFUSED: return ECONNREFUSED;
-    case WSAENOTCONN:     return ENOTCONN;
-    case WSAESHUTDOWN:    return EPIPE;
-    case WSAETIMEDOUT:    return ETIMEDOUT;
-    case WSAEHOSTUNREACH: return EHOSTUNREACH;
-    case WSAENETUNREACH:  return ENETUNREACH;
-    case WSAEINTR:        return EINTR;
-    case WSAEINVAL:       return EINVAL;
-    case WSAEMSGSIZE:     return EMSGSIZE;
-    default:              return error;
-    }
-}
-#else
-#define sock_errno_to_errno(error) (error)
-#endif
+/* sock_errno_to_errno() (declared in socket-util.h) translates the Winsock
+ * WSAE* codes that recv()/send() can produce into their errno equivalents, so
+ * a peer reset becomes ECONNRESET ("Connection reset by peer") rather than an
+ * unrecognized WSA code rendered as "Unknown error".  On non-Windows it is a
+ * no-op macro. */
 
 static ssize_t
 fd_recv(struct stream *stream, void *buffer, size_t n)

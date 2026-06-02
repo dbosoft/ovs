@@ -668,7 +668,25 @@ interpret_ssl_error(const char *function, int ret, int error,
         int queued_error = ERR_get_error();
         if (queued_error == 0) {
             if (ret < 0) {
+#ifdef _WIN32
+                /* The failing syscall is a Winsock recv()/send(); its error is
+                 * reported via WSAGetLastError(), not errno (which holds a
+                 * stale, unrelated value such as EINVAL here).  Use the real
+                 * socket error so a peer disconnect is recognized as such. */
+                int status = sock_errno_to_errno(sock_errno());
+
+                /* A peer that drops the connection mid-handshake surfaces on
+                 * Windows as a Winsock abort/reset rather than the ret == 0
+                 * clean close that POSIX reports; treat it the same way. */
+                if (status == ECONNABORTED || status == ECONNRESET
+                    || status == EPIPE) {
+                    VLOG_WARN_RL(&rl, "%s: unexpected SSL/TLS connection close",
+                                 function);
+                    return EPROTO;
+                }
+#else
                 int status = errno;
+#endif
                 VLOG_WARN_RL(&rl, "%s: system error (%s)",
                              function, ovs_strerror(status));
                 return status;

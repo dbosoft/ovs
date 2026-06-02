@@ -276,29 +276,48 @@ check_connection_completion(int fd)
     struct timeval tv = { 0, 0 };
     /* WSAPoll is broken on Windows, instead do a select */
     retval = select(0, NULL, &wrset, &exset, &tv);
-    if (retval == 1) {
+    /* select() returns the total number of ready descriptors across all the
+     * fd_sets; a refused connection makes 'fd' ready in both 'wrset' and
+     * 'exset', so the count can be 2.  Normalize any positive count to the
+     * single-fd 'poll() returned 1' convention the common code expects. */
+    if (retval > 0) {
         if (FD_ISSET(fd, &wrset)) {
             pfd.revents |= pfd.events;
         }
         if (FD_ISSET(fd, &exset)) {
             pfd.revents |= POLLERR;
         }
+        retval = 1;
     }
 #endif
     if (retval == 1) {
         if (pfd.revents & (POLLERR | POLLHUP)) {
+#ifdef _WIN32
+            /* send() on a socket whose connect() failed returns WSAENOTCONN,
+             * which masks the real reason (e.g. connection refused).  Query
+             * the pending socket error directly instead. */
+            int so_error = 0;
+            socklen_t len = sizeof so_error;
+
+            if (!getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *) &so_error, &len)
+                && so_error) {
+                return sock_errno_to_errno(so_error);
+            }
+            return sock_errno_to_errno(sock_errno());
+#else
             ssize_t n = send(fd, "", 1, 0);
             if (n < 0) {
-                return sock_errno();
+                return sock_errno_to_errno(sock_errno());
             } else {
                 VLOG_ERR_RL(&rl, "poll return POLLERR but send succeeded");
                 return EPROTO;
             }
+#endif
         }
         return 0;
     } else if (retval < 0) {
         VLOG_ERR_RL(&rl, "poll: %s", sock_strerror(sock_errno()));
-        return errno;
+        return sock_errno_to_errno(sock_errno());
     } else {
         return EAGAIN;
     }
@@ -1269,6 +1288,28 @@ sock_strerror(int error)
     return ovs_strerror(error);
 #endif
 }
+
+#ifdef _WIN32
+int
+sock_errno_to_errno(int error)
+{
+    switch (error) {
+    case WSAEWOULDBLOCK:  return EAGAIN;
+    case WSAECONNRESET:   return ECONNRESET;
+    case WSAECONNABORTED: return ECONNABORTED;
+    case WSAECONNREFUSED: return ECONNREFUSED;
+    case WSAENOTCONN:     return ENOTCONN;
+    case WSAESHUTDOWN:    return EPIPE;
+    case WSAETIMEDOUT:    return ETIMEDOUT;
+    case WSAEHOSTUNREACH: return EHOSTUNREACH;
+    case WSAENETUNREACH:  return ENETUNREACH;
+    case WSAEINTR:        return EINTR;
+    case WSAEINVAL:       return EINVAL;
+    case WSAEMSGSIZE:     return EMSGSIZE;
+    default:              return error;
+    }
+}
+#endif
 
 #ifdef __linux__
 static int

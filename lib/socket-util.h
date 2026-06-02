@@ -96,6 +96,15 @@ size_t ss_length(const struct sockaddr_storage *);
 
 const char *sock_strerror(int error);
 
+#ifdef _WIN32
+/* Translates a Winsock WSAE* code into its C errno equivalent, so that values
+ * flowing out of socket calls can be compared against EAGAIN/ECONNREFUSED/...
+ * and rendered by ovs_strerror() instead of printing as "Unknown error". */
+int sock_errno_to_errno(int error);
+#else
+#define sock_errno_to_errno(error) (error)
+#endif
+
 #ifndef _WIN32
 void xpipe(int fds[2]);
 void xpipe_nonblocking(int fds[2]);
