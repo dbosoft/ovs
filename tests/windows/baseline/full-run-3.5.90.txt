@@ -1,0 +1,55 @@
+# Windows build-smoke suite — full run baseline (OVS 3.5.90, 2026-06-02)
+# CMake/MSVC binaries via tests/windows/run-windows-testsuite.ps1 (MSYS2, -j1)
+
+SUMMARY: ERROR: 2272 tests were run,
+SUMMARY: 271 failed (2 expected failures).
+SUMMARY: 141 tests were skipped.
+
+## FAILED by .at file
+     93 ovsdb-idl.at
+     65 ofproto-dpif.at
+     40 ovsdb-server.at
+     11 ofp-actions.at
+     10 vconn.at
+      8 vlog.at
+      8 ovs-macros.at
+      5 ofproto.at
+      5 odp.at
+      4 packet-type-aware.at
+      3 ovs-vsctl.at
+      3 drop-stats.at
+      2 mcast-snooping.at
+      2 bridge.at
+      1 ovsdb-monitor.at
+      1 ovsdb-data.at
+      1 ovs-vswitchd.at
+      1 ovs-ofctl.at
+      1 mpls-xlate.at
+      1 library.at
+      1 learning-switch.at
+      1 dpctl.at
+      1 daemon.at
+      1 classifier.at
+
+## Triage (classify, do not deep-fix — framework goal):
+#  TCP/SSL transport variants  : ovsdb-idl 'tcp'/'C - tcp'/'Python3 - tcp' (~57), vconn tcp/ssl (~10),
+#    part of ovsdb-server       -> Windows TCP-loopback/SSL test-harness path; systemic, one root cause.
+#  Windows file semantics       : vlog reopen/close (~8) -> cannot reopen/rename an open file on Windows.
+#  ofproto-dpif feature/timing  : bonding/bond (~65) -> dummy-datapath feature + timing; per-test triage.
+#  ofp-actions output diffs      : OF action-translation golden compares (~11) -> likely formatting; verify.
+#  ovsdb-server daemon           : (~40) -> mix of features + the tcp theme.
+#
+## Triage UPDATE (post-fixes, 2026-06-02) — TCP cluster split by client:
+#  FIXED (C library): the disconnect-WARN root cause. Windows recv/send returned raw
+#    Winsock WSAE* codes that ovs_strerror() printed as "Unknown error", escaping
+#    check_logs' /reset by peer/ whitelist. stream-fd sock_errno_to_errno() +
+#    ovs_strerror ECONNRESET wording fix -> the 'C - tcp' idl/vconn/ovsdb-server
+#    variants now pass (verified 755/766). Real product fix (commit b486595ab).
+#  REMAINING 'Python3 - tcp'/'- SSL' idl variants  : NOT the C lib. test-ovsdb.py
+#    uses the *Python* OVS bindings, whose inet_connect_active (connect_ex/set_dscp
+#    on Windows) fails with EINVAL ("Invalid argument"). Separate codebase
+#    (python/ovs/socket_util.py) = its own Windows-support track; not fixed here.
+#  SSL variants (all)            : missing test-PKI certs -- 'cp: cannot stat
+#    tests/testpki*.pem' (autotools generates them via ovs-pki; CMake does not).
+#    Framework gap: add testpki generation. Independent of OpenSSL (HAVE_OPENSSL=1).
+#  tcp6 variants                 : skipped (no IPv6 loopback in env), not failures.

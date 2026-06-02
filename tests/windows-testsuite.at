@@ -1,0 +1,103 @@
+AT_INIT
+
+AT_COPYRIGHT([Copyright (c) 2024, 2025, 2026 dbosoft GmbH
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.])
+
+m4_ifdef([AT_COLOR_TESTS], [AT_COLOR_TESTS])
+
+dnl ===========================================================================
+dnl  dbosoft OVS — owned, Windows-reduced "build-smoke" autotest suite.
+dnl
+dnl  This is NOT a fork of upstream's .at bodies: it is an m4_include manifest
+dnl  over UNCHANGED upstream fragments (resync cost on them = 0).  Its purpose is
+dnl  to prove that the CMake/MSVC-built shipped daemons (ovsdb-server, ovs-vswitchd
+dnl  with --enable-dummy, ovs-vsctl/ovs-ofctl/ovs-dpctl) link, start, talk over the
+dnl  Windows named-pipe transport, and tear down cleanly on Windows — a *dozen*
+dnl  lifecycle cases selected at run time via TESTSUITEFLAGS='-k ...', NOT the full
+dnl  upstream logic matrix.  Exhaustive shared-"brain" logic lives in the MSYS-free
+dnl  ovstest/CTest net (surface I); see datapath-windows/WINDOWS-TEST-SETUP-PLAN.md.
+dnl
+dnl  Run -j1 (the testsuite.patch parallel dispatcher is intentionally not applied;
+dnl  it only affects -jN).  AUTOTEST_PATH points at the CMake Release/ binaries.
+dnl ===========================================================================
+
+dnl ---- macro libraries: MUST come first; they define OVS_VSWITCHD_START etc. ----
+dnl Keep this set in sync with tests/testsuite.at's macro includes on resync
+dnl (WINDOWS-TEST-SETUP-PLAN.md §7: comm -13 against upstream's macro includes).
+m4_include([tests/ovs-macros.at])
+m4_include([tests/ovsdb-macros.at])
+m4_include([tests/ofproto-macros.at])
+
+dnl ---- Tier-S1 build-smoke: daemon lifecycle proof (run a curated -k subset) ----
+dnl ovsdb.at is the SINGLE OVSDB entry point — it already m4_includes the whole
+dnl ovsdb-*.at family.  Do NOT also include any individual ovsdb-*.at (autom4te
+dnl fails on duplicate AT_SETUP/AT_BANNER).
+m4_include([tests/ovsdb.at])           dnl ovsdb-server/-tool/-client over named pipe
+m4_include([tests/ovs-vsctl.at])       dnl vsctl CRUD against ovsdb-server.exe
+m4_include([tests/ovs-vswitchd.at])    dnl vswitchd start/stop, add-br/add-port lifecycle
+m4_include([tests/ofproto.at])         dnl ofproto start + basic flow add/dump (dummy dp)
+
+dnl ---- Tier-S2: broad userspace / protocol / dummy-datapath coverage ----------
+dnl Run broadly and triage (NOT pre-filtered by IS_WIN32 tags — many untagged tests
+dnl run fine on Windows).  Each file's genuinely-incompatible cases self-skip via
+dnl their own AT_SKIP_IF([IS_WIN32]); the rest are expected to pass on the dummy
+dnl datapath / pure-lib paths.  Standalone test binaries these need (test-ovsdb,
+dnl test-stream, test-type-props, test-lib, test-strtok_r) are built by CMakeLists.
+m4_include([tests/library.at])           dnl ovstest print/compare wrappers
+m4_include([tests/heap.at])
+m4_include([tests/bundle.at])
+m4_include([tests/classifier.at])
+m4_include([tests/check-structs.at])
+m4_include([tests/odp.at])
+m4_include([tests/multipath.at])
+m4_include([tests/learn.at])
+m4_include([tests/vconn.at])
+m4_include([tests/aes128.at])
+m4_include([tests/uuid.at])
+m4_include([tests/json.at])
+m4_include([tests/jsonrpc.at])
+m4_include([tests/lockfile.at])
+m4_include([tests/reconnect.at])
+m4_include([tests/ofp-actions.at])
+m4_include([tests/ofp-print.at])
+m4_include([tests/ofp-util.at])
+m4_include([tests/ofp-errors.at])
+m4_include([tests/ovs-ofctl.at])
+m4_include([tests/mpls-xlate.at])
+m4_include([tests/nsh.at])
+m4_include([tests/packet-type-aware.at])
+m4_include([tests/drop-stats.at])
+m4_include([tests/vlog.at])
+m4_include([tests/daemon.at])
+m4_include([tests/ofproto-dpif.at])
+m4_include([tests/bridge.at])
+m4_include([tests/dpctl.at])
+m4_include([tests/stp.at])
+m4_include([tests/rstp.at])
+m4_include([tests/bfd.at])
+m4_include([tests/cfm.at])
+m4_include([tests/lacp.at])
+m4_include([tests/mcast-snooping.at])
+m4_include([tests/auto-attach.at])
+m4_include([tests/netdev-type.at])
+m4_include([tests/learning-switch.at])
+
+dnl ---- EXCLUDED for good (documented, NOT a Win32-tag filter) -------------------
+dnl   system-*.at                  : Linux kernel / netns / veth / tcpdump
+dnl   dpif-netdev.at, pmd.at, alb.at: DPDK/PMD userspace datapath (Linux-shaped)
+dnl   tunnel*.at, ovs-router.at    : Linux tunnel / route-table
+dnl   vtep-ctl.at                  : needs vtep-ctl.exe (not built — own VTEP IDL)
+dnl   checkpatch.at, completion.at : git/style + bash-completion tooling
+dnl   fuzz-regression.at           : large fuzz corpus, slow
+dnl   *-py.at, pytest.at           : python test harness (revisit as a -py wave)

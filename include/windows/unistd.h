@@ -85,6 +85,14 @@ __inline long sysconf(int type)
     return value;
 }
 
+static __inline int usleep(unsigned int usec)
+{
+    /* Windows Sleep() has millisecond granularity, which is adequate for the
+     * brief pauses usleep() is used for (test backoffs, busy-wait yields). */
+    Sleep(usec / 1000);
+    return 0;
+}
+
 /* On Windows, a console is a specialized character device, and isatty() only
  * reports whether a file description is a character device and thus reports
  * that devices such as /dev/null are ttys.  This replacement avoids that

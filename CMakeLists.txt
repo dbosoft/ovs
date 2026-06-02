@@ -105,6 +105,12 @@ ovs_gen("${GEN}/lib/ovsdb-server-idl.ovsidl" "${IDLC}" annotate "${OVS_ROOT}/ovs
 ovs_gen("${GEN}/lib/ovsdb-server-idl.c" "${IDLC}" c-idl-source "${GEN}/lib/ovsdb-server-idl.ovsidl")
 ovs_gen("${GEN}/lib/ovsdb-server-idl.h" "${IDLC}" c-idl-header "${GEN}/lib/ovsdb-server-idl.ovsidl")
 
+# idltest IDL — drives the test-ovsdb / ovsdb-idl test program (tests/ovsdb-idl.at).
+file(MAKE_DIRECTORY "${GEN}/tests")
+ovs_gen("${GEN}/tests/idltest.ovsidl" "${IDLC}" annotate "${OVS_ROOT}/tests/idltest.ovsschema" "${OVS_ROOT}/tests/idltest.ann")
+ovs_gen("${GEN}/tests/idltest.c" "${IDLC}" c-idl-source "${GEN}/tests/idltest.ovsidl")
+ovs_gen("${GEN}/tests/idltest.h" "${IDLC}" c-idl-header "${GEN}/tests/idltest.ovsidl")
+
 # odp-netlink headers — via the python3 ports of the sed/awk generators
 ovs_gen("${GEN}/include/odp-netlink.h"        "${BA}/extract-odp-netlink-h.py"        "${OVS_ROOT}/include/linux/openvswitch.h")
 ovs_gen("${GEN}/include/odp-netlink-macros.h" "${BA}/extract-odp-netlink-macros-h.py" "${GEN}/include/odp-netlink.h")
@@ -293,3 +299,90 @@ add_executable(ovs-ofctl utilities/ovs-ofctl.c)
 ovs_setup(ovs-ofctl)
 target_link_directories(ovs-ofctl PRIVATE ${OVS_EXT_LIBDIRS})
 target_link_libraries(ovs-ofctl PRIVATE ofproto openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+# ---- tests (MSYS-free unit-test net) ---------------------------------------
+# test-dpif-windows drives the native provider against an in-process mock kernel
+# (no driver, no VM); build with -DOVS_ASAN=ON to catch marshalling overruns.
+add_executable(test-dpif-windows tests/test-dpif-windows.c)
+ovs_setup(test-dpif-windows)
+target_link_directories(test-dpif-windows PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(test-dpif-windows PRIVATE openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+# ovstest — multi-call harness over libopenvswitch; validates the shared "brain"
+# (hash/classifier/cmap/odp/flows/json/ovsdb codecs/...).  Source list mirrors the
+# unconditional tests_ovstest_SOURCES, minus the !WIN32 file (test-unix-socket.c)
+# and the LINUX-only files (test-lib-route-table.c, test-netlink-conntrack.c,
+# test-netlink-policy.c, test-psample.c).  /Zc:inline- (via ovs_setup) is mandatory
+# so the OVSTEST_REGISTER .CRT$XCU constructor survives.
+set(OVSTEST_SOURCES
+  tests/ovstest.c
+  tests/test-aes128.c tests/test-atomic.c tests/test-barrier.c
+  tests/test-bundle.c tests/test-byte-order.c tests/test-byteq.c
+  tests/test-classifier.c tests/test-ccmap.c tests/test-cmap.c
+  tests/test-conntrack.c tests/test-cooperative-multitasking.c tests/test-csum.c
+  tests/test-flows.c tests/test-hash.c tests/test-heap.c tests/test-hindex.c
+  tests/test-hmap.c tests/test-id-fpool.c tests/test-json.c tests/test-jsonrpc.c
+  tests/test-list.c tests/test-lockfile.c tests/test-multipath.c
+  tests/test-mpsc-queue.c tests/test-netflow.c tests/test-odp.c tests/test-ofpbuf.c
+  tests/test-packets.c tests/test-random.c tests/test-rcu.c tests/test-rculist.c
+  tests/test-reconnect.c tests/test-rstp.c tests/test-sflow.c tests/test-sha1.c
+  tests/test-skiplist.c tests/test-stp.c tests/test-unixctl.c tests/test-util.c
+  tests/test-uuid.c tests/test-uuidset.c tests/test-bitmap.c tests/test-vconn.c
+  tests/test-aa.c tests/test-stopwatch.c)
+add_executable(ovstest ${OVSTEST_SOURCES})
+ovs_setup(ovstest)
+target_link_directories(ovstest PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(ovstest PRIVATE openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+# Configure-time drift guard: FATAL if a tests/test-*.c that registers an ovstest
+# module is missing from OVSTEST_SOURCES (catches upstream-added modules).
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/check-ovstest-list.cmake)
+
+# ---- CTest: self-checking modules (pass/fail by exit code) -----------------
+enable_testing()
+set(_ovstest_dll_path
+  "PATH=path_list_prepend:${PTHREADS_ROOT}/bin;PATH=path_list_prepend:${OPENSSL_ROOT}")
+set(OVSTEST_EXIT_CASES
+  "test-hash"          "test-hmap"           "test-hindex"
+  "test-uuid"          "test-uuidset"        "test-skiplist"
+  "test-list"          "test-rculist"        "test-sha1"
+  "test-csum"          "test-byte-order"     "test-packets"
+  "test-random"        "test-barrier"        "test-atomic"
+  "test-rcu"           "test-stopwatch"      "test-aa"
+  "test-cmap check 1"  "test-ccmap check 1"  "test-bitmap check"
+  "test-id-fpool check" "test-byteq basic")
+foreach(_case IN LISTS OVSTEST_EXIT_CASES)
+  separate_arguments(_argv UNIX_COMMAND "${_case}")
+  string(REPLACE " " "_" _tname "ovstest_${_case}")
+  add_test(NAME ${_tname} COMMAND ovstest ${_argv})
+  set_tests_properties(${_tname} PROPERTIES ENVIRONMENT_MODIFICATION "${_ovstest_dll_path}")
+endforeach()
+
+# /Zc:inline- registration canary: a stripped OVS_CONSTRUCTOR => empty module list.
+add_test(NAME ovstest-help COMMAND ovstest --help)
+set_tests_properties(ovstest-help PROPERTIES
+  PASS_REGULAR_EXPRESSION "test-hash"
+  ENVIRONMENT_MODIFICATION "${_ovstest_dll_path}")
+
+# dpif-windows provider unit test (mock kernel; ASAN under -DOVS_ASAN=ON).
+add_test(NAME test-dpif-windows COMMAND test-dpif-windows)
+set_tests_properties(test-dpif-windows PROPERTIES ENVIRONMENT_MODIFICATION "${_ovstest_dll_path}")
+
+# ---- standalone test programs the .at build-smoke suite invokes ------------
+# test-ovsdb drives the ovsdb-*.at "C" variants via the generated idltest IDL.
+add_executable(test-ovsdb tests/test-ovsdb.c ${GEN}/tests/idltest.c)
+ovs_setup(test-ovsdb)
+target_link_directories(test-ovsdb PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(test-ovsdb PRIVATE ovsdb openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+foreach(_t test-stream test-type-props test-lib)
+  add_executable(${_t} tests/${_t}.c)
+  ovs_setup(${_t})
+  target_link_directories(${_t} PRIVATE ${OVS_EXT_LIBDIRS})
+  target_link_libraries(${_t} PRIVATE openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+endforeach()
+
+add_executable(test-strtok_r tests/test-strtok_r.c)
+ovs_setup(test-strtok_r)
+target_link_directories(test-strtok_r PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(test-strtok_r PRIVATE openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
