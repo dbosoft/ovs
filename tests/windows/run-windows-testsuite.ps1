@@ -28,6 +28,7 @@ param(
   [Parameter(Mandatory)] [string]$BuildDir,       # CMake build root (contains Release\)
   [string]$Keywords = '',                          # -k filter, e.g. 'ovsdb-tool'
   [string]$Groups = '',                            # explicit group numbers, e.g. '457 1093'
+  [int]$Jobs = 1,                                  # autotest parallelism (-jN)
   [string]$PthreadsBin = 'C:\PTHREADS-BUILT\bin',
   [string]$OpenSslDir = 'C:\OpenSSL-Win64',
   [string]$Msys2 = 'C:\MSYS64',
@@ -48,9 +49,27 @@ function To-Msys([string]$p) {
   '/' + $p.Substring(0,1).ToLower() + ($p.Substring(2) -replace '\\','/')
 }
 $repoMsys = To-Msys $repo
-$ap = @((To-Msys $rel), (To-Msys $PthreadsBin), (To-Msys $OpenSslDir)) -join ':'
-$flags = if ($List) { '-l' } else { '-j1' }
-$sel = ($Groups.Trim() + ' ' + $(if ($Keywords) { "-k $Keywords" } else { '' })).Trim()
+# AUTOTEST_PATH: CMake Release bins first, then pthreads/OpenSSL DLLs, then the
+# tests/ source dir so script helpers invoked bare (test-dpparse.py, ...) resolve
+# (our absolute override otherwise drops the default relative "tests" entry).
+$ap = @((To-Msys $rel), (To-Msys $PthreadsBin), (To-Msys $OpenSslDir),
+        (To-Msys (Join-Path $repo 'tests'))) -join ':'
+$flags = if ($List) { '-l' } else { "-j$Jobs" }
+
+# Build a SINGLE -k selector: positive -Keywords AND the negated excluded-keywords
+# list (multiple -k options are OR'd by autotest, which would defeat exclusion, so
+# everything must go in one comma-separated -k where terms are AND'd).
+$kparts = @()
+if ($Keywords) { $kparts += ($Keywords -split '[,\s]+' | Where-Object { $_ }) }
+$exclFile = Join-Path $PSScriptRoot 'excluded-keywords.txt'
+if (-not $List -and (Test-Path $exclFile)) {
+  Get-Content $exclFile |
+    ForEach-Object { ($_ -replace '#.*', '').Trim() } |
+    Where-Object { $_ } |
+    ForEach-Object { $kparts += "!$_" }
+}
+$ksel = if ($kparts) { '-k ' + ($kparts -join ',') } else { '' }
+$sel = ($Groups.Trim() + ' ' + $ksel).Trim()
 
 $script = @"
 set -e
@@ -66,5 +85,10 @@ sed -i -E "s#^(abs_top_srcdir=).*#\1'$repoMsys'#;  \
 # 3. run
 sh tests/windows-testsuite -C tests AUTOTEST_PATH='$ap' $sel $flags
 "@
-& $bash -lc $script
-exit $LASTEXITCODE
+# Run via a temp script FILE with LF endings: passing this multi-line body
+# (sed continuations + regex parens) through `bash -lc` mangles the quoting.
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("ovs-winsuite-" + [Guid]::NewGuid().ToString('N') + ".sh")
+[IO.File]::WriteAllText($tmp, ($script -replace "`r", ""), (New-Object Text.UTF8Encoding($false)))
+try   { & $bash -l (To-Msys $tmp); $code = $LASTEXITCODE }
+finally { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
+exit $code

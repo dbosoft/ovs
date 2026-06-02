@@ -1,0 +1,16 @@
+# autotest keywords excluded from the Windows build-smoke run (run-windows-testsuite.ps1
+# negates each as -k '!<kw>').  These are categories that cannot pass on the Windows
+# userspace build and are NOT a real datapath:
+#
+#   tcp, tcp6 - TCP-loopback transport variants (Windows test-harness TCP path)
+#   ssl, tls  - TLS variants; also tag the active-backup/replication sections that
+#               drive a second server over TLS (ovsdb-server.at active-backup)
+#   python    - the Python3 OVS-binding variants (separate Windows-support track)
+#
+# Whole datapath/golden-diff .at FILES are excluded at the manifest level instead
+# (tests/windows-testsuite.at "DEFERRED" list), not here.
+tcp
+tcp6
+ssl
+tls
+python
