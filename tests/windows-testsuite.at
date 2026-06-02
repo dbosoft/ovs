@@ -43,6 +43,11 @@ dnl ---- Windows harness shims, kept OUT of upstream ovs-macros.at (resync cost 
 dnl Defines IS_WIN32 + the pwd/diff/kill shims the POSIX-sh suite needs on Windows.
 m4_include([tests/windows/windows-shell-helpers.at])
 
+dnl APPCTL is m4_defined in unixctl-py.at, a -py file this curated manifest does not
+dnl include; vlog.at (and other non-py tests) depend on the macro.  Define it here so
+dnl the manifest is self-contained.  Keep in sync with unixctl-py.at on resync.
+m4_define([APPCTL], [ovs-appctl --timeout 20])
+
 dnl ---- Tier-S1: daemon lifecycle proof (ovsdb-server / ovs-vswitchd, named pipe).
 dnl ovsdb.at is the SINGLE OVSDB entry point — it already m4_includes the whole
 dnl ovsdb-*.at family.  Do NOT also include any individual ovsdb-*.at (autom4te
