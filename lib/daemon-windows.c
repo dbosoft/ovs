@@ -410,8 +410,16 @@ detach_process(int argc, char *argv[])
     /* Block and wait for child to say it is ready. */
     error = ReadFile(read_pipe, &ch, 1, NULL, NULL);
     if (!error) {
-        VLOG_FATAL("Failed to read from child (%s)",
-                   ovs_lasterror_to_string());
+        /* The child exited before signalling readiness, i.e. it failed during
+         * startup and has already reported the reason on its own stderr.
+         * Propagate its exit status without emitting a (duplicate, confusing)
+         * fatal message of our own, mirroring the POSIX fork() path where the
+         * parent simply reflects the child's exit code. */
+        DWORD code = EXIT_FAILURE;
+
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        GetExitCodeProcess(pi.hProcess, &code);
+        exit(code ? code : EXIT_FAILURE);
     }
     /* The child has successfully started and is ready. */
     exit(0);

@@ -117,6 +117,7 @@ pid_t read_pidfile(const char *name);
         {"pipe-handle",        required_argument, NULL, OPT_PIPE_HANDLE}, \
         {"service",            no_argument, NULL, OPT_SERVICE},           \
         {"service-monitor",    no_argument, NULL, OPT_SERVICE_MONITOR},   \
+        {"monitor",            no_argument, NULL, OPT_SERVICE_MONITOR},   \
         {"user",               required_argument, NULL, OPT_USER_GROUP}
 
 #define DAEMON_OPTION_HANDLERS                  \
