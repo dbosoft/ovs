@@ -54,41 +54,57 @@ $repoMsys = To-Msys $repo
 # (our absolute override otherwise drops the default relative "tests" entry).
 $ap = @((To-Msys $rel), (To-Msys $PthreadsBin), (To-Msys $OpenSslDir),
         (To-Msys (Join-Path $repo 'tests'))) -join ':'
-$flags = if ($List) { '-l' } else { "-j$Jobs" }
-
-# Build a SINGLE -k selector: positive -Keywords AND the negated excluded-keywords
-# list (multiple -k options are OR'd by autotest, which would defeat exclusion, so
-# everything must go in one comma-separated -k where terms are AND'd).
-$kparts = @()
-if ($Keywords) { $kparts += ($Keywords -split '[,\s]+' | Where-Object { $_ }) }
-$exclFile = Join-Path $PSScriptRoot 'excluded-keywords.txt'
-if (-not $List -and (Test-Path $exclFile)) {
-  Get-Content $exclFile |
-    ForEach-Object { ($_ -replace '#.*', '').Trim() } |
-    Where-Object { $_ } |
-    ForEach-Object { $kparts += "!$_" }
+# Run a bash script BODY via a temp LF file: a multi-line body (sed continuations,
+# regex parens) through `bash -lc` mangles the quoting.
+function Invoke-MsysBash([string]$body) {
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ("ovs-winsuite-" + [Guid]::NewGuid().ToString('N') + ".sh")
+  [IO.File]::WriteAllText($tmp, ($body -replace "`r", ""), (New-Object Text.UTF8Encoding($false)))
+  try   { & $bash -l (To-Msys $tmp) }
+  finally { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
 }
-$ksel = if ($kparts) { '-k ' + ($kparts -join ',') } else { '' }
-$sel = ($Groups.Trim() + ' ' + $ksel).Trim()
 
-$script = @"
+# 1. Generate the suite from the manifest + repoint atconfig abs_* at THIS checkout.
+Invoke-MsysBash @"
 set -e
 cd '$repoMsys'
-# 1. generate the suite from the manifest
 /usr/bin/autom4te --language=autotest -I . -o tests/windows-testsuite tests/windows-testsuite.at
 chmod +x tests/windows-testsuite
-# 2. repoint atconfig abs_* vars at THIS checkout (relocated-checkout fix)
-sed -i -E "s#^(abs_top_srcdir=).*#\1'$repoMsys'#;  \
-           s#^(abs_top_builddir=).*#\1'$repoMsys'#; \
-           s#^(abs_srcdir=).*#\1'$repoMsys/tests'#; \
-           s#^(abs_builddir=).*#\1'$repoMsys/tests'#" tests/atconfig
-# 3. run
-sh tests/windows-testsuite -C tests AUTOTEST_PATH='$ap' $sel $flags
-"@
-# Run via a temp script FILE with LF endings: passing this multi-line body
-# (sed continuations + regex parens) through `bash -lc` mangles the quoting.
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("ovs-winsuite-" + [Guid]::NewGuid().ToString('N') + ".sh")
-[IO.File]::WriteAllText($tmp, ($script -replace "`r", ""), (New-Object Text.UTF8Encoding($false)))
-try   { & $bash -l (To-Msys $tmp); $code = $LASTEXITCODE }
-finally { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
-exit $code
+sed -i -E "s#^(abs_top_srcdir=).*#\1'$repoMsys'#; s#^(abs_top_builddir=).*#\1'$repoMsys'#; s#^(abs_srcdir=).*#\1'$repoMsys/tests'#; s#^(abs_builddir=).*#\1'$repoMsys/tests'#" tests/atconfig
+"@ | Out-Null
+
+if ($List) {
+  Invoke-MsysBash "cd '$repoMsys' && sh tests/windows-testsuite -C tests -l"
+  exit $LASTEXITCODE
+}
+
+# 2. Compute the run set = ALL tests MINUS those whose feature/method is not testable
+# on Windows: by autotest keyword (excluded-keywords.txt) or group-title substring
+# (excluded-tests.txt).  Fixable failures are NOT skipped -- they run and must be fixed.
+$exclKw = @(); $kf = Join-Path $PSScriptRoot 'excluded-keywords.txt'
+if (Test-Path $kf) { $exclKw = Get-Content $kf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
+$exclTitle = @(); $tf = Join-Path $PSScriptRoot 'excluded-tests.txt'
+if (Test-Path $tf) { $exclTitle = Get-Content $tf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
+
+$listing = Invoke-MsysBash "cd '$repoMsys' && sh tests/windows-testsuite -C tests -l"
+$tests = @(); $cur = $null
+foreach ($ln in $listing) {
+  if ($ln -match '^\s*(\d+):\s+[A-Za-z0-9_.\-]+\.at:\d+\s+(.*?)\s*$') {
+    if ($cur) { $tests += $cur }
+    $cur = @{ num = $Matches[1]; title = $Matches[2]; kws = '' }
+  } elseif ($cur) { $cur.kws = $ln.Trim() }
+}
+if ($cur) { $tests += $cur }
+
+$run = New-Object System.Collections.Generic.List[string]; $skip = 0
+foreach ($t in $tests) {
+  $ex = $false
+  foreach ($p in $exclTitle) { if ($t.title -like "*$p*") { $ex = $true; break } }
+  if (-not $ex) { $kw = $t.kws -split '\s+'; foreach ($k in $exclKw) { if ($kw -contains $k) { $ex = $true; break } } }
+  if ($ex) { $skip++ } else { $run.Add($t.num) }
+}
+Write-Host "windows-testsuite: running $($run.Count), skipping $skip (feature/method not testable on Windows)"
+
+# 3. Run the complement (or an explicit -Groups override).
+$sel = if ($Groups.Trim()) { $Groups.Trim() } else { ($run -join ' ') }
+Invoke-MsysBash "cd '$repoMsys' && sh tests/windows-testsuite -C tests AUTOTEST_PATH='$ap' $sel -j$Jobs"
+exit $LASTEXITCODE
