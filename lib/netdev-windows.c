@@ -31,8 +31,8 @@
 #include "svec.h"
 #include "openvswitch/vlog.h"
 #include "odp-netlink.h"
-#include "netlink-socket.h"
 #include "netlink.h"
+#include "ovsext-channel.h"
 
 VLOG_DEFINE_THIS_MODULE(netdev_windows);
 static struct vlog_rate_limit error_rl = VLOG_RATE_LIMIT_INIT(9999, 5);
@@ -81,11 +81,10 @@ static int query_netdev(const char *devname,
 static struct netdev *netdev_windows_alloc(void);
 static int netdev_windows_init_(void);
 
-/* Generic Netlink family numbers for OVS.
- *
- * Initialized by netdev_windows_init_(). */
-static int ovs_win_netdev_family;
-struct nl_sock *ovs_win_netdev_sock;
+/* Transport to the ovsext datapath device, opened once by
+ * netdev_windows_init_().  The netdev generic-netlink family is the fixed
+ * OVS_WIN_NL_NETDEV_FAMILY_ID. */
+static struct ovsext_channel ovs_win_netdev_channel;
 
 
 static bool
@@ -108,16 +107,13 @@ netdev_windows_init_(void)
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
 
     if (ovsthread_once_start(&once)) {
-        error = nl_lookup_genl_family(OVS_WIN_NETDEV_FAMILY,
-                                      &ovs_win_netdev_family);
+        /* XXX: The channel lives for the process lifetime; there is no
+         * netdev-provider teardown hook to close it. */
+        error = ovsext_channel_open(&ovs_win_netdev_channel);
         if (error) {
-            VLOG_ERR("Generic Netlink family '%s' does not exist. "
-                     "The Open vSwitch kernel module is probably not loaded.",
-                     OVS_WIN_NETDEV_FAMILY);
-        }
-        if (!error) {
-            /* XXX: Where to close this socket? */
-            error = nl_sock_create(NETLINK_GENERIC, &ovs_win_netdev_sock);
+            VLOG_ERR("Failed to open the ovsext datapath device (%s). "
+                     "The Open vSwitch kernel extension is probably not loaded.",
+                     ovs_strerror(error));
         }
 
         ovsthread_once_done(&once);
@@ -204,7 +200,7 @@ netdev_windows_netdev_to_ofpbuf(struct netdev_windows_netdev_info *info,
     struct ovs_header *ovs_header;
     int error = EINVAL;
 
-    nl_msg_put_genlmsghdr(buf, 0, ovs_win_netdev_family,
+    nl_msg_put_genlmsghdr(buf, 0, OVS_WIN_NL_NETDEV_FAMILY_ID,
                           NLM_F_REQUEST | NLM_F_ECHO,
                           info->cmd, OVS_WIN_NETDEV_VERSION);
 
@@ -247,7 +243,7 @@ netdev_windows_netdev_from_ofpbuf(struct netdev_windows_netdev_info *info,
 
     struct nlattr *a[ARRAY_SIZE(ovs_netdev_policy)];
     if (!nlmsg || !genl || !ovs_header
-        || nlmsg->nlmsg_type != ovs_win_netdev_family
+        || nlmsg->nlmsg_type != OVS_WIN_NL_NETDEV_FAMILY_ID
         || !nl_policy_parse(&b, 0, ovs_netdev_policy, a,
                             ARRAY_SIZE(ovs_netdev_policy))) {
         return EINVAL;
@@ -295,7 +291,7 @@ query_netdev(const char *devname,
         return error;
     }
 
-    error = nl_transact(NETLINK_GENERIC, request_buf, bufp);
+    error = ovsext_transact(&ovs_win_netdev_channel, request_buf, bufp);
     ofpbuf_delete(request_buf);
 
     if (info) {

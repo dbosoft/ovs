@@ -2,17 +2,13 @@
 #
 # Clean OVERLAY build: touches no upstream autotools file, so resyncing onto an
 # upstream that removed Windows support yields ZERO build-glue conflicts. It
-# compiles upstream's portable sources + the dbosoft Windows overlay.
+# compiles upstream's portable sources plus the dbosoft Windows overlay
+# (include/windows shims, lib/*-windows.c, the native dpif-windows provider).
 #
-# STAGE 1 (current): build the full libopenvswitch as a static lib via MSVC.
-#   For now this REUSES generated files already produced on disk by the autotools
-#   build (the IDL *.c/*.h, the *.inc extractor outputs, include/odp-netlink*.h,
-#   config.h, python/ovs/dirs.py). lib/dirs.c is generated CMake-natively here as
-#   a first codegen proof.
-# STAGE 2 (next): CMake-native python codegen (ovsdb-idlc + extract-ofp-*),
-#   removing the autotools dependency for the *.inc / IDL files.
-# STAGE 3: port the two non-python header generators (odp-netlink.h sed,
-#   odp-netlink-macros.h sh+awk) to python; CMake-native config.h.
+# Every generated input is produced here at configure time with python3 only:
+# config.h, openvswitch/version.h, the string.h/stdio.h MSVC shims, the OVSDB IDL,
+# the ofp-*.inc and odp-netlink*.h extractors, and dirs.c.  No autotools, no shell.
+# Generated files land in ${CMAKE_BINARY_DIR}/gen, searched ahead of the source tree.
 cmake_minimum_required(VERSION 3.20)
 project(ovs_windows C)
 
@@ -62,7 +58,7 @@ set(NEXT_STDIO_H  "\"${_wk}/${_sdkver}/ucrt/stdio.h\"")
 configure_file("${OVS_ROOT}/lib/string.h.in" "${GEN}/lib/string.h" @ONLY)
 configure_file("${OVS_ROOT}/lib/stdio.h.in"  "${GEN}/lib/stdio.h"  @ONLY)
 
-# --- CMake-native codegen (Stage 2): pure-python3, no shell -----------------
+# --- CMake-native codegen: pure python3, no shell ---------------------------
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(ENV{PYTHONPATH} "${OVS_ROOT}/python")   # ovsdb-idlc imports ovs.* from here
 
@@ -125,7 +121,7 @@ if(NOT _rc EQUAL 0)
   message(FATAL_ERROR "text2c failed (rc=${_rc}) for _server.ovsschema.inc")
 endif()
 
-# --- lib/dirs.c — generated CMake-natively (codegen proof) ------------------
+# --- lib/dirs.c — install/runtime paths, generated from lib/dirs.c.in -------
 set(srcdir      ".")
 set(LOGDIR      "\"C:/ProgramData/openvswitch/var/log/openvswitch\"")
 set(RUNDIR      "\"C:/ProgramData/openvswitch/var/run/openvswitch\"")
@@ -191,9 +187,13 @@ set(OVS_LIB_SOURCES
   lib/daemon-windows.c lib/getopt_long.c lib/getrusage-windows.c
   lib/latch-windows.c lib/route-table-stub.c lib/if-notifier-stub.c
   lib/stream-windows.c lib/strsep.c
-  lib/dpif-netlink.c lib/netdev-windows.c lib/netlink-conntrack.c
-  lib/netlink-notifier.c lib/netlink-socket.c lib/wmi.c
-  # --- dbosoft native dpif provider (workstream B) ---
+  lib/netdev-windows.c lib/wmi.c
+  # --- dbosoft native dpif provider ---
+  # The Windows datapath is the native dpif-windows provider talking to the ovsext
+  # driver via ovsext-channel, so the netlink datapath transport is not built on
+  # Windows: dpif-netlink.c, netlink-socket.c, netlink-conntrack.c and
+  # netlink-notifier.c are omitted.  netlink.c (the message codec) IS built -- the
+  # ovsext ABI is netlink-message-framed and message bodies use nl_msg_*.
   lib/dpif-windows.c lib/ovsext-channel.c)
 
 add_library(openvswitch STATIC ${OVS_LIB_SOURCES} ${OVS_GENERATED_SOURCES})
@@ -212,6 +212,11 @@ function(ovs_setup t)
   target_include_directories(${t} PRIVATE ${OVS_INCLUDES})
   target_compile_definitions(${t} PRIVATE ${OVS_DEFS})
   target_compile_options(${t} PRIVATE /W1)
+  # /Zc:inline- keeps unreferenced .CRT$XCU constructors (the OVS_CONSTRUCTOR that
+  # VLOG_DEFINE_THIS_MODULE plants); the VS-generator Release default /Zc:inline
+  # strips them at compile time -> vlog module self-registration dies and ovs-vsctl
+  # aborts ('no destination, level, or module "reconnect"').
+  target_compile_options(${t} PRIVATE /Zc:inline-)
 endfunction()
 ovs_setup(openvswitch)
 
@@ -259,3 +264,32 @@ add_executable(ovs-vsctl utilities/ovs-vsctl.c)
 ovs_setup(ovs-vsctl)
 target_link_directories(ovs-vsctl PRIVATE ${OVS_EXT_LIBDIRS})
 target_link_libraries(ovs-vsctl PRIVATE openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+# ovs-dpctl drives the dpif layer directly -- the test tool for dpif-windows
+# ("ovs-dpctl show windows@<dp>" routes straight to dpif_windows_class).
+add_executable(ovs-dpctl utilities/ovs-dpctl.c)
+ovs_setup(ovs-dpctl)
+target_link_directories(ovs-dpctl PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(ovs-dpctl PRIVATE openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+# Remaining production utilities (single-source over the libs we already build),
+# so the CMake overlay is a self-sufficient OVS userspace.
+add_executable(ovsdb-tool ovsdb/ovsdb-tool.c)
+ovs_setup(ovsdb-tool)
+target_link_directories(ovsdb-tool PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(ovsdb-tool PRIVATE ovsdb openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+add_executable(ovsdb-client ovsdb/ovsdb-client.c)
+ovs_setup(ovsdb-client)
+target_link_directories(ovsdb-client PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(ovsdb-client PRIVATE ovsdb openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+add_executable(ovs-appctl utilities/ovs-appctl.c)
+ovs_setup(ovs-appctl)
+target_link_directories(ovs-appctl PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(ovs-appctl PRIVATE openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
+
+add_executable(ovs-ofctl utilities/ovs-ofctl.c)
+ovs_setup(ovs-ofctl)
+target_link_directories(ovs-ofctl PRIVATE ${OVS_EXT_LIBDIRS})
+target_link_libraries(ovs-ofctl PRIVATE ofproto openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
