@@ -97,23 +97,49 @@ fd_connect(struct stream *stream)
     return retval;
 }
 
+#ifdef _WIN32
+/* sock_errno() returns Winsock WSAE* codes (>= 10000).  Stream errors flow out of
+ * recv()/send() and are rendered by consumers (e.g. jsonrpc) with ovs_strerror(),
+ * which only understands C errno values and therefore prints any WSA* code as
+ * "Unknown error".  Translate the codes recv()/send() can produce to their errno
+ * equivalents, so a peer reset becomes ECONNRESET ("Connection reset by peer")
+ * rather than an unrecognized WSA code. */
+static int
+sock_errno_to_errno(int error)
+{
+    switch (error) {
+    case WSAEWOULDBLOCK:  return EAGAIN;
+    case WSAECONNRESET:   return ECONNRESET;
+    case WSAECONNABORTED: return ECONNABORTED;
+    case WSAECONNREFUSED: return ECONNREFUSED;
+    case WSAENOTCONN:     return ENOTCONN;
+    case WSAESHUTDOWN:    return EPIPE;
+    case WSAETIMEDOUT:    return ETIMEDOUT;
+    case WSAEHOSTUNREACH: return EHOSTUNREACH;
+    case WSAENETUNREACH:  return ENETUNREACH;
+    case WSAEINTR:        return EINTR;
+    case WSAEINVAL:       return EINVAL;
+    case WSAEMSGSIZE:     return EMSGSIZE;
+    default:              return error;
+    }
+}
+#else
+#define sock_errno_to_errno(error) (error)
+#endif
+
 static ssize_t
 fd_recv(struct stream *stream, void *buffer, size_t n)
 {
     struct stream_fd *s = stream_fd_cast(stream);
     ssize_t retval;
-    int error;
+    int error, raw;
 
     retval = recv(s->fd, buffer, n, 0);
     if (retval < 0) {
-        error = sock_errno();
-#ifdef _WIN32
-        if (error == WSAEWOULDBLOCK) {
-           error = EAGAIN;
-        }
-#endif
+        raw = sock_errno();
+        error = sock_errno_to_errno(raw);
         if (error != EAGAIN) {
-            VLOG_DBG_RL(&rl, "recv: %s", sock_strerror(error));
+            VLOG_DBG_RL(&rl, "recv: %s", sock_strerror(raw));
         }
         return -error;
     }
@@ -125,18 +151,14 @@ fd_send(struct stream *stream, const void *buffer, size_t n)
 {
     struct stream_fd *s = stream_fd_cast(stream);
     ssize_t retval;
-    int error;
+    int error, raw;
 
     retval = send(s->fd, buffer, n, 0);
     if (retval < 0) {
-        error = sock_errno();
-#ifdef _WIN32
-        if (error == WSAEWOULDBLOCK) {
-           error = EAGAIN;
-        }
-#endif
+        raw = sock_errno();
+        error = sock_errno_to_errno(raw);
         if (error != EAGAIN) {
-            VLOG_DBG_RL(&rl, "send: %s", sock_strerror(error));
+            VLOG_DBG_RL(&rl, "send: %s", sock_strerror(raw));
         }
         return -error;
     }

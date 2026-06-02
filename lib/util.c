@@ -555,6 +555,18 @@ ovs_strerror(int error)
         return "Success";
     }
 
+#ifdef _WIN32
+    /* Like the strerror(0) case above: MSVC's wording for some socket errors
+     * differs from the POSIX/glibc wording used elsewhere.  Normalize the ones
+     * that diverge so a benign Windows TCP disconnect reports the familiar text.
+     * (MSVC already renders EPIPE as "Broken pipe" and ENOTCONN as
+     * "...is not connected".) */
+    switch (error) {
+    case ECONNRESET:
+        return "Connection reset by peer";
+    }
+#endif
+
     save_errno = errno;
     buffer = strerror_buffer_get()->s;
 
