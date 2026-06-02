@@ -312,7 +312,8 @@ target_link_libraries(test-dpif-windows PRIVATE openvswitch libssl libcrypto pth
 # (hash/classifier/cmap/odp/flows/json/ovsdb codecs/...).  Source list mirrors the
 # unconditional tests_ovstest_SOURCES, minus the !WIN32 file (test-unix-socket.c)
 # and the LINUX-only files (test-lib-route-table.c, test-netlink-conntrack.c,
-# test-netlink-policy.c, test-psample.c).  /Zc:inline- (via ovs_setup) is mandatory
+# test-psample.c).  test-netlink-policy.c was LINUX-only in automake but is portable
+# (netlink message codec) and is built here.  /Zc:inline- (via ovs_setup) is mandatory
 # so the OVSTEST_REGISTER .CRT$XCU constructor survives.
 set(OVSTEST_SOURCES
   tests/ovstest.c
@@ -323,7 +324,8 @@ set(OVSTEST_SOURCES
   tests/test-flows.c tests/test-hash.c tests/test-heap.c tests/test-hindex.c
   tests/test-hmap.c tests/test-id-fpool.c tests/test-json.c tests/test-jsonrpc.c
   tests/test-list.c tests/test-lockfile.c tests/test-multipath.c
-  tests/test-mpsc-queue.c tests/test-netflow.c tests/test-odp.c tests/test-ofpbuf.c
+  tests/test-mpsc-queue.c tests/test-netflow.c tests/test-netlink-policy.c
+  tests/test-odp.c tests/test-ofpbuf.c
   tests/test-packets.c tests/test-random.c tests/test-rcu.c tests/test-rculist.c
   tests/test-reconnect.c tests/test-rstp.c tests/test-sflow.c tests/test-sha1.c
   tests/test-skiplist.c tests/test-stp.c tests/test-unixctl.c tests/test-util.c

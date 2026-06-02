@@ -56,10 +56,12 @@
 
 VLOG_DEFINE_THIS_MODULE(vsctl);
 
-/* Post OVSDB reload error reported. */
+/* Post OVSDB reload error reported.  EX_DATAERR (65) is the documented ovs-vsctl
+ * exit code for this case and what the cross-platform tests expect; sysexits.h is
+ * POSIX-only, so define the same value directly on Windows rather than diverging
+ * to a Windows error code. */
 #ifdef _WIN32
-#include <WinError.h>
-#define EXIT_POSTDB_ERROR ERROR_BAD_ARGUMENTS
+#define EXIT_POSTDB_ERROR 65
 #else
 #include <sysexits.h>
 #define EXIT_POSTDB_ERROR EX_DATAERR

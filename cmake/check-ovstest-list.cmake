@@ -15,8 +15,9 @@ set(_ovstest_excluded
   test-unix-socket.c          # tests/automake.mk: if !WIN32
   test-lib-route-table.c      # tests/automake.mk: if LINUX
   test-netlink-conntrack.c    # tests/automake.mk: if LINUX
-  test-netlink-policy.c       # tests/automake.mk: if LINUX
   test-psample.c)             # tests/automake.mk: if LINUX
+  # NOTE: test-netlink-policy.c was `if LINUX` in automake but is portable (only
+  # netlink.h/ofpbuf.h/util.h/ovstest.h); it is built into ovstest on Windows.
 
 # Names already in our target source list.
 set(_ovstest_have "")
