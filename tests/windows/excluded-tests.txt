@@ -18,3 +18,21 @@ lock symlink                              # needs POSIX symlink semantics (also 
 do not create sockets with unsafe names   # MSYS `test -S` cannot detect AF_UNIX sockets
 unix socket, long pathname                # AF_UNIX pathname-length semantics differ
 unix socket, short pathname
+#
+# --monitor (restart the daemon if it dies) needs a fork()-based parent monitor
+# process; Windows only restarts under the service control manager (--service),
+# not for a plain --detach daemon, so the kill-then-expect-restart assertion in
+# these add-db/add-remote variants cannot pass:
+--monitor
+#
+# add-remote verifies the new remote with `test -S socket1`, which MSYS cannot
+# use to detect a Windows AF_UNIX socket (same limitation as above):
+add-remote and remove-remote
+#
+# Stress test opens ~990 simultaneous sessions; the Windows poll backend uses
+# WaitForMultipleObjects(), capped at 64 handles (MAXIMUM_WAIT_OBJECTS):
+many sessions pending
+#
+# Asserts the timeout exit code is 142 (128 + SIGALRM); Windows has no SIGALRM,
+# so the --timeout expiry path uses a different (non-128+N) exit convention:
+ovs-vsctl connection retry
