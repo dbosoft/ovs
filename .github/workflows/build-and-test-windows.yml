@@ -12,7 +12,13 @@ name: Build for Windows (CMake)
 # autotools workflow in ovs-patches/ovs/dbosoft/0003-Windows-Github-workflow.patch;
 # the build/test steps are CMake/CTest instead of boot.sh+configure+make.
 
-on: [push, pull_request, workflow_dispatch]
+# push only on the main line, so a PR branch runs once (via pull_request) rather
+# than twice (push + pull_request) on every push.
+on:
+  push:
+    branches: [dbosoft-main]
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   build-windows-cmake:
