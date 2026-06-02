@@ -1,6 +1,8 @@
 name: FreeBSD Build and Test
 
-on: [push, pull_request]
+# Disabled on the dbosoft Windows/CMake-overlay branch (see build-and-test.yml):
+# this fork does not run the autotools `make all` path.  Manual-trigger only.
+on: workflow_dispatch
 
 env:
   FREEBSD_VER: "15.0"
