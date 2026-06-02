@@ -52,8 +52,13 @@ $repoMsys = To-Msys $repo
 # AUTOTEST_PATH: CMake Release bins first, then pthreads/OpenSSL DLLs, then the
 # tests/ source dir so script helpers invoked bare (test-dpparse.py, ...) resolve
 # (our absolute override otherwise drops the default relative "tests" entry).
-$ap = @((To-Msys $rel), (To-Msys $PthreadsBin), (To-Msys $OpenSslDir),
-        (To-Msys (Join-Path $repo 'tests'))) -join ':'
+# AUTOTEST_PATH REPLACES PATH inside the suite, so also add python3's directory
+# (some tests use '#!/usr/bin/env python3' helpers) -- otherwise it's dropped.
+$apDirs = @((To-Msys $rel), (To-Msys $PthreadsBin), (To-Msys $OpenSslDir),
+            (To-Msys (Join-Path $repo 'tests')))
+$py3 = Get-Command python3 -ErrorAction SilentlyContinue
+if ($py3) { $apDirs += (To-Msys (Split-Path $py3.Source)) }
+$ap = $apDirs -join ':'
 # Run a bash script BODY via a temp LF file: a multi-line body (sed continuations,
 # regex parens) through `bash -lc` mangles the quoting.
 function Invoke-MsysBash([string]$body) {
