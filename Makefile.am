@@ -14,16 +14,6 @@ AM_CPPFLAGS = $(SSL_CFLAGS)
 AM_LDFLAGS = $(SSL_LDFLAGS)
 AM_LDFLAGS += $(OVS_LDFLAGS)
 
-if WIN32
-AM_CPPFLAGS += -I $(top_srcdir)/include/windows
-AM_CPPFLAGS += -I $(top_srcdir)/datapath-windows/include
-AM_CPPFLAGS += $(PTHREAD_INCLUDES)
-AM_CPPFLAGS += $(MSVC_CFLAGS)
-AM_LDFLAGS += $(PTHREAD_LDFLAGS)
-AM_LDFLAGS += $(MSVC64_LDFLAGS)
-PLATFORM = $(MSVC_PLATFORM)
-endif
-
 AM_CPPFLAGS += -I $(top_srcdir)/include
 AM_CPPFLAGS += -I $(top_builddir)/include
 AM_CPPFLAGS += -I $(top_srcdir)/lib
@@ -49,18 +39,13 @@ endif
 
 AM_CTAGSFLAGS = -I "$(OVS_CTAGS_IDENTIFIERS_LIST)"
 
-if WIN32
-psep=";"
-else
-psep=":"
-endif
 # PYTHONDONTWRITEBYTECODE=yes keeps Python from creating .pyc and .pyo
 # files.  Creating .py[co] works OK for any given version of Open
 # vSwitch, but it causes trouble if you switch from a version with
 # foo/__init__.py into an (older) version with plain foo.py, since
 # foo/__init__.pyc will cause Python to ignore foo.py.
 run_python = \
-	PYTHONPATH=$(top_srcdir)/python$(psep)$$PYTHONPATH \
+	PYTHONPATH=$(top_srcdir)/python:$$PYTHONPATH \
 	PYTHONDONTWRITEBYTECODE=yes $(PYTHON3)
 
 ALL_LOCAL =
@@ -150,7 +135,7 @@ ro_shell = printf '\043 Generated automatically -- do not modify!    -*- buffer-
 
 SUFFIXES += .in
 .in:
-	$(AM_V_GEN)PYTHONPATH=$$PYTHONPATH$(psep)$(srcdir)/python $(PYTHON3) $(srcdir)/build-aux/soexpand.py -I$(srcdir) < $< | \
+	$(AM_V_GEN)PYTHONPATH=$$PYTHONPATH:$(srcdir)/python $(PYTHON3) $(srcdir)/build-aux/soexpand.py -I$(srcdir) < $< | \
 	  $(PYTHON3) $(srcdir)/build-aux/dpdkstrip.py $(DPDKSTRIP_FLAGS) | \
 	  sed \
 	    -e 's,[@]PKIDIR[@],$(PKIDIR),g' \
@@ -235,7 +220,7 @@ config-h-check:
 	@cd $(srcdir); \
 	if test -e .git && (git --version) >/dev/null 2>&1 && \
 	  git --no-pager grep -L '#include <config\.h>' `git ls-files | grep '\.c$$' | \
-	    grep -vE '^datapath-windows|^lib/sflow|^python|^third-party'`; \
+	    grep -vE '^lib/sflow|^python|^third-party'`; \
 	then \
 	  echo "See above for list of violations of the rule that"; \
 	  echo "every C source file must #include <config.h>."; \
@@ -250,13 +235,13 @@ config-h-check:
 	fi
 .PHONY: config-h-check
 
-# Check for printf() type modifiers that MSVC doesn't support.
+# Check for printf() type modifiers.
 ALL_LOCAL += printf-check
 printf-check:
 	@cd $(srcdir); \
 	if test -e .git && (git --version) >/dev/null 2>&1 && \
 	  git --no-pager grep -n -E -e '%[-+ #0-9.*]*([ztj]|hh)' --and --not -e 'ovs_scan' `git ls-files | grep '\.[ch]$$' | \
-	    grep -vE '^datapath-windows|^lib/sflow|^third-party'`; \
+	    grep -vE '^lib/sflow|^third-party'`; \
 	then \
 	  echo "See above for list of violations of the rule that"; \
 	  echo "'z', 't', 'j', 'hh' printf() type modifiers are"; \
@@ -341,7 +326,7 @@ thread-safety-check:
 	if test -e .git && (git --version) >/dev/null 2>&1 && \
 	  grep -n -f build-aux/thread-safety-forbidden \
 	    `git ls-files | grep '\.[ch]$$' \
-	      | $(EGREP) -v '^datapath-windows|^lib/sflow|^third-party'` /dev/null \
+	      | $(EGREP) -v '^lib/sflow|^third-party'` /dev/null \
 	      | $(EGREP) -v ':[ 	]*/?\*' \
 	      | $(EGREP) -v '^tests/test-lib-route-table.c'; \
 	then \
@@ -414,7 +399,7 @@ CLEANFILES += flake8-check
 
 -include manpages.mk
 manpages.mk: $(MAN_ROOTS) build-aux/sodepends.py python/ovs_build_helpers/soutil.py
-	@PYTHONPATH=$$PYTHONPATH$(psep)$(srcdir)/python $(PYTHON3) $(srcdir)/build-aux/sodepends.py -I. -I$(srcdir) $(MAN_ROOTS) >$(@F).tmp
+	@PYTHONPATH=$$PYTHONPATH:$(srcdir)/python $(PYTHON3) $(srcdir)/build-aux/sodepends.py -I. -I$(srcdir) $(MAN_ROOTS) >$(@F).tmp
 	@if cmp -s $(@F).tmp $@; then \
 	  touch $@; \
 	  rm -f $(@F).tmp; \
@@ -423,35 +408,6 @@ manpages.mk: $(MAN_ROOTS) build-aux/sodepends.py python/ovs_build_helpers/soutil
 	fi
 CLEANFILES += manpages.mk
 CLEANFILES += manpage-dep-check
-
-if VSTUDIO_DDK
-ALL_LOCAL += ovsext
-ARCH = x64
-ovsext: datapath-windows/ovsext.sln $(srcdir)/datapath-windows/include/OvsDpInterface.h
-if VSTUDIO_WIN8
-	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
-endif
-if VSTUDIO_WIN8_1
-	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
-endif
-if VSTUDIO_WIN10
-	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win10$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
-endif
-
-
-CLEAN_LOCAL += ovsext_clean
-ovsext_clean: datapath-windows/ovsext.sln
-if VSTUDIO_WIN8
-	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
-endif
-if VSTUDIO_WIN8_1
-	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
-endif
-if VSTUDIO_WIN10
-	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win10$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
-endif
-endif
-.PHONY: ovsext
 
 clang-analyze: clean
 	@which clang scan-build >/dev/null 2>&1 || \
@@ -487,7 +443,5 @@ include rhel/automake.mk
 include python/automake.mk
 include tutorial/automake.mk
 include vtep/automake.mk
-include datapath-windows/automake.mk
-include datapath-windows/include/automake.mk
 include selinux/automake.mk
 include build-aux/automake.mk
