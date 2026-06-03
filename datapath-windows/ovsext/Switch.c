@@ -46,10 +46,15 @@ extern NDIS_HANDLE gOvsExtDriverObject;
 extern PDEVICE_OBJECT gOvsDeviceObject;
 
 /*
- * Reference count used to prevent premature deallocation of the global switch
- * context structure, gOvsSwitchContext.
+ * Datapath registry: each attached Hyper-V switch is a datapath, addressed by
+ * its datapath number (dpNo), which is the slot index in 'gOvsDatapaths'.
+ * 'gOvsDatapathLock' serializes registration, lookup and the reference taken
+ * during lookup. 'gOvsSwitchContext' points at the default (first) datapath,
+ * which still backs the paths that have no dp_ifindex of their own.
  */
-volatile LONG      gOvsSwitchContextRefCount = 0;
+#define OVS_MAX_DATAPATHS 16
+POVS_SWITCH_CONTEXT gOvsDatapaths[OVS_MAX_DATAPATHS];
+NDIS_SPIN_LOCK     gOvsDatapathLock;
 
 static NDIS_STATUS OvsCreateSwitch(NDIS_HANDLE ndisFilterHandle,
                                    POVS_SWITCH_CONTEXT *switchContextOut);
@@ -92,11 +97,14 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
         goto cleanup;
     }
 
+    NdisAcquireSpinLock(&gOvsDatapathLock);
     if (gOvsSwitchContext) {
+        NdisReleaseSpinLock(&gOvsDatapathLock);
         OVS_LOG_TRACE("Exit: Failed to create OVS Switch, only one datapath is"
                       "supported, %p.", gOvsSwitchContext);
         goto cleanup;
     }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
 
     if (InterlockedCompareExchange(&gOvsInAttach, 1, 0)) {
         /* Just fail the request. */
@@ -465,7 +473,7 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
     NdisAllocateSpinLock(&(switchContext->pidHashLock));
     switchContext->isActivated = FALSE;
     switchContext->isActivateFailed = FALSE;
-    switchContext->dpNo = OVS_DP_NUMBER;
+    switchContext->refCount = 1;
     ovsTimeIncrementPerTick = KeQueryTimeIncrement() / 10000;
 
     OVS_LOG_TRACE("Exit: Succesfully initialized switchContext: %p",
@@ -520,45 +528,33 @@ OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 VOID
 OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 {
-    LONG ref = 0;
-    LONG newRef = 0;
-    LONG icxRef = 0;
+    if (switchContext == NULL) {
+        return;
+    }
 
-    do {
-        ref = InterlockedAdd(&gOvsSwitchContextRefCount, 0);
-        newRef = (0 == ref) ? 0 : ref - 1;
-        icxRef = InterlockedCompareExchange(&gOvsSwitchContextRefCount,
-                                            newRef,
-                                            ref);
-    } while (icxRef != ref);
-
-    if (ref == 1) {
+    if (InterlockedDecrement(&switchContext->refCount) == 0) {
         OvsDeleteSwitchContext(switchContext);
-        gOvsSwitchContext = NULL;
     }
 }
 
-BOOLEAN
+/*
+ *  Returns the default datapath's switch context with a reference held (release
+ *  it with OvsReleaseSwitchContext), or NULL if no datapath is registered. Used
+ *  by request paths that carry no dp_ifindex of their own.
+ */
+POVS_SWITCH_CONTEXT
 OvsAcquireSwitchContext(VOID)
 {
-    LONG ref = 0;
-    LONG newRef = 0;
-    LONG icxRef = 0;
-    BOOLEAN ret = FALSE;
+    POVS_SWITCH_CONTEXT switchContext;
 
-    do {
-        ref = InterlockedAdd(&gOvsSwitchContextRefCount, 0);
-        newRef = (0 == ref) ? 0 : ref + 1;
-        icxRef = InterlockedCompareExchange(&gOvsSwitchContextRefCount,
-                                            newRef,
-                                            ref);
-    } while (icxRef != ref);
-
-    if (ref != 0) {
-        ret = TRUE;
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    switchContext = gOvsSwitchContext;
+    if (switchContext != NULL) {
+        InterlockedIncrement(&switchContext->refCount);
     }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
 
-    return ret;
+    return switchContext;
 }
 
 /*
@@ -567,25 +563,64 @@ OvsAcquireSwitchContext(VOID)
  * --------------------------------------------------------------------------
  */
 VOID
+OvsInitDatapathRegistry(VOID)
+{
+    NdisAllocateSpinLock(&gOvsDatapathLock);
+    RtlZeroMemory(gOvsDatapaths, sizeof gOvsDatapaths);
+}
+
+VOID
+OvsCleanupDatapathRegistry(VOID)
+{
+    NdisFreeSpinLock(&gOvsDatapathLock);
+}
+
+VOID
 OvsRegisterDatapath(POVS_SWITCH_CONTEXT switchContext)
 {
-    ASSERT(gOvsSwitchContext == NULL);
+    UINT32 i;
 
-    gOvsSwitchContextRefCount = 1;
-    gOvsSwitchContext = switchContext;
-    KeMemoryBarrier();
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    for (i = 0; i < OVS_MAX_DATAPATHS; i++) {
+        if (gOvsDatapaths[i] == NULL) {
+            gOvsDatapaths[i] = switchContext;
+            switchContext->dpNo = i;
+            break;
+        }
+    }
+    if (i == OVS_MAX_DATAPATHS) {
+        OVS_LOG_ERROR("Datapath registry full, cannot register %p",
+                      switchContext);
+        ASSERT(FALSE);
+    } else if (gOvsSwitchContext == NULL) {
+        gOvsSwitchContext = switchContext;
+    }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
 }
 
 VOID
 OvsUnregisterDatapath(POVS_SWITCH_CONTEXT switchContext)
 {
+    UINT32 i;
+
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    for (i = 0; i < OVS_MAX_DATAPATHS; i++) {
+        if (gOvsDatapaths[i] == switchContext) {
+            gOvsDatapaths[i] = NULL;
+            break;
+        }
+    }
+    if (gOvsSwitchContext == switchContext) {
+        gOvsSwitchContext = NULL;
+    }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
+
     /*
-     * The context's storage is released by OvsReleaseSwitchContext when its
-     * last reference drops, so removing it from the registry needs no separate
-     * unlink and must not touch gOvsSwitchContextRefCount (doing so would
-     * double-release the context).
+     * Removing the context from the registry stops new lookups from finding it.
+     * The owning reference is dropped by the OvsUninitSwitchContext that follows
+     * in OvsDeleteSwitch; in-flight lookups that already hold a reference keep
+     * the context alive until they release it.
      */
-    UNREFERENCED_PARAMETER(switchContext);
 }
 
 /*
@@ -596,20 +631,16 @@ OvsUnregisterDatapath(POVS_SWITCH_CONTEXT switchContext)
 POVS_SWITCH_CONTEXT
 OvsAcquireDatapathByNumber(UINT32 dpNo)
 {
-    POVS_SWITCH_CONTEXT switchContext;
+    POVS_SWITCH_CONTEXT switchContext = NULL;
 
-    if (!OvsAcquireSwitchContext()) {
-        return NULL;
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    if (dpNo < OVS_MAX_DATAPATHS && gOvsDatapaths[dpNo] != NULL) {
+        switchContext = gOvsDatapaths[dpNo];
+        InterlockedIncrement(&switchContext->refCount);
     }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
 
-    /* The held reference keeps the context and gOvsSwitchContext alive. */
-    switchContext = gOvsSwitchContext;
-    if (switchContext != NULL && switchContext->dpNo == dpNo) {
-        return switchContext;
-    }
-
-    OvsReleaseSwitchContext(switchContext);
-    return NULL;
+    return switchContext;
 }
 
 /*

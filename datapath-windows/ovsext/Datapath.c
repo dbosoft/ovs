@@ -482,6 +482,7 @@ OvsInit()
 
     gOvsCtrlLock = &ovsCtrlLockObj;
     NdisAllocateSpinLock(gOvsCtrlLock);
+    OvsInitDatapathRegistry();
     OvsInitEventQueue();
 
     status = OvsPerCpuDataInit();
@@ -494,6 +495,7 @@ OvsCleanup()
 {
     OvsPerCpuDataCleanup();
     OvsCleanupEventQueue();
+    OvsCleanupDatapathRegistry();
     if (gOvsCtrlLock) {
         NdisFreeSpinLock(gOvsCtrlLock);
         gOvsCtrlLock = NULL;
@@ -802,6 +804,7 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
     UINT32 ovsMsgLength = 0;
     NETLINK_FAMILY *nlFamilyOps;
     POVS_SWITCH_CONTEXT dpCtx = NULL;
+    POVS_SWITCH_CONTEXT defaultDpCtx = NULL;
     OVS_USER_PARAMS_CONTEXT usrParamsCtx;
 
 #pragma warning(suppress: 28118)
@@ -828,13 +831,10 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
     outputBufferLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
     inputBuffer = irp->AssociatedIrp.SystemBuffer;
 
-    /* Check if the extension is enabled. */
-    if (NULL == gOvsSwitchContext) {
-        status = STATUS_NOT_FOUND;
-        goto exit;
-    }
-
-    if (!OvsAcquireSwitchContext()) {
+    /* Hold the default datapath for the request's duration; this also tells us
+     * the extension is enabled. */
+    defaultDpCtx = OvsAcquireSwitchContext();
+    if (defaultDpCtx == NULL) {
         status = STATUS_NOT_FOUND;
         goto exit;
     }
@@ -1050,7 +1050,7 @@ done:
     if (dpCtx != NULL) {
         OvsReleaseSwitchContext(dpCtx);
     }
-    OvsReleaseSwitchContext(gOvsSwitchContext);
+    OvsReleaseSwitchContext(defaultDpCtx);
 
 exit:
     /* Should not complete a pending IRP unless proceesing is completed. */

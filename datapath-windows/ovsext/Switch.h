@@ -95,6 +95,11 @@ typedef struct _OVS_SWITCH_CONTEXT
 
     UINT32                  dpNo;
 
+    /* Outstanding references to this context; the context is freed when this
+     * drops to zero. The owning reference is taken at creation and released on
+     * detach. */
+    volatile LONG           refCount;
+
     /*
      * 'virtualExternalVport' represents default external interface. This is
      * a virtual interface. The friendly name of such an interface has
@@ -224,13 +229,24 @@ OvsReleaseDatapath(OVS_DATAPATH *datapath,
     NdisReleaseRWLock(datapath->lock, lockState);
 }
 
-BOOLEAN
+POVS_SWITCH_CONTEXT
 OvsAcquireSwitchContext(VOID);
 
+/*
+ * Must run at PASSIVE_LEVEL: when the last reference drops, the context is
+ * freed, which releases NDIS RW and spin locks that require PASSIVE_LEVEL.
+ */
+_IRQL_requires_(PASSIVE_LEVEL)
 VOID
 OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext);
 
 /* Datapath registry: maps a datapath number (dpNo) to its switch context. */
+VOID
+OvsInitDatapathRegistry(VOID);
+
+VOID
+OvsCleanupDatapathRegistry(VOID);
+
 VOID
 OvsRegisterDatapath(POVS_SWITCH_CONTEXT switchContext);
 
