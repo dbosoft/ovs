@@ -1733,7 +1733,7 @@ OvsPortFillInfo(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         ASSERT(FALSE);
         return STATUS_UNSUCCESSFUL;
     }
-    msgOutTmp.ovsHdr.dp_ifindex = gOvsSwitchContext->dpNo;
+    msgOutTmp.ovsHdr.dp_ifindex = eventEntry->dpNo;
 
     ok = NlMsgPutHead(nlBuf, (PCHAR)&msgOutTmp, sizeof msgOutTmp);
     if (!ok) {
@@ -1923,7 +1923,7 @@ OvsSockPropCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if(!NlFillOvsMsg(&nlBuf, msgIn->nlMsg.nlmsgType, NLM_F_MULTI,
                       msgIn->nlMsg.nlmsgSeq, msgIn->nlMsg.nlmsgPid,
                       msgIn->genlMsg.cmd, msgIn->genlMsg.version,
-                      gOvsSwitchContext->dpNo)){
+                      msgIn->ovsHdr.dp_ifindex)){
         return STATUS_INVALID_BUFFER_SIZE;
     }
 

@@ -301,11 +301,13 @@ HvDeletePort(POVS_SWITCH_CONTEXT switchContext,
     if (vport) {
         OVS_VPORT_EVENT_ENTRY event;
 
+        RtlZeroMemory(&event, sizeof event);
         event.portNo = vport->portNo;
         event.ovsType = vport->ovsType;
         event.upcallPid = vport->upcallPid;
         RtlCopyMemory(&event.ovsName, &vport->ovsName, sizeof event.ovsName);
         event.type = OVS_EVENT_LINK_DOWN;
+        event.dpNo = switchContext->dpNo;
         OvsRemoveAndDeleteVport(NULL, switchContext, vport, TRUE, FALSE);
         OvsPostVportEvent(&event);
     } else {
@@ -558,11 +560,13 @@ HvUpdateNic(POVS_SWITCH_CONTEXT switchContext,
 
     if (nameChanged) {
         OVS_VPORT_EVENT_ENTRY evt;
+        RtlZeroMemory(&evt, sizeof evt);
         evt.portNo = vport->portNo;
         evt.ovsType = vport->ovsType;
         evt.upcallPid = vport->upcallPid;
         RtlCopyMemory(&evt.ovsName, &vport->ovsName, sizeof evt.ovsName);
         evt.type = OVS_EVENT_LINK_DOWN;
+        evt.dpNo = switchContext->dpNo;
         OvsRemoveAndDeleteVport(NULL, switchContext, vport, FALSE, TRUE);
         OvsPostVportEvent(&evt);
     }
@@ -623,11 +627,13 @@ HvDisconnectNic(POVS_SWITCH_CONTEXT switchContext,
         isInternalPort = TRUE;
     }
 
+    RtlZeroMemory(&event, sizeof event);
     event.portNo = vport->portNo;
     event.ovsType = vport->ovsType;
     event.upcallPid = vport->upcallPid;
     RtlCopyMemory(&event.ovsName, &vport->ovsName, sizeof event.ovsName);
     event.type = OVS_EVENT_LINK_DOWN;
+    event.dpNo = switchContext->dpNo;
     OvsPostVportEvent(&event);
 
     /*
