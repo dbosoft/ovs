@@ -1,0 +1,91 @@
+name: Build for Windows (CMake)
+
+# MSYS-free Windows build of the dbosoft CMake overlay: configure + build the full
+# userspace with MSVC and run the CTest net (ovstest + the dpif-windows mock test).
+# Replaces the autotools/MSYS2 path (build-and-test.yml, disabled on this branch).
+#
+# Scope: userspace + unit tests only.  The kernel driver (datapath-windows/
+# ovsext.vcxproj) and the signed package still build via MSBuild + the dbosoft
+# branding/VS2022 patches in ovs-patches; that path is not covered here.
+#
+# Dependency setup (OpenSSL download, pthreads4w build) is adapted from the
+# autotools workflow in ovs-patches/ovs/dbosoft/0003-Windows-Github-workflow.patch;
+# the build/test steps are CMake/CTest instead of boot.sh+configure+make.
+
+# push only on the main line, so a PR branch runs once (via pull_request) rather
+# than twice (push + pull_request) on every push.
+on:
+  push:
+    branches: [dbosoft-main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows-cmake:
+    name: windows cmake msvc
+    # windows-2022 ships VS2022 + the Windows SDK.  (windows-latest=2025 dropped the
+    # preinstalled WDK; not needed here since we build userspace only.)
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+
+      - name: set up python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: install pywin32
+        # The OVSDB IDL codegen (ovsdb-idlc -> ovs.poller -> ovs.winutils) imports
+        # ntsecuritycon (pywin32) on Windows, so it must be present for configure.
+        run: pip install pywin32
+
+      - name: install OpenSSL 3.0
+        shell: powershell
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $dl = "$env:RUNNER_TEMP\ovs-build-downloads"
+          New-Item -ItemType Directory -Force -Path $dl | Out-Null
+          # Latest stable OpenSSL 3.0, 64-bit, full installer (slproweb hashes feed).
+          $url = "https://raw.githubusercontent.com/slproweb/opensslhashes/master/win32_openssl_hashes.json"
+          $web = (Invoke-WebRequest -UseBasicParsing -Uri $url).Content | ConvertFrom-Json
+          $src = ($web.files.PSObject.Properties | Where-Object {
+              $_.Value.basever -match "^3\.0\.[0-9]+" -and $_.Value.bits -eq "64" -and
+              $_.Value.arch -eq "INTEL" -and $_.Value.installer -eq "exe" -and -not $_.Value.light
+          } | Select-Object -First 1).Value
+          $dst = "$dl\Win64OpenSSL.exe"
+          Invoke-WebRequest -UseBasicParsing $src.url -OutFile $dst
+          Start-Process -FilePath $dst -Wait -ArgumentList `
+              "/silent /verysilent /sp- /suppressmsgboxes /DIR=C:\OpenSSL-Win64"
+          Get-Item C:\OpenSSL-Win64
+
+      - name: build pthreads4w
+        shell: cmd
+        run: |
+          git clone -q https://git.code.sf.net/p/pthreads4w/code C:\pthreads4w-code
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cd /d C:\pthreads4w-code && nmake DESTROOT=C:\PTHREADS-BUILT all install
+
+      - name: cmake configure
+        shell: cmd
+        run: |
+          cmake -G "Visual Studio 17 2022" -A x64 -S . -B build ^
+            -DPTHREADS_ROOT=C:/PTHREADS-BUILT -DOPENSSL_ROOT=C:/OpenSSL-Win64
+
+      - name: cmake build
+        shell: cmd
+        run: cmake --build build --config Release
+
+      - name: ctest
+        shell: cmd
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-windows-cmake
+          if-no-files-found: ignore
+          path: build/Testing/Temporary/LastTest.log

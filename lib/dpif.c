@@ -78,6 +78,10 @@ static const struct dpif_class *base_dpif_classes[] = {
 #ifdef __linux__
     &dpif_netlink_class,
 #endif
+#ifdef _WIN32
+    /* The native ovsext provider is the Windows datapath. */
+    &dpif_windows_class,
+#endif
     &dpif_netdev_class,
 };
 

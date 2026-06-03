@@ -7601,10 +7601,10 @@ fast_path_processing(struct dp_netdev_pmd_thread *pmd,
                      odp_port_t in_port)
 {
     const size_t cnt = dp_packet_batch_size(packets_);
-#ifndef __CHECKER__
+#if !defined(__CHECKER__) && !defined(_WIN32)
     const size_t PKT_ARRAY_SIZE = cnt;
 #else
-    /* Sparse doesn't like variable length array. */
+    /* Sparse or MSVC doesn't like variable length array. */
     enum { PKT_ARRAY_SIZE = NETDEV_MAX_BURST };
 #endif
     struct dp_packet *packet;
@@ -7718,10 +7718,10 @@ dp_netdev_input__(struct dp_netdev_pmd_thread *pmd,
                   struct dp_packet_batch *packets,
                   bool md_is_valid, odp_port_t port_no)
 {
-#ifndef __CHECKER__
+#if !defined(__CHECKER__) && !defined(_WIN32)
     const size_t PKT_ARRAY_SIZE = dp_packet_batch_size(packets);
 #else
-    /* Sparse doesn't like variable length array. */
+    /* Sparse or MSVC doesn't like variable length array. */
     enum { PKT_ARRAY_SIZE = NETDEV_MAX_BURST };
 #endif
     OVS_ALIGNED_VAR(CACHE_LINE_SIZE)

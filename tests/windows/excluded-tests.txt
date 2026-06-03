@@ -1,0 +1,38 @@
+# Test GROUP TITLES (matched as a substring) skipped because the FEATURE or TEST
+# METHOD genuinely does not work / is not testable on Windows today -- NOT fixable
+# in the OVS port.  Fixable failures (ssl test-PKI, ovsdb-server --run, the
+# ovs-vswitchd OFPST_TABLE crash, ...) are deliberately NOT listed: they must run
+# and be fixed, not skipped.
+#
+# Python OVS bindings have no Windows support (separate track); the "- Python3"
+# variants exercise them and are not keyword-tagged, so match them by title:
+Python3
+#
+# POSIX-only test methods / OS features absent on Windows:
+ovs_assert                                # harness does `kill -l $?` expecting SIGABRT exit
+no invalid UTF-8 sequences in strings     # MSYS mangles invalid UTF-8 bytes passed in argv
+lock blocks other process                 # needs fork()
+lock twice blocks other process           # needs fork()
+lock and unlock allows other process      # needs fork()
+lock symlink                              # needs POSIX symlink semantics (also matches "to dir")
+do not create sockets with unsafe names   # MSYS `test -S` cannot detect AF_UNIX sockets
+unix socket, long pathname                # AF_UNIX pathname-length semantics differ
+unix socket, short pathname
+#
+# --monitor (restart the daemon if it dies) needs a fork()-based parent monitor
+# process; Windows only restarts under the service control manager (--service),
+# not for a plain --detach daemon, so the kill-then-expect-restart assertion in
+# these add-db/add-remote variants cannot pass:
+--monitor
+#
+# add-remote verifies the new remote with `test -S socket1`, which MSYS cannot
+# use to detect a Windows AF_UNIX socket (same limitation as above):
+add-remote and remove-remote
+#
+# Stress test opens ~990 simultaneous sessions; the Windows poll backend uses
+# WaitForMultipleObjects(), capped at 64 handles (MAXIMUM_WAIT_OBJECTS):
+many sessions pending
+#
+# Asserts the timeout exit code is 142 (128 + SIGALRM); Windows has no SIGALRM,
+# so the --timeout expiry path uses a different (non-128+N) exit convention:
+ovs-vsctl connection retry

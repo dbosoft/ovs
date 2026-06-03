@@ -48,6 +48,57 @@
 
 VLOG_DEFINE_THIS_MODULE(vlog);
 
+#ifdef _WIN32
+#include <io.h>
+/* The CRT open()/_open() do not grant FILE_SHARE_DELETE, so a log file held open
+ * by a daemon cannot be renamed or replaced -- breaking log reopen/rotation and
+ * tests that rewrite the open log.  Open via CreateFile with share-delete and wrap
+ * the handle in a CRT fd to restore POSIX-like "rename/replace while open" semantics. */
+static int
+vlog_open_shareable_append(const char *name)
+{
+    HANDLE h = CreateFile(name, FILE_APPEND_DATA,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        switch (GetLastError()) {
+        case ERROR_FILE_NOT_FOUND:
+        case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
+        case ERROR_ACCESS_DENIED:  errno = EACCES; break;
+        default:                   errno = EIO;    break;
+        }
+        return -1;
+    }
+    int fd = _open_osfhandle((intptr_t) h, _O_APPEND | _O_WRONLY);
+    if (fd < 0) {
+        CloseHandle(h);
+        errno = EMFILE;
+    }
+    return fd;
+}
+
+/* fstat() reports st_ino == 0 on Windows, so the POSIX dev/ino "same file" test
+ * mis-reports two distinct files as identical -- which makes vlog/reopen a no-op
+ * (it keeps writing to the renamed old file).  Compare the real Windows file
+ * identity (volume serial + file index) instead. */
+static bool
+vlog_same_file_win(int fd1, int fd2)
+{
+    BY_HANDLE_FILE_INFORMATION i1, i2;
+    HANDLE h1 = (HANDLE) _get_osfhandle(fd1);
+    HANDLE h2 = (HANDLE) _get_osfhandle(fd2);
+
+    if (h1 == INVALID_HANDLE_VALUE || h2 == INVALID_HANDLE_VALUE
+        || !GetFileInformationByHandle(h1, &i1)
+        || !GetFileInformationByHandle(h2, &i2)) {
+        return false;
+    }
+    return (i1.dwVolumeSerialNumber == i2.dwVolumeSerialNumber
+            && i1.nFileIndexHigh == i2.nFileIndexHigh
+            && i1.nFileIndexLow == i2.nFileIndexLow);
+}
+#endif /* _WIN32 */
+
 /* ovs_assert() logs the assertion message, so using ovs_assert() in this
  * source file could cause recursion. */
 #undef ovs_assert
@@ -364,16 +415,20 @@ static int
 vlog_set_log_file__(char *new_log_file_name)
 {
     struct vlog_module *mp;
-    struct stat old_stat;
-    struct stat new_stat;
+    struct stat old_stat OVS_UNUSED;
+    struct stat new_stat OVS_UNUSED;
     int new_log_fd;
     bool same_file;
     bool log_close;
 
     /* Open new log file. */
     if (new_log_file_name) {
+#ifdef _WIN32
+        new_log_fd = vlog_open_shareable_append(new_log_file_name);
+#else
         new_log_fd = open(new_log_file_name, O_WRONLY | O_CREAT | O_APPEND,
                           0660);
+#endif
         if (new_log_fd < 0) {
             VLOG_WARN("failed to open %s for logging: %s",
                       new_log_file_name, ovs_strerror(errno));
@@ -390,10 +445,15 @@ vlog_set_log_file__(char *new_log_file_name)
                   && new_log_fd < 0) ||
                  (log_fd >= 0
                   && new_log_fd >= 0
+#ifdef _WIN32
+                  && vlog_same_file_win(log_fd, new_log_fd)
+#else
                   && !fstat(log_fd, &old_stat)
                   && !fstat(new_log_fd, &new_stat)
                   && old_stat.st_dev == new_stat.st_dev
-                  && old_stat.st_ino == new_stat.st_ino));
+                  && old_stat.st_ino == new_stat.st_ino
+#endif
+                  ));
     ovs_mutex_unlock(&log_file_mutex);
     if (same_file) {
         if (new_log_fd >= 0) {
@@ -479,6 +539,7 @@ vlog_reopen_log_file(void)
     }
 }
 
+#ifndef _WIN32
 /* In case a log file exists, change its owner to new 'user' and 'group'.
  *
  * This is useful for handling cases where the --log-file option is
@@ -505,6 +566,7 @@ vlog_change_owner_unix(uid_t user, gid_t group)
         VLOG_FATAL("%s", ds_steal_cstr(&err));
     }
 }
+#endif
 
 /* Set debugging levels.  Returns null if successful, otherwise an error
  * message that the caller must free(). */

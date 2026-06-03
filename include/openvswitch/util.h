@@ -89,6 +89,12 @@ OVS_NO_RETURN void ovs_assert_failure(const char *, const char *, const char *);
  * assigned to OBJECT. */
 #ifdef __GNUC__
 #define OVS_TYPEOF(OBJECT) typeof(OBJECT)
+#elif defined (_MSC_VER)
+/* MSVC (>= VS 2022 17.9) provides __typeof__ as an extension.  Without a real
+ * typeof, OVS_TYPEOF would fall through to void*, which breaks the by-value
+ * MULTIVAR iterators (e.g. VECTOR_FOR_EACH) where the element is assigned by
+ * value: 'NODE = *(void**)' assigns void* to a struct lvalue (C2440). */
+#define OVS_TYPEOF(OBJECT) __typeof__(OBJECT)
 #elif defined (__cplusplus)
 #define OVS_TYPEOF(OBJECT) decltype(OBJECT)
 #else

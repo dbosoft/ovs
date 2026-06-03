@@ -8,6 +8,10 @@
 #ifndef SFLOW_H
 #define SFLOW_H 1
 
+#ifdef _WIN32
+#include "windefs.h"
+#endif
+
 #include "openvswitch/types.h"
 
 typedef enum {

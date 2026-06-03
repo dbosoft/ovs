@@ -402,6 +402,9 @@ main_loop(struct server_config *config,
             poll_timer_wait_until(status_timer);
         }
         poll_block();
+        if (should_service_stop()) {
+            *exiting = true;
+        }
     }
 
     free(remotes_error);
@@ -742,6 +745,7 @@ main(int argc, char *argv[])
 
     ovs_cmdl_proctitle_init(argc, argv);
     set_program_name(argv[0]);
+    service_start(&argc, &argv);
     fatal_ignore_sigpipe();
     process_init();
     dns_resolve_init(true);
@@ -916,6 +920,7 @@ main(int argc, char *argv[])
     dns_resolve_destroy();
     perf_counters_destroy();
     cooperative_multitasking_destroy();
+    service_stop();
     return 0;
 }
 
@@ -923,10 +928,33 @@ main(int argc, char *argv[])
  * false if not.
  *
  * "False negatives" are possible. */
+#ifdef _WIN32
+/* Returns the identity (volume + file index) of 'filename' in '*info', or
+ * false on failure.  Windows' fstat() reports st_ino == 0, so the POSIX
+ * st_dev/st_ino comparison cannot be used; GetFileInformationByHandle() gives
+ * a real per-file identity instead. */
+static bool
+get_file_id_win(const char *filename, BY_HANDLE_FILE_INFORMATION *info)
+{
+    HANDLE h = CreateFile(filename, 0,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    bool ok;
+
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    ok = GetFileInformationByHandle(h, info);
+    CloseHandle(h);
+    return ok;
+}
+#endif
+
 static bool
 is_already_open(struct server_config *server_config OVS_UNUSED,
                 const char *filename OVS_UNUSED)
 {
+#ifndef _WIN32
     struct stat s;
 
     if (!stat(filename, &s)) {
@@ -944,6 +972,26 @@ is_already_open(struct server_config *server_config OVS_UNUSED,
             }
         }
     }
+#else  /* _WIN32 */
+    BY_HANDLE_FILE_INFORMATION s;
+
+    if (get_file_id_win(filename, &s)) {
+        struct shash_node *node;
+
+        SHASH_FOR_EACH (node, server_config->all_dbs) {
+            struct db *db = node->data;
+            BY_HANDLE_FILE_INFORMATION s2;
+
+            if (db->config->model != SM_RELAY
+                && get_file_id_win(db->filename, &s2)
+                && s.dwVolumeSerialNumber == s2.dwVolumeSerialNumber
+                && s.nFileIndexHigh == s2.nFileIndexHigh
+                && s.nFileIndexLow == s2.nFileIndexLow) {
+                return true;
+            }
+        }
+    }
+#endif  /* _WIN32 */
 
     return false;
 }

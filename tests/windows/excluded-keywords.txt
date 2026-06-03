@@ -1,0 +1,9 @@
+# autotest keywords whose tests are skipped because they exercise a feature that
+# genuinely does not work / cannot be tested on Windows today.  This list is
+# DELIBERATELY MINIMAL: everything else must run and be FIXED, not skipped.
+# (tcp/ssl/tls are NOT here -- TCP works on Windows and the SSL failures are a
+# fixable missing-testpki gap, not an incompatibility.)
+#
+#   python - the OVS Python bindings have no Windows support (a separate track);
+#            the "- Python3" test variants exercise those bindings.
+python

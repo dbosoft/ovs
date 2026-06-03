@@ -15,6 +15,7 @@
 import atexit
 import os
 import signal
+import sys
 import threading
 
 import ovs.vlog
@@ -61,7 +62,8 @@ def add_file_to_unlink(file):
 
 def add_file_to_close_and_unlink(file, fd=None):
     """Registers 'file' to be unlinked when the program terminates via
-    sys.exit() or a fatal signal and the 'fd' to be closed. """
+    sys.exit() or a fatal signal and the 'fd' to be closed. On Windows a file
+    cannot be removed while it is open for writing."""
     global _added_hook
     if not _added_hook:
         _added_hook = True
@@ -88,6 +90,8 @@ def unlink_file_now(file):
 
 def _unlink_files():
     for file_ in _files:
+        if sys.platform == "win32" and _files[file_]:
+            _files[file_].close()
         _unlink(file_)
 
 
@@ -140,8 +144,11 @@ def _init():
     global _inited
     if not _inited:
         _inited = True
-        signals = [signal.SIGTERM, signal.SIGINT, signal.SIGHUP,
-                   signal.SIGALRM]
+        if sys.platform == "win32":
+            signals = [signal.SIGTERM, signal.SIGINT]
+        else:
+            signals = [signal.SIGTERM, signal.SIGINT, signal.SIGHUP,
+                       signal.SIGALRM]
 
         for signr in signals:
             handler = signal.getsignal(signr)
@@ -159,4 +166,20 @@ def signal_alarm(timeout):
     if not timeout:
         return
 
-    signal.alarm(timeout)
+    if sys.platform == "win32":
+        import time
+
+        class Alarm (threading.Thread):
+            def __init__(self, timeout):
+                super(Alarm, self).__init__()
+                self.timeout = timeout
+                self.setDaemon(True)
+
+            def run(self):
+                time.sleep(self.timeout)
+                os._exit(1)
+
+        alarm = Alarm(timeout)
+        alarm.start()
+    else:
+        signal.alarm(timeout)

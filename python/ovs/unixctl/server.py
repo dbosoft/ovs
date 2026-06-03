@@ -16,6 +16,7 @@ import argparse
 import copy
 import errno
 import os
+import sys
 
 import ovs.dirs
 import ovs.jsonrpc
@@ -177,6 +178,10 @@ class UnixctlServer(object):
     def run(self):
         for _ in range(10):
             error, stream = self._listener.accept()
+            if sys.platform == "win32" and error == errno.WSAEWOULDBLOCK:
+                # WSAEWOULDBLOCK would be the equivalent on Windows
+                # for EAGAIN on Unix.
+                error = errno.EAGAIN
             if not error:
                 rpc = ovs.jsonrpc.Connection(stream)
                 self._conns.append(UnixctlConnection(rpc))
@@ -218,9 +223,13 @@ class UnixctlServer(object):
         if path is not None:
             path = "punix:%s" % ovs.util.abs_file_name(ovs.dirs.RUNDIR, path)
         else:
-            path = "punix:%s/%s.%d.ctl" % (ovs.dirs.RUNDIR,
-                                           ovs.util.PROGRAM_NAME,
-                                           os.getpid())
+            if sys.platform == "win32":
+                path = "punix:%s/%s.ctl" % (ovs.dirs.RUNDIR,
+                                            ovs.util.PROGRAM_NAME)
+            else:
+                path = "punix:%s/%s.%d.ctl" % (ovs.dirs.RUNDIR,
+                                               ovs.util.PROGRAM_NAME,
+                                               os.getpid())
 
         if version is None:
             version = ovs.version.VERSION

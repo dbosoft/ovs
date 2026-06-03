@@ -76,6 +76,9 @@
 /testsuite
 /testsuite.dir/
 /testsuite.log
+/windows-testsuite
+/windows-testsuite.dir/
+/windows-testsuite.log
 /test-lib
 /testsuite.tmp.orig
 /valgrind.[0-9]*

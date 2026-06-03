@@ -37,6 +37,10 @@
 #include "util.h"
 #include "openvswitch/vlog.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 VLOG_DEFINE_THIS_MODULE(process);
 
 COVERAGE_DEFINE(process_start);
@@ -52,6 +56,9 @@ struct process {
     struct ovs_list node;
     char *name;
     pid_t pid;
+#ifdef _WIN32
+    HANDLE handle;              /* Process handle for WaitForSingleObject(). */
+#endif
 
     /* State. */
     bool exited;
@@ -87,6 +94,7 @@ static void sigchld_handler(int signr OVS_UNUSED);
 void
 process_init(void)
 {
+#ifndef _WIN32
     static bool inited;
     struct sigaction sa;
 
@@ -105,6 +113,7 @@ process_init(void)
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_NOCLDSTOP | SA_RESTART;
     xsigaction(SIGCHLD, &sa, NULL);
+#endif
 }
 
 char *
@@ -182,6 +191,7 @@ process_register(const char *name, pid_t pid)
     return p;
 }
 
+#ifndef _WIN32
 static bool
 rlim_is_finite(rlim_t limit)
 {
@@ -222,6 +232,7 @@ get_max_fds(void)
 
     return max_fds;
 }
+#endif /* _WIN32 */
 
 /* Starts a subprocess with the arguments in the null-terminated argv[] array.
  * argv[0] is used as the name of the process.  Searches the PATH environment
@@ -238,6 +249,7 @@ get_max_fds(void)
 int
 process_start(char **argv, struct process **pp)
 {
+#ifndef _WIN32
     pid_t pid;
     int error;
     sigset_t prev_mask;
@@ -277,6 +289,52 @@ process_start(char **argv, struct process **pp)
     }
     xpthread_sigmask(SIG_SETMASK, &prev_mask, NULL);
     return error;
+#else  /* _WIN32 */
+    STARTUPINFO si;
+    PROCESS_INFORMATION pi;
+    const char *base;
+    char *saved, *cmd;
+    BOOL ok;
+
+    *pp = NULL;
+    COVERAGE_INC(process_start);
+
+    /* CreateProcess() searches the PATH for the program named by the first
+     * token of the command line when lpApplicationName is NULL.  argv[0] may
+     * be a POSIX-style path such as "/bin/sh" that a native process cannot
+     * resolve, so reduce it to its basename ("sh"), which is found on the
+     * Windows PATH. */
+    base = argv[0];
+    for (const char *p = argv[0]; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            base = p + 1;
+        }
+    }
+    saved = argv[0];
+    argv[0] = (char *) base;
+    cmd = process_escape_args(argv);
+    argv[0] = saved;
+
+    if (VLOG_IS_DBG_ENABLED()) {
+        VLOG_DBG("starting subprocess: %s", cmd);
+    }
+
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    ok = CreateProcess(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    if (!ok) {
+        VLOG_WARN("CreateProcess(%s) failed (%s)",
+                  cmd, ovs_lasterror_to_string());
+        free(cmd);
+        return ENOENT;
+    }
+    free(cmd);
+
+    CloseHandle(pi.hThread);
+    *pp = process_register(argv[0], pi.dwProcessId);
+    (*pp)->handle = pi.hProcess;
+    return 0;
+#endif
 }
 
 /* Destroys process 'p'. */
@@ -285,6 +343,11 @@ process_destroy(struct process *p)
 {
     if (p) {
         ovs_list_remove(&p->node);
+#ifdef _WIN32
+        if (p->handle) {
+            CloseHandle(p->handle);
+        }
+#endif
         free(p->name);
         free(p);
     }
@@ -295,9 +358,15 @@ process_destroy(struct process *p)
 int
 process_kill(const struct process *p, int signr)
 {
+#ifndef _WIN32
     return (p->exited ? ESRCH
             : !kill(p->pid, signr) ? 0
             : errno);
+#else
+    return (p->exited ? ESRCH
+            : TerminateProcess(p->handle, signr ? 1 : 0) ? 0
+            : EPERM);
+#endif
 }
 
 /* Returns the pid of process 'p'. */
@@ -517,6 +586,7 @@ char *
 process_status_msg(int status)
 {
     struct ds ds = DS_EMPTY_INITIALIZER;
+#ifndef _WIN32
     if (WIFEXITED(status)) {
         ds_put_format(&ds, "exit status %d", WEXITSTATUS(status));
     } else if (WIFSIGNALED(status)) {
@@ -535,6 +605,9 @@ process_status_msg(int status)
     if (WCOREDUMP(status)) {
         ds_put_cstr(&ds, ", core dumped");
     }
+#else
+    ds_put_format(&ds, "exit status %d", status);
+#endif
     return ds_cstr(&ds);
 }
 
@@ -542,6 +615,7 @@ process_status_msg(int status)
 void
 process_run(void)
 {
+#ifndef _WIN32
     char buf[_POSIX_PIPE_BUF];
 
     if (!ovs_list_is_empty(&all_processes) && read(fds[0], buf, sizeof buf) > 0) {
@@ -564,6 +638,20 @@ process_run(void)
             }
         }
     }
+#else  /* _WIN32 */
+    struct process *p;
+
+    LIST_FOR_EACH (p, node, &all_processes) {
+        if (!p->exited) {
+            DWORD code;
+
+            if (GetExitCodeProcess(p->handle, &code) && code != STILL_ACTIVE) {
+                p->exited = true;
+                p->status = code;
+            }
+        }
+    }
+#endif
 }
 
 /* Causes the next call to poll_block() to wake up when process 'p' has
@@ -571,11 +659,19 @@ process_run(void)
 void
 process_wait(struct process *p)
 {
+#ifndef _WIN32
     if (p->exited) {
         poll_immediate_wake();
     } else {
         poll_fd_wait(fds[0], POLLIN);
     }
+#else
+    if (p->exited) {
+        poll_immediate_wake();
+    } else {
+        poll_wevent_wait(p->handle);
+    }
+#endif
 }
 
 char *

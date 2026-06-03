@@ -97,18 +97,25 @@ fd_connect(struct stream *stream)
     return retval;
 }
 
+/* sock_errno_to_errno() (declared in socket-util.h) translates the Winsock
+ * WSAE* codes that recv()/send() can produce into their errno equivalents, so
+ * a peer reset becomes ECONNRESET ("Connection reset by peer") rather than an
+ * unrecognized WSA code rendered as "Unknown error".  On non-Windows it is a
+ * no-op macro. */
+
 static ssize_t
 fd_recv(struct stream *stream, void *buffer, size_t n)
 {
     struct stream_fd *s = stream_fd_cast(stream);
     ssize_t retval;
-    int error;
+    int error, raw;
 
     retval = recv(s->fd, buffer, n, 0);
     if (retval < 0) {
-        error = sock_errno();
+        raw = sock_errno();
+        error = sock_errno_to_errno(raw);
         if (error != EAGAIN) {
-            VLOG_DBG_RL(&rl, "recv: %s", sock_strerror(error));
+            VLOG_DBG_RL(&rl, "recv: %s", sock_strerror(raw));
         }
         return -error;
     }
@@ -120,13 +127,14 @@ fd_send(struct stream *stream, const void *buffer, size_t n)
 {
     struct stream_fd *s = stream_fd_cast(stream);
     ssize_t retval;
-    int error;
+    int error, raw;
 
     retval = send(s->fd, buffer, n, 0);
     if (retval < 0) {
-        error = sock_errno();
+        raw = sock_errno();
+        error = sock_errno_to_errno(raw);
         if (error != EAGAIN) {
-            VLOG_DBG_RL(&rl, "send: %s", sock_strerror(error));
+            VLOG_DBG_RL(&rl, "send: %s", sock_strerror(raw));
         }
         return -error;
     }
@@ -237,6 +245,11 @@ pfd_accept(struct pstream *pstream, struct stream **new_streamp)
     new_fd = accept(ps->fd, (struct sockaddr *) &ss, &ss_len);
     if (new_fd < 0) {
         retval = sock_errno();
+#ifdef _WIN32
+        if (retval == WSAEWOULDBLOCK) {
+            retval = EAGAIN;
+        }
+#endif
         if (retval != EAGAIN) {
             VLOG_DBG_RL(&rl, "accept: %s", sock_strerror(retval));
         }

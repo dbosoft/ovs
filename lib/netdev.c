@@ -24,9 +24,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifndef _WIN32
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
+#endif
 
 #include "cmap.h"
 #include "coverage.h"
@@ -158,6 +161,11 @@ netdev_initialize(void)
 #if defined(__FreeBSD__) || defined(__NetBSD__)
         netdev_register_provider(&netdev_tap_class);
         netdev_register_provider(&netdev_bsd_class);
+#endif
+#ifdef _WIN32
+        netdev_register_provider(&netdev_windows_class);
+        netdev_register_provider(&netdev_internal_class);
+        netdev_vport_tunnel_register();
 #endif
         ovsthread_once_done(&once);
     }
@@ -2298,6 +2306,7 @@ netdev_get_change_seq(const struct netdev *netdev)
     return change_seq;
 }
 
+#ifndef _WIN32
 /* This implementation is shared by Linux and BSD. */
 
 static struct ifaddrs *if_addr_list;
@@ -2392,6 +2401,7 @@ retry:
     }
     return 0;
 }
+#endif
 
 void
 netdev_wait_reconf_required(struct netdev *netdev)
