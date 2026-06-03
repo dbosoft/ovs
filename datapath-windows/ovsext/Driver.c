@@ -284,14 +284,17 @@ OvsExtUnload(struct _DRIVER_OBJECT *driverObject)
 
     /*
      * Tear down the driver-load-scoped subsystems before the filter-driver
-     * registration whose handle their locks were allocated against.
+     * registration whose handle their locks were allocated against, in the
+     * reverse of the DriverEntry init order (IpHelper, Conntrack, CtRelated,
+     * IpFragment, Ip6Fragment, Meter) so IpHelper -- whose worker thread can run
+     * the forwarding path -- is stopped last.
      */
-    OvsCleanupIpHelper();
     OvsCleanupMeter();
     OvsCleanupIp6Fragment();
     OvsCleanupIpFragment();
     OvsCleanupCtRelated();
     OvsCleanupConntrack();
+    OvsCleanupIpHelper();
 
     OvsDeleteDeviceObject();
 

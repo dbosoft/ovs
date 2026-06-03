@@ -352,6 +352,7 @@ OvsCleanupCtRelated(VOID)
     KeWaitForSingleObject(ctRelThreadCtx.threadObject, Executive,
                           KernelMode, FALSE, NULL);
     ObDereferenceObject(ctRelThreadCtx.threadObject);
+    ctRelThreadCtx.threadObject = NULL;
 
     if (ovsCtRelatedTable) {
         OvsCtRelatedFlush();

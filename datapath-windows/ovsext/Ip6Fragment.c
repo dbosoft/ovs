@@ -160,7 +160,7 @@ NDIS_STATUS OvsInitIp6Fragment(NDIS_HANDLE ndisFilterHandle)
                                   &ip6FragThreadCtx);
 
     if (status != STATUS_SUCCESS) {
-        OvsFreeMemoryWithTag(OvsIp6FragTable, OVS_IPFRAG_POOL_TAG);
+        OvsFreeMemoryWithTag(OvsIp6FragTable, OVS_IP6FRAG_POOL_TAG);
         OvsIp6FragTable = NULL;
         NdisFreeRWLock(ovsIp6FragmentHashLockObj);
         ovsIp6FragmentHashLockObj = NULL;

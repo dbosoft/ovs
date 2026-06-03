@@ -3007,7 +3007,7 @@ OvsPutFlowIoctl(POVS_SWITCH_CONTEXT switchContext,
     }
 
     dpNo = put->dpNo;
-    if (switchContext->dpNo != dpNo) {
+    if (switchContext == NULL || switchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
         goto exit;
     }
@@ -3181,7 +3181,7 @@ OvsGetFlowIoctl(POVS_SWITCH_CONTEXT switchContext,
     }
 
     dpNo = getInput->dpNo;
-    if (switchContext->dpNo != dpNo) {
+    if (switchContext == NULL || switchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
         goto exit;
     }
@@ -3212,7 +3212,7 @@ OvsFlushFlowIoctl(POVS_SWITCH_CONTEXT switchContext,
     OVS_DATAPATH *datapath = NULL;
     LOCK_STATE_EX dpLockState;
 
-    if (switchContext->dpNo != dpNo) {
+    if (switchContext == NULL || switchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
         goto exit;
     }

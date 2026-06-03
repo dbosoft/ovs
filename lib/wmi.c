@@ -328,7 +328,7 @@ get_first_element(IEnumWbemClassObject *penumerate,
 
 /* This function is a wrapper that transforms a char * into a wchar_t * */
 static boolean
-tranform_wide(char *name, wchar_t *wide_name)
+tranform_wide(const char *name, wchar_t *wide_name)
 {
     unsigned long size = strlen(name) + 1;
     long long ret = 0;
@@ -739,7 +739,7 @@ create_wmi_port(char *name, const char *switch_id) {
     if (target_switch) {
         /* Target the bridge's specific Hyper-V switch by its GUID. */
         wide_switch = xmalloc((strlen(target_switch) + 1) * sizeof(wchar_t));
-        if (!tranform_wide(CONST_CAST(char *, target_switch), wide_switch)) {
+        if (!tranform_wide(target_switch, wide_switch)) {
             retval = false;
             goto error;
         }
@@ -818,8 +818,7 @@ create_wmi_port(char *name, const char *switch_id) {
     }
 
     if (!get_first_element(penumerate, &pcls_obj)) {
-        VLOG_WARN("Could not get the switch object on which the extension is"
-                  "activated");
+        VLOG_WARN("Could not find the target Hyper-V switch object");
         retval = false;
         goto error;
     }

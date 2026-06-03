@@ -82,6 +82,17 @@ OvsCleanupMeter(VOID)
         return;
     }
     if (meterGlobalTable) {
+        /* Free any meters still installed before releasing the table. Runs at
+         * driver unload after the request paths are gone, so no lock needed. */
+        for (UINT32 index = 0; index < METER_HASH_BUCKET_MAX; index++) {
+            PLIST_ENTRY head = &meterGlobalTable[index];
+            PLIST_ENTRY link, next;
+            LIST_FORALL_SAFE(head, link, next) {
+                DpMeter *entry = CONTAINING_RECORD(link, DpMeter, link);
+                RemoveEntryList(&entry->link);
+                OvsFreeMemoryWithTag(entry, OVS_METER_TAG);
+            }
+        }
         OvsFreeMemoryWithTag(meterGlobalTable, OVS_METER_TAG);
         meterGlobalTable = NULL;
     }
