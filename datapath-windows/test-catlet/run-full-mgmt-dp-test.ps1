@@ -1,6 +1,6 @@
 # Comprehensive Windows OVS validation, run INSIDE the ovs-kerneldev catlet.
 # Covers management-plane (db-init, detach, logs, db interaction, schema upgrade)
-# AND the kernel datapath (driver) via add-br datapath_type=windows + ovs-dpctl.
+# AND the kernel datapath (driver) via add-br datapath_type=system + ovs-dpctl.
 $ErrorActionPreference = 'Continue'
 $native = 'C:\ovs-test\native'
 $run    = 'C:\ovs-test\run'
@@ -50,8 +50,8 @@ Write-Output ("ovsdb-server.pid = " + (Get-Content "$run\ovsdb-server.pid" -EA S
 Write-Output ("ovs-vswitchd.pid = " + (Get-Content "$run\ovs-vswitchd.pid" -EA SilentlyContinue))
 Get-Process ovs-vswitchd,ovsdb-server -EA SilentlyContinue | Select-Object Name,Id | Format-Table -Auto | Out-String
 
-Step "DB INTERACTION: add-br/add-port/set/get/list (datapath_type=windows -> driver)"
-& $vsctl --timeout=25 add-br br-test -- set bridge br-test datapath_type=windows; Write-Output "add-br exit=$LASTEXITCODE"
+Step "DB INTERACTION: add-br/add-port/set/get/list (datapath_type=system -> driver)"
+& $vsctl --timeout=25 add-br br-test -- set bridge br-test datapath_type=system; Write-Output "add-br exit=$LASTEXITCODE"
 Start-Sleep -Seconds 2
 & $vsctl --timeout=25 add-port br-test p1 -- set interface p1 type=internal; Write-Output "add-port exit=$LASTEXITCODE"
 & $vsctl --timeout=25 set bridge br-test other-config:probe=hello; Write-Output "set exit=$LASTEXITCODE"

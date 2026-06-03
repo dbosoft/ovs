@@ -34,7 +34,7 @@ SFTP subsystem.
 
 - **`run-full-mgmt-dp-test.ps1`** — the main test. Exercises the management plane
   (db-init, schema upgrade, `--detach`, logs, `ovs-vsctl` db interaction,
-  `ovs-appctl`) and the kernel datapath (`add-br datapath_type=windows`,
+  `ovs-appctl`) and the kernel datapath (`add-br datapath_type=system`,
   `ovs-dpctl show`, flow put/dump/del against `system@ovs-system`).
 - **`test-vsctl.ps1`** — cross-version check: eryph's packaged `ovs-vsctl` against
   our `ovsdb-server`.
