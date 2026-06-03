@@ -708,6 +708,10 @@ struct dpif_class {
 extern const struct dpif_class dpif_netlink_class;
 #ifdef _WIN32
 extern const struct dpif_class dpif_windows_class;
+/* Registers a per-Hyper-V-switch alias of 'dpif_windows_class' under the type
+ * 'type' (a switch GUID) so ofproto can open a datapath_type=<switch-guid>
+ * backer.  See lib/dpif-windows.c. */
+int dpif_windows_register_switch_type(const char *type);
 #endif
 extern const struct dpif_class dpif_netdev_class;
 

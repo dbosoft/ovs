@@ -100,10 +100,17 @@ struct dpif_windows {
 /* 'dpif_windows_class' is declared in dpif-provider.h and defined at the
  * bottom of this file. */
 
+static int dpif_windows_open(const struct dpif_class *class, const char *name,
+                             bool create, struct dpif **dpifp);
+
 static struct dpif_windows *
 dpif_windows_cast(const struct dpif *dpif)
 {
-    dpif_assert_class(dpif, &dpif_windows_class);
+    /* Besides 'dpif_windows_class' itself, the provider is also registered under
+     * per-switch alias classes (one per Hyper-V switch GUID, see
+     * dpif_windows_register_switch_type), which share these same methods. Accept
+     * any class backed by this provider rather than the base class alone. */
+    ovs_assert(dpif->dpif_class->open == dpif_windows_open);
     return CONTAINER_OF(dpif, struct dpif_windows, dpif);
 }
 
@@ -818,7 +825,7 @@ dpif_windows_init_flow_del(struct dpif_windows *dpif,
  * still dump it from the kernel rather than hard-coding the name. */
 static int
 dpif_windows_enumerate(struct sset *all_dps,
-                       const struct dpif_class *dpif_class OVS_UNUSED)
+                       const struct dpif_class *dpif_class)
 {
     struct ovsext_channel channel;
     struct ovsext_dump dump;
@@ -826,6 +833,12 @@ dpif_windows_enumerate(struct sset *all_dps,
     struct ofpbuf *buf;
     struct ofpbuf msg;
     int error;
+
+    /* The base "windows" class enumerates every datapath plus the default
+     * aliases; a per-switch alias class (type == a switch GUID) enumerates only
+     * its own datapath, so ofproto's stale-backer cleanup stays scoped to that
+     * switch. */
+    bool specific = strcmp(dpif_class->type, "windows") != 0;
 
     error = ovsext_channel_open(&channel);
     if (error) {
@@ -845,16 +858,22 @@ dpif_windows_enumerate(struct sset *all_dps,
     while (ovsext_dump_next(&dump, &msg)) {
         struct dpif_windows_dp dp;
 
-        if (!dpif_windows_dp_from_ofpbuf(&dp, &msg)) {
-            sset_add(all_dps, dp.name);
-            any = true;
+        if (!dpif_windows_dp_from_ofpbuf(&dp, &msg) && dp.name) {
+            if (specific) {
+                if (!strcmp(dp.name, dpif_class->type)) {
+                    sset_add(all_dps, dp.name);
+                }
+            } else {
+                sset_add(all_dps, dp.name);
+                any = true;
+            }
         }
     }
 
-    /* The kernel now names each datapath by its switch GUID, but ofproto opens
-     * its backer as "ovs-<datapath_type>" and dp_exists() checks this set for
-     * "ovs-system"/"ovs-windows".  Keep those default aliases resolvable as long
-     * as at least one datapath exists; dpif_windows_open maps them to the
+    /* The kernel names each datapath by its switch GUID, but ofproto opens the
+     * default backer as "ovs-<datapath_type>" and dp_exists() checks this set
+     * for "ovs-system"/"ovs-windows".  Keep those default aliases resolvable as
+     * long as at least one datapath exists; dpif_windows_open maps them to the
      * lowest-numbered datapath. */
     if (any) {
         sset_add(all_dps, "ovs-windows");
@@ -954,6 +973,55 @@ dpif_windows_resolve_dp(struct ovsext_channel *channel, const char *name,
 
     *dp_ifindex = entries[best].dp_ifindex;
     *dp_name = xstrdup(entries[best].name);
+    return 0;
+}
+
+/* The ovsext kernel backs one datapath per Hyper-V switch, named by the switch
+ * GUID.  ofproto-dpif shares one dpif backer per datapath_type and looks the
+ * type up as a registered dpif class, so a bridge that selects a specific
+ * switch with datapath_type=<switch-guid> needs a dpif provider registered
+ * under that GUID.  This registers an alias of 'dpif_windows_class' whose type
+ * is 'type', provided a kernel datapath currently carries that GUID name.
+ * Returns 0 if an alias is (or already was) registered, EAFNOSUPPORT if no
+ * datapath has that name, or another positive errno on failure. */
+int
+dpif_windows_register_switch_type(const char *type)
+{
+    struct dpif_windows_dp_entry entries[DPIF_WINDOWS_MAX_DPS];
+    struct ovsext_channel channel;
+    struct dpif_class *alias;
+    bool found = false;
+    int n, i, error;
+
+    error = ovsext_channel_open(&channel);
+    if (error) {
+        return error;
+    }
+    n = dpif_windows_dump_dps(&channel, entries, ARRAY_SIZE(entries));
+    ovsext_channel_close(&channel);
+    if (n < 0) {
+        return -n;
+    }
+
+    for (i = 0; i < n; i++) {
+        if (!strcmp(entries[i].name, type)) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return EAFNOSUPPORT;
+    }
+
+    alias = xmemdup(&dpif_windows_class, sizeof dpif_windows_class);
+    alias->type = xstrdup(type);
+    error = dp_register_provider(alias);
+    if (error) {
+        /* EEXIST means a concurrent open already registered it; treat as OK. */
+        free(CONST_CAST(char *, alias->type));
+        free(alias);
+        return error == EEXIST ? 0 : error;
+    }
     return 0;
 }
 
@@ -1159,7 +1227,9 @@ dpif_windows_port_add(struct dpif *dpif_, struct netdev *netdev,
     /* Internal ports are backed by a Hyper-V WMI interface created here, as in
      * dpif-netlink's _WIN32 path. */
     if (ovs_type == OVS_VPORT_TYPE_INTERNAL) {
-        if (!create_wmi_port(CONST_CAST(char *, name))) {
+        /* dpif->dp_name is the bridge datapath's switch identity (the Hyper-V
+         * switch GUID), so the internal port is created on that exact switch. */
+        if (!create_wmi_port(CONST_CAST(char *, name), dpif->dp_name)) {
             VLOG_ERR("Could not create wmi internal port with name: %s", name);
             return EINVAL;
         }

@@ -349,6 +349,17 @@ do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
 
     type = dpif_normalize_type(type);
     registered_class = dp_class_lookup(type);
+#ifdef _WIN32
+    if (!registered_class) {
+        /* On Windows the ovsext kernel backs one datapath per Hyper-V switch,
+         * named by the switch GUID.  A bridge may select a specific switch with
+         * datapath_type=<switch-guid>; register a windows dpif provider alias
+         * for that GUID on demand so the backer can be opened. */
+        if (!dpif_windows_register_switch_type(type)) {
+            registered_class = dp_class_lookup(type);
+        }
+    }
+#endif
     if (!registered_class) {
         VLOG_WARN("could not create datapath %s of unknown type %s", name,
                   type);

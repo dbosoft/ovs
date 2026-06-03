@@ -1081,7 +1081,7 @@ dpif_netlink_port_add_compat(struct dpif_netlink *dpif, struct netdev *netdev,
 
 #ifdef _WIN32
     if (ovs_type == OVS_VPORT_TYPE_INTERNAL) {
-        if (!create_wmi_port(name)){
+        if (!create_wmi_port(name, NULL)){
             VLOG_ERR("Could not create wmi internal port with name:%s", name);
             return EINVAL;
         };
