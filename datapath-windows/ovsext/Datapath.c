@@ -402,7 +402,8 @@ static NTSTATUS ValidateNetlinkCmd(UINT32 devOp,
                                    POVS_OPEN_INSTANCE instance,
                                    POVS_MESSAGE ovsMsg,
                                    UINT32 ovsMgsLength,
-                                   NETLINK_FAMILY *nlFamilyOps);
+                                   NETLINK_FAMILY *nlFamilyOps,
+                                   POVS_SWITCH_CONTEXT datapath);
 static NTSTATUS InvokeNetlinkCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                                         NETLINK_FAMILY *nlFamilyOps,
                                         UINT32 *replyLen);
@@ -800,6 +801,7 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
     POVS_MESSAGE ovsMsg;
     UINT32 ovsMsgLength = 0;
     NETLINK_FAMILY *nlFamilyOps;
+    POVS_SWITCH_CONTEXT dpCtx = NULL;
     OVS_USER_PARAMS_CONTEXT usrParamsCtx;
 
 #pragma warning(suppress: 28118)
@@ -849,7 +851,7 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
             InitUserParamsCtx(irp, instance, 0, NULL,
                               inputBuffer, inputBufferLen,
                               outputBuffer, outputBufferLen,
-                              &usrParamsCtx);
+                              NULL, &usrParamsCtx);
 
             ASSERT(outputBuffer);
         } else {
@@ -1022,13 +1024,16 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
         goto done;
     }
 
+    /* Resolve the datapath that the request targets, if any. */
+    dpCtx = OvsAcquireDatapathByNumber(ovsMsg->ovsHdr.dp_ifindex);
+
     /*
      * For read operation, avoid duplicate validation since 'ovsMsg' is either
      * "artificial" or was copied from a previously validated 'ovsMsg'.
      */
     if (devOp != OVS_READ_DEV_OP) {
         status = ValidateNetlinkCmd(devOp, instance, ovsMsg,
-                                    ovsMsgLength, nlFamilyOps);
+                                    ovsMsgLength, nlFamilyOps, dpCtx);
         if (status != STATUS_SUCCESS) {
             goto done;
         }
@@ -1037,11 +1042,14 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
     InitUserParamsCtx(irp, instance, devOp, ovsMsg,
                       inputBuffer, inputBufferLen,
                       outputBuffer, outputBufferLen,
-                      &usrParamsCtx);
+                      dpCtx, &usrParamsCtx);
 
     status = InvokeNetlinkCmdHandler(&usrParamsCtx, nlFamilyOps, &replyLen);
 
 done:
+    if (dpCtx != NULL) {
+        OvsReleaseSwitchContext(dpCtx);
+    }
     OvsReleaseSwitchContext(gOvsSwitchContext);
 
 exit:
@@ -1064,7 +1072,8 @@ ValidateNetlinkCmd(UINT32 devOp,
                    POVS_OPEN_INSTANCE instance,
                    POVS_MESSAGE ovsMsg,
                    UINT32 ovsMsgLength,
-                   NETLINK_FAMILY *nlFamilyOps)
+                   NETLINK_FAMILY *nlFamilyOps,
+                   POVS_SWITCH_CONTEXT datapath)
 {
     NTSTATUS status = STATUS_INVALID_PARAMETER;
     UINT16 i;
@@ -1115,8 +1124,7 @@ ValidateNetlinkCmd(UINT32 devOp,
 
             /* Validate the DP for commands that require a DP. */
             if (nlFamilyOps->cmds[i].validateDpIndex == TRUE) {
-                if (ovsMsg->ovsHdr.dp_ifindex !=
-                                          (INT)gOvsSwitchContext->dpNo) {
+                if (datapath == NULL) {
                     status = STATUS_INVALID_PARAMETER;
                     goto done;
                 }
