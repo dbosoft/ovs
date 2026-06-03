@@ -75,7 +75,8 @@ static VOID OvsCopyPortParamsFromVport(POVS_VPORT_ENTRY vport,
 static __inline VOID OvsWaitActivate(POVS_SWITCH_CONTEXT switchContext,
                                      ULONG sleepMicroSec);
 static NTSTATUS OvsGetExtInfoIoctl(POVS_VPORT_GET vportGet,
-                                   POVS_VPORT_EXT_INFO extInfo);
+                                   POVS_VPORT_EXT_INFO extInfo,
+                                   POVS_SWITCH_CONTEXT switchContext);
 static NTSTATUS CreateNetlinkMesgForNetdev(POVS_VPORT_EXT_INFO info,
                                            POVS_MESSAGE msgIn,
                                            PVOID outBuffer,
@@ -1622,7 +1623,8 @@ OvsConvertIfCountedStrToAnsiStr(PIF_COUNTED_STRING wStr,
  */
 NTSTATUS
 OvsGetExtInfoIoctl(POVS_VPORT_GET vportGet,
-                   POVS_VPORT_EXT_INFO extInfo)
+                   POVS_VPORT_EXT_INFO extInfo,
+                   POVS_SWITCH_CONTEXT switchContext)
 {
     POVS_VPORT_ENTRY vport;
     LOCK_STATE_EX lockState;
@@ -1630,20 +1632,20 @@ OvsGetExtInfoIoctl(POVS_VPORT_GET vportGet,
     BOOLEAN doConvert = FALSE;
 
     RtlZeroMemory(extInfo, sizeof (POVS_VPORT_EXT_INFO));
-    NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState, 0);
+    NdisAcquireRWLockRead(switchContext->dispatchLock, &lockState, 0);
     if (vportGet->portNo == 0) {
-        vport = OvsFindVportByHvNameA(gOvsSwitchContext, vportGet->name);
+        vport = OvsFindVportByHvNameA(switchContext, vportGet->name);
         if (vport == NULL) {
             /* If the port is not a Hyper-V port and it has been added earlier,
              * we'll find it in 'ovsPortNameHashArray'. */
-            vport = OvsFindVportByOvsName(gOvsSwitchContext, vportGet->name);
+            vport = OvsFindVportByOvsName(switchContext, vportGet->name);
         }
     } else {
-        vport = OvsFindVportByPortNo(gOvsSwitchContext, vportGet->portNo);
+        vport = OvsFindVportByPortNo(switchContext, vportGet->portNo);
     }
     if (vport == NULL || (vport->ovsState != OVS_STATE_CONNECTED &&
                           vport->ovsState != OVS_STATE_NIC_CREATED)) {
-        NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
+        NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
         if (vportGet->portNo) {
             OVS_LOG_WARN("vport %u does not exist any more", vportGet->portNo);
         } else {
@@ -1684,7 +1686,7 @@ OvsGetExtInfoIoctl(POVS_VPORT_GET vportGet,
         extInfo->vmUUID[0] = 0;
         extInfo->vifUUID[0] = 0;
     }
-    NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
+    NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
     if (doConvert) {
         status = OvsConvertIfCountedStrToAnsiStr(&vport->portFriendlyName,
                                                  extInfo->name,
@@ -1734,6 +1736,8 @@ OvsGetNetdevCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     NL_ERROR nlError = NL_ERROR_SUCCESS;
     OVS_VPORT_GET vportGet;
     OVS_VPORT_EXT_INFO info;
+    POVS_SWITCH_CONTEXT switchContext = usrParamsCtx->switchContext;
+    BOOLEAN releaseCtx = FALSE;
 
     static const NL_POLICY ovsNetdevPolicy[] = {
         [OVS_WIN_NETDEV_ATTR_NAME] = { .type = NL_A_STRING,
@@ -1758,11 +1762,26 @@ OvsGetNetdevCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         return STATUS_INVALID_PARAMETER;
     }
 
+    /*
+     * This command does not validate the dp_ifindex, so the resolved context
+     * may be NULL; fall back to the default datapath to match the historical
+     * unconditional use of the global switch context.
+     */
+    if (switchContext == NULL) {
+        switchContext = OvsAcquireSwitchContext();
+        releaseCtx = TRUE;
+        if (switchContext == NULL) {
+            nlError = NL_ERROR_NODEV;
+            goto cleanup;
+        }
+    }
+
     vportGet.portNo = 0;
+    vportGet.dpNo = switchContext->dpNo;
     RtlCopyMemory(&vportGet.name, NlAttrGet(netdevAttrs[OVS_VPORT_ATTR_NAME]),
                   NlAttrGetSize(netdevAttrs[OVS_VPORT_ATTR_NAME]));
 
-    status = OvsGetExtInfoIoctl(&vportGet, &info);
+    status = OvsGetExtInfoIoctl(&vportGet, &info, switchContext);
     if (status == STATUS_DEVICE_DOES_NOT_EXIST) {
         nlError = NL_ERROR_NODEV;
         goto cleanup;
@@ -1770,12 +1789,15 @@ OvsGetNetdevCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     status = CreateNetlinkMesgForNetdev(&info, msgIn,
                  usrParamsCtx->outputBuffer, usrParamsCtx->outputLength,
-                 gOvsSwitchContext->dpNo);
+                 switchContext->dpNo);
     if (status == STATUS_SUCCESS) {
         *replyLen = msgOut->nlMsg.nlmsgLen;
     }
 
 cleanup:
+    if (releaseCtx) {
+        OvsReleaseSwitchContext(switchContext);
+    }
     if (nlError != NL_ERROR_SUCCESS) {
         POVS_MESSAGE_ERROR msgError = (POVS_MESSAGE_ERROR)
             usrParamsCtx->outputBuffer;

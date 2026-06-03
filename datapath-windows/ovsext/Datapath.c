@@ -596,17 +596,22 @@ POVS_OPEN_INSTANCE
 OvsGetOpenInstance(PFILE_OBJECT fileObject,
                    UINT32 dpNo)
 {
-    LOCK_STATE_EX lockState;
     POVS_OPEN_INSTANCE instance = (POVS_OPEN_INSTANCE)fileObject->FsContext;
+    POVS_SWITCH_CONTEXT switchContext;
     ASSERT(instance);
     ASSERT(instance->fileObject == fileObject);
-    NdisAcquireRWLockWrite(gOvsSwitchContext->dispatchLock, &lockState, 0);
 
-    if (gOvsSwitchContext->dpNo != dpNo) {
-        instance = NULL;
+    /*
+     * The datapath reference is only an existence gate: the open instance
+     * returned belongs to the file object, not to the switch context, so the
+     * reference is released immediately. A NULL means no such datapath.
+     */
+    switchContext = OvsAcquireDatapathByNumber(dpNo);
+    if (switchContext == NULL) {
+        return NULL;
     }
+    OvsReleaseSwitchContext(switchContext);
 
-    NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
     return instance;
 }
 
