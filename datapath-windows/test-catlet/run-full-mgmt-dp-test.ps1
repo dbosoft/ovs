@@ -1,6 +1,6 @@
 # Comprehensive Windows OVS validation, run INSIDE the ovs-kerneldev catlet.
 # Covers management-plane (db-init, detach, logs, db interaction, schema upgrade)
-# AND the kernel datapath (driver) via add-br datapath_type=windows + ovs-dpctl.
+# AND the kernel datapath (driver) via add-br datapath_type=system + ovs-dpctl.
 $ErrorActionPreference = 'Continue'
 $native = 'C:\ovs-test\native'
 $run    = 'C:\ovs-test\run'
@@ -50,8 +50,8 @@ Write-Output ("ovsdb-server.pid = " + (Get-Content "$run\ovsdb-server.pid" -EA S
 Write-Output ("ovs-vswitchd.pid = " + (Get-Content "$run\ovs-vswitchd.pid" -EA SilentlyContinue))
 Get-Process ovs-vswitchd,ovsdb-server -EA SilentlyContinue | Select-Object Name,Id | Format-Table -Auto | Out-String
 
-Step "DB INTERACTION: add-br/add-port/set/get/list (datapath_type=windows -> driver)"
-& $vsctl --timeout=25 add-br br-test -- set bridge br-test datapath_type=windows; Write-Output "add-br exit=$LASTEXITCODE"
+Step "DB INTERACTION: add-br/add-port/set/get/list (datapath_type=system -> driver)"
+& $vsctl --timeout=25 add-br br-test -- set bridge br-test datapath_type=system; Write-Output "add-br exit=$LASTEXITCODE"
 Start-Sleep -Seconds 2
 & $vsctl --timeout=25 add-port br-test p1 -- set interface p1 type=internal; Write-Output "add-port exit=$LASTEXITCODE"
 & $vsctl --timeout=25 set bridge br-test other-config:probe=hello; Write-Output "set exit=$LASTEXITCODE"
@@ -65,11 +65,11 @@ Step "APPCTL: live daemon interaction"
 & $appctl --timeout=10 -t ovs-vswitchd vlog/list 2>&1 | Select-Object -First 2
 
 Step "DATAPATH (DRIVER): ovs-dpctl show + flow put/dump/del"
-& $dpctl show windows@ovs-system 2>&1
-& $dpctl add-flow windows@ovs-system "in_port(2),eth(),eth_type(0x0800),ipv4()" "1"; Write-Output "dp add-flow exit=$LASTEXITCODE"
-Write-Output "dump-flows (expect 1):"; & $dpctl dump-flows windows@ovs-system 2>&1
-& $dpctl del-flow windows@ovs-system "in_port(2),eth(),eth_type(0x0800),ipv4()"; Write-Output "dp del-flow exit=$LASTEXITCODE"
-Write-Output "dump-flows (expect empty):"; & $dpctl dump-flows windows@ovs-system 2>&1
+& $dpctl show system@ovs-system 2>&1
+& $dpctl add-flow system@ovs-system "in_port(2),eth(),eth_type(0x0800),ipv4()" "1"; Write-Output "dp add-flow exit=$LASTEXITCODE"
+Write-Output "dump-flows (expect 1):"; & $dpctl dump-flows system@ovs-system 2>&1
+& $dpctl del-flow system@ovs-system "in_port(2),eth(),eth_type(0x0800),ipv4()"; Write-Output "dp del-flow exit=$LASTEXITCODE"
+Write-Output "dump-flows (expect empty):"; & $dpctl dump-flows system@ovs-system 2>&1
 
 Step "LOGS: tails"
 Write-Output "--- ovsdb-server.log ---"; Get-Content "$run\ovsdb-server.log" -Tail 6 -EA SilentlyContinue

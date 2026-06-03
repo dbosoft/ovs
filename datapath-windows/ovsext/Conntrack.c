@@ -52,7 +52,7 @@ MapNlToCtTuple(POVS_MESSAGE msgIn, PNL_ATTR attr,
  *----------------------------------------------------------------------------
  */
 NTSTATUS
-OvsInitConntrack(POVS_SWITCH_CONTEXT context)
+OvsInitConntrack(NDIS_HANDLE ndisFilterHandle)
 {
     NTSTATUS status = STATUS_SUCCESS;
     HANDLE threadHandle = NULL;
@@ -77,7 +77,7 @@ OvsInitConntrack(POVS_SWITCH_CONTEXT context)
 
     for (UINT32 i = 0; i < CT_HASH_TABLE_SIZE; i++) {
         InitializeListHead(&ovsConntrackTable[i]);
-        ovsCtBucketLock[i] = NdisAllocateRWLock(context->NdisFilterHandle);
+        ovsCtBucketLock[i] = NdisAllocateRWLock(ndisFilterHandle);
         if (ovsCtBucketLock[i] == NULL) {
             status = STATUS_INSUFFICIENT_RESOURCES;
             numBucketLocks = i;
@@ -104,6 +104,12 @@ OvsInitConntrack(POVS_SWITCH_CONTEXT context)
                                         CT_MAX_ZONE, OVS_CT_POOL_TAG);
     if (zoneInfo == NULL) {
         status = STATUS_INSUFFICIENT_RESOURCES;
+        ctThreadCtx.exit = 1;
+        KeSetEvent(&ctThreadCtx.event, 0, FALSE);
+        KeWaitForSingleObject(ctThreadCtx.threadObject, Executive,
+                              KernelMode, FALSE, NULL);
+        ObDereferenceObject(ctThreadCtx.threadObject);
+        ctThreadCtx.threadObject = NULL;
         goto freeBucketLock;
     }
 
@@ -118,6 +124,7 @@ OvsInitConntrack(POVS_SWITCH_CONTEXT context)
 
     if (status != STATUS_SUCCESS) {
         OvsCleanupConntrack();
+        return status;
     }
     return STATUS_SUCCESS;
 
@@ -144,11 +151,15 @@ freeTable:
 VOID
 OvsCleanupConntrack(VOID)
 {
+    if (ctThreadCtx.threadObject == NULL) {
+        return;
+    }
     ctThreadCtx.exit = 1;
     KeSetEvent(&ctThreadCtx.event, 0, FALSE);
     KeWaitForSingleObject(ctThreadCtx.threadObject, Executive,
                           KernelMode, FALSE, NULL);
     ObDereferenceObject(ctThreadCtx.threadObject);
+    ctThreadCtx.threadObject = NULL;
 
     /* Force flush all entries before removing */
     OvsCtFlush(0, NULL);

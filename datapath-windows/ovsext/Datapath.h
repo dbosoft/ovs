@@ -42,6 +42,8 @@ typedef struct _OVS_DEVICE_EXTENSION {
 typedef struct _OVS_USER_PACKET_QUEUE OVS_USER_PACKET_QUEUE,
                                       *POVS_USER_PACKET_QUEUE;
 
+typedef struct _OVS_SWITCH_CONTEXT OVS_SWITCH_CONTEXT, *POVS_SWITCH_CONTEXT;
+
 /*
  * Private context for each handle on the device.
  */
@@ -100,6 +102,8 @@ typedef struct _OVS_USER_PARAMS_CONTEXT {
     PVOID outputBuffer;  /* Output buffer specified by userspace for reading
                           * data. Maybe NULL. */
     UINT32 outputLength; /* Length of output buffer. */
+    POVS_SWITCH_CONTEXT switchContext; /* Datapath addressed by the request, or
+                                        * NULL if it addresses none. */
 } OVS_USER_PARAMS_CONTEXT, *POVS_USER_PARAMS_CONTEXT;
 
 static __inline VOID
@@ -111,6 +115,7 @@ InitUserParamsCtx(PIRP irp,
                   UINT32 inputLength,
                   PVOID outputBuffer,
                   UINT32 outputLength,
+                  POVS_SWITCH_CONTEXT switchContext,
                   POVS_USER_PARAMS_CONTEXT usrParamsCtx)
 {
     usrParamsCtx->irp = irp;
@@ -121,6 +126,7 @@ InitUserParamsCtx(PIRP irp,
     usrParamsCtx->inputLength = inputLength;
     usrParamsCtx->outputBuffer = outputBuffer;
     usrParamsCtx->outputLength = outputLength;
+    usrParamsCtx->switchContext = switchContext;
 }
 
 NTSTATUS InitUserDumpState(POVS_OPEN_INSTANCE instance,

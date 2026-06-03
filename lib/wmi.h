@@ -45,7 +45,11 @@ static inline void fill_context(IWbemContext *pContext)
     VariantClear(&var);
 }
 
-boolean create_wmi_port(char *name);
+/* Creates a Hyper-V internal port named 'name'. 'switch_id' selects the target
+ * virtual switch by its GUID (Msvm_VirtualEthernetSwitch.Name); pass NULL (or a
+ * default alias like "ovs-system") to fall back to the single switch that has
+ * the forwarding extension enabled. */
+boolean create_wmi_port(char *name, const char *switch_id);
 boolean delete_wmi_port(char *name);
 
 #endif /* wmi.h */

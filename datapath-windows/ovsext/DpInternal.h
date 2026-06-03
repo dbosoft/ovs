@@ -364,6 +364,7 @@ typedef struct _OVS_VPORT_EVENT_ENTRY {
     UINT32 upcallPid;
     CHAR ovsName[OVS_MAX_PORT_NAME_LENGTH];
     UINT32 type;
+    UINT32 dpNo;
 } OVS_VPORT_EVENT_ENTRY, *POVS_VPORT_EVENT_ENTRY;
 
 #pragma pack(pop)

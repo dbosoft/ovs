@@ -2146,6 +2146,9 @@ init_cleanup:
 VOID
 OvsCleanupIpHelper(VOID)
 {
+    if (ovsIpHelperThreadContext.threadObject == NULL) {
+        return;
+    }
     OvsCancelChangeNotification();
 
     NdisAcquireSpinLock(&ovsIpHelperLock);
@@ -2156,6 +2159,7 @@ OvsCleanupIpHelper(VOID)
     KeWaitForSingleObject(ovsIpHelperThreadContext.threadObject, Executive,
                           KernelMode, FALSE, NULL);
     ObDereferenceObject(ovsIpHelperThreadContext.threadObject);
+    ovsIpHelperThreadContext.threadObject = NULL;
 
     OvsFreeMemoryWithTag(ovsFwdHashTable, OVS_IPHELPER_POOL_TAG);
     OvsFreeMemoryWithTag(ovsRouteHashTable, OVS_IPHELPER_POOL_TAG);

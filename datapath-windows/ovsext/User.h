@@ -79,7 +79,8 @@ POVS_PACKET_QUEUE_ELEM OvsCreateQueueNlPacket(PVOID userData,
                                               PNET_BUFFER_LIST nbl,
                                               PNET_BUFFER nb,
                                               BOOLEAN isRecv,
-                                              POVS_PACKET_HDR_INFO hdrInfo);
+                                              POVS_PACKET_HDR_INFO hdrInfo,
+                                              UINT32 dpNo);
 
 VOID OvsQueuePackets(PLIST_ENTRY packetList, UINT32 numElems);
 NTSTATUS OvsCreateAndAddPackets(PVOID userData,
@@ -102,7 +103,8 @@ NTSTATUS OvsReadDpIoctl(PFILE_OBJECT fileObject,
                         PVOID outputBuffer,
                         UINT32 outputLength,
                         UINT32 *replyLen);
-NTSTATUS OvsExecuteDpIoctl(OvsPacketExecute *execute);
+NTSTATUS OvsExecuteDpIoctl(OvsPacketExecute *execute,
+                           POVS_SWITCH_CONTEXT switchContext);
 NTSTATUS OvsPurgeDpIoctl(PFILE_OBJECT fileObject);
 
 NTSTATUS OvsWaitDpIoctl(PIRP irp, PFILE_OBJECT fileObject);
@@ -111,14 +113,13 @@ NTSTATUS OvsNlExecuteCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                                 UINT32 *replyLen);
 
 POVS_OPEN_INSTANCE
-OvsGetPidInstance(POVS_SWITCH_CONTEXT switchContext, UINT32 pid);
+OvsGetPidInstance(UINT32 pid);
 
 VOID
-OvsAddPidInstance(POVS_SWITCH_CONTEXT switchContext, UINT32 pid,
-                  POVS_OPEN_INSTANCE instance);
+OvsAddPidInstance(UINT32 pid, POVS_OPEN_INSTANCE instance);
 
 VOID
-OvsDelPidInstance(POVS_SWITCH_CONTEXT switchContext, UINT32 pid);
+OvsDelPidInstance(UINT32 pid);
 
 NTSTATUS OvsReadPacketCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                                  UINT32 *replyLen);

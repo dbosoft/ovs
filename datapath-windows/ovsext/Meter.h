@@ -50,7 +50,8 @@ typedef struct _DpMeter {
     DpMeterBand  bands[OVS_MAX_BANDS];
 } DpMeter;
 
-NTSTATUS OvsInitMeter(POVS_SWITCH_CONTEXT context);
+NTSTATUS OvsInitMeter(NDIS_HANDLE ndisFilterHandle);
+VOID OvsCleanupMeter(VOID);
 NDIS_STATUS OvsNewMeterCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                                   UINT32 *replyLen);
 NDIS_STATUS OvsMeterFeatureProbe(POVS_USER_PARAMS_CONTEXT usrParamsCtx,

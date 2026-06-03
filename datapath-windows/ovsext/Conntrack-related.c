@@ -282,14 +282,14 @@ OvsCtRelatedEntryCleaner(PVOID data)
  *----------------------------------------------------------------------------
  */
 NTSTATUS
-OvsInitCtRelated(POVS_SWITCH_CONTEXT context)
+OvsInitCtRelated(NDIS_HANDLE ndisFilterHandle)
 {
     NTSTATUS status;
     HANDLE threadHandle = NULL;
     ctTotalRelatedEntries = 0;
 
     /* Init the sync-lock */
-    ovsCtRelatedLockObj = NdisAllocateRWLock(context->NdisFilterHandle);
+    ovsCtRelatedLockObj = NdisAllocateRWLock(ndisFilterHandle);
     if (ovsCtRelatedLockObj == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -341,6 +341,9 @@ VOID
 OvsCleanupCtRelated(VOID)
 {
     LOCK_STATE_EX lockState;
+    if (ctRelThreadCtx.threadObject == NULL) {
+        return;
+    }
     NdisAcquireRWLockWrite(ovsCtRelatedLockObj, &lockState, 0);
     ctRelThreadCtx.exit = 1;
     KeSetEvent(&ctRelThreadCtx.event, 0, FALSE);
@@ -349,6 +352,7 @@ OvsCleanupCtRelated(VOID)
     KeWaitForSingleObject(ctRelThreadCtx.threadObject, Executive,
                           KernelMode, FALSE, NULL);
     ObDereferenceObject(ctRelThreadCtx.threadObject);
+    ctRelThreadCtx.threadObject = NULL;
 
     if (ovsCtRelatedTable) {
         OvsCtRelatedFlush();

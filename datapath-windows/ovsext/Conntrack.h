@@ -177,7 +177,7 @@ const TCPHdr* OvsGetTcpHeader(PNET_BUFFER_LIST nbl, OVS_PACKET_HDR_INFO *layers,
                                      VOID *storage, UINT32 *tcpPayloadLen);
 
 VOID OvsCleanupConntrack(VOID);
-NTSTATUS OvsInitConntrack(POVS_SWITCH_CONTEXT context);
+NTSTATUS OvsInitConntrack(NDIS_HANDLE ndisFilterHandle);
 
 NDIS_STATUS OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                                       OvsFlowKey *key,
@@ -213,7 +213,7 @@ NTSTATUS OvsCreateNlMsgFromCtEntry(POVS_CT_ENTRY entry,
                                    UINT32 dpIfIndex);
 
 /* Tracking related connections */
-NTSTATUS OvsInitCtRelated(POVS_SWITCH_CONTEXT context);
+NTSTATUS OvsInitCtRelated(NDIS_HANDLE ndisFilterHandle);
 VOID OvsCleanupCtRelated(VOID);
 NDIS_STATUS OvsCtRelatedEntryCreate(UINT8 ipProto,
                                     UINT16 dl_type,

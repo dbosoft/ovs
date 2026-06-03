@@ -328,7 +328,7 @@ get_first_element(IEnumWbemClassObject *penumerate,
 
 /* This function is a wrapper that transforms a char * into a wchar_t * */
 static boolean
-tranform_wide(char *name, wchar_t *wide_name)
+tranform_wide(const char *name, wchar_t *wide_name)
 {
     unsigned long size = strlen(name) + 1;
     long long ret = 0;
@@ -629,12 +629,17 @@ error:
  * executing the method AddResourceSettings as per documentation:
  * https://msdn.microsoft.com/en-us/library/hh850019%28v=vs.85%29.aspx.
  * It will verify if the port is already defined, in which case it will use
- * the specific port, and if the forwarding extension "Open vSwitch Extension"
- * is enabled and running only on a single switch.
+ * the specific port.
+ * 'switch_id' selects the target virtual switch by its GUID
+ * (Msvm_VirtualEthernetSwitch.Name): the ovsext kernel backs one datapath per
+ * Hyper-V switch and the bridge's datapath carries its switch identity, so the
+ * internal port must be created on that exact switch.  When 'switch_id' is NULL
+ * (or a default alias) the legacy behaviour is used: the single switch on which
+ * the forwarding extension is enabled and running, aborting if more than one.
  * After the port is created and bound to the switch we will disable the
  * created net adapter and rename it to match the OVS bridge name .*/
 boolean
-create_wmi_port(char *name) {
+create_wmi_port(char *name, const char *switch_id) {
     HRESULT hres = 0;
     boolean retval = true;
 
@@ -654,6 +659,8 @@ create_wmi_port(char *name) {
     IWbemClassObject *pout_params = NULL;
 
     wchar_t *wide_name = NULL;
+    wchar_t *wide_switch = NULL;
+    const char *target_switch = NULL;
     VARIANT vt_prop;
     VARIANT switch_setting_path;
     VARIANT new_name;
@@ -664,6 +671,14 @@ create_wmi_port(char *name) {
     VariantInit(&vt_prop);
     VariantInit(&switch_setting_path);
     sanitize_port_name(name);
+
+    /* A concrete switch GUID selects that switch directly; a default alias
+     * ("ovs-system"/"ovs-windows") or NULL falls back to extension discovery. */
+    if (switch_id && switch_id[0]
+        && strcmp(switch_id, "ovs-system")
+        && strcmp(switch_id, "ovs-windows")) {
+        target_switch = switch_id;
+    }
 
     if (psa == NULL) {
         VLOG_WARN("Could not allocate memory for a SAFEARRAY");
@@ -718,63 +733,76 @@ create_wmi_port(char *name) {
     penumerate->lpVtbl->Release(penumerate);
     penumerate = NULL;
 
-    /* Check if the extension is enabled and running.  Also check if the
-     * the extension is enabled on more than one switch. */
-    hres = psvc->lpVtbl->ExecQuery(psvc,
-                                   L"WQL",
-                                   L"SELECT * "
-                                   L"FROM Msvm_EthernetSwitchExtension "
-                                   L"WHERE "
-                                   L"ElementName=\"dbosoft Open vSwitch Extension\" "
-                                   L"AND EnabledState=2 "
-                                   L"AND HealthState=5",
-                                   WBEM_FLAG_FORWARD_ONLY |
-                                   WBEM_FLAG_RETURN_IMMEDIATELY,
-                                   NULL,
-                                   &penumerate);
-
-    if (FAILED(hres)) {
-        retval = false;
-        goto error;
-    }
-
-    if (!get_first_element(penumerate, &pcls_obj)) {
-        VLOG_WARN("dbosoft Open vSwitch Extension is not enabled on any switch");
-        retval = false;
-        goto error;
-    }
     wcscpy_s(internal_port_query, WMI_QUERY_COUNT,
              L"SELECT * FROM Msvm_VirtualEthernetSwitch WHERE Name = \"");
 
-    hres = pcls_obj->lpVtbl->Get(pcls_obj, L"SystemName", 0,
-                                 &vt_prop, 0, 0);
-    if (FAILED(hres)) {
-        retval = false;
-        goto error;
-    }
+    if (target_switch) {
+        /* Target the bridge's specific Hyper-V switch by its GUID. */
+        wide_switch = xmalloc((strlen(target_switch) + 1) * sizeof(wchar_t));
+        if (!tranform_wide(target_switch, wide_switch)) {
+            retval = false;
+            goto error;
+        }
+        wcscat_s(internal_port_query, WMI_QUERY_COUNT, wide_switch);
+    } else {
+        /* No specific switch requested: fall back to the single switch on which
+         * the forwarding extension is enabled and running, aborting if it is
+         * enabled on more than one. */
+        hres = psvc->lpVtbl->ExecQuery(psvc,
+                                       L"WQL",
+                                       L"SELECT * "
+                                       L"FROM Msvm_EthernetSwitchExtension "
+                                       L"WHERE "
+                                       L"ElementName=\"dbosoft Open vSwitch Extension\" "
+                                       L"AND EnabledState=2 "
+                                       L"AND HealthState=5",
+                                       WBEM_FLAG_FORWARD_ONLY |
+                                       WBEM_FLAG_RETURN_IMMEDIATELY,
+                                       NULL,
+                                       &penumerate);
 
-    wcscat_s(internal_port_query, WMI_QUERY_COUNT,
-             vt_prop.bstrVal);
+        if (FAILED(hres)) {
+            retval = false;
+            goto error;
+        }
 
-    VariantClear(&vt_prop);
-    pcls_obj->lpVtbl->Release(pcls_obj);
-    pcls_obj = NULL;
+        if (!get_first_element(penumerate, &pcls_obj)) {
+            VLOG_WARN("dbosoft Open vSwitch Extension is not enabled on any "
+                      "switch");
+            retval = false;
+            goto error;
+        }
 
-    if (get_first_element(penumerate, &pcls_obj)) {
-        VLOG_WARN("The extension is activated on more than one switch, "
-                  "aborting operation. Please activate the extension on a "
-                  "single switch");
-        retval = false;
-        goto error;
-    }
-    penumerate->lpVtbl->Release(penumerate);
-    penumerate = NULL;
-    if (pcls_obj != NULL) {
+        hres = pcls_obj->lpVtbl->Get(pcls_obj, L"SystemName", 0,
+                                     &vt_prop, 0, 0);
+        if (FAILED(hres)) {
+            retval = false;
+            goto error;
+        }
+
+        wcscat_s(internal_port_query, WMI_QUERY_COUNT,
+                 vt_prop.bstrVal);
+
+        VariantClear(&vt_prop);
         pcls_obj->lpVtbl->Release(pcls_obj);
         pcls_obj = NULL;
+
+        if (get_first_element(penumerate, &pcls_obj)) {
+            VLOG_WARN("The extension is activated on more than one switch, "
+                      "aborting operation. Please activate the extension on a "
+                      "single switch");
+            retval = false;
+            goto error;
+        }
+        penumerate->lpVtbl->Release(penumerate);
+        penumerate = NULL;
+        if (pcls_obj != NULL) {
+            pcls_obj->lpVtbl->Release(pcls_obj);
+            pcls_obj = NULL;
+        }
     }
 
-    /* Get the switch object on which the extension is activated. */
+    /* Get the switch object selected above. */
     wcscat_s(internal_port_query, WMI_QUERY_COUNT, L"\"");
     hres = psvc->lpVtbl->ExecQuery(psvc,
                                    L"WQL",
@@ -790,8 +818,7 @@ create_wmi_port(char *name) {
     }
 
     if (!get_first_element(penumerate, &pcls_obj)) {
-        VLOG_WARN("Could not get the switch object on which the extension is"
-                  "activated");
+        VLOG_WARN("Could not find the target Hyper-V switch object");
         retval = false;
         goto error;
     }
@@ -1260,6 +1287,10 @@ error:
     if (wide_name != NULL) {
         free(wide_name);
         wide_name = NULL;
+    }
+    if (wide_switch != NULL) {
+        free(wide_switch);
+        wide_switch = NULL;
     }
     VariantClear(&vt_prop);
     VariantClear(&switch_setting_path);

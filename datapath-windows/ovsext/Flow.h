@@ -69,10 +69,11 @@ VOID OvsFlowUsed(OvsFlow *flow, const NET_BUFFER_LIST *pkt,
 NTSTATUS OvsDumpFlowIoctl(PVOID inputBuffer, UINT32 inputLength,
                           PVOID outputBuffer, UINT32 outputLength,
                           UINT32 *replyLen);
-NTSTATUS OvsPutFlowIoctl(PVOID inputBuffer, UINT32 inputLength,
-                         struct OvsFlowStats *stats);
-NTSTATUS OvsGetFlowIoctl(PVOID inputBuffer, PVOID outputBuffer);
-NTSTATUS OvsFlushFlowIoctl(UINT32 dpNo);
+NTSTATUS OvsPutFlowIoctl(POVS_SWITCH_CONTEXT switchContext, PVOID inputBuffer,
+                         UINT32 inputLength, struct OvsFlowStats *stats);
+NTSTATUS OvsGetFlowIoctl(POVS_SWITCH_CONTEXT switchContext, PVOID inputBuffer,
+                         PVOID outputBuffer);
+NTSTATUS OvsFlushFlowIoctl(POVS_SWITCH_CONTEXT switchContext, UINT32 dpNo);
 
 NTSTATUS OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                              UINT32 *replyLen);

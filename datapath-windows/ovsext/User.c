@@ -44,6 +44,8 @@
 POVS_PACKET_QUEUE_ELEM OvsGetNextPacket(POVS_OPEN_INSTANCE instance);
 extern PNDIS_SPIN_LOCK gOvsCtrlLock;
 extern POVS_SWITCH_CONTEXT gOvsSwitchContext;
+extern PLIST_ENTRY gOvsPidHashArray;
+extern NDIS_SPIN_LOCK gOvsPidHashLock;
 OVS_USER_STATS ovsUserStats;
 
 static VOID _MapNlAttrToOvsPktExec(PNL_MSG_HDR nlMsgHdr, PNL_ATTR *nlAttrs,
@@ -56,22 +58,22 @@ extern UINT32 nlFlowTunnelKeyPolicyLen;
 DRIVER_CANCEL OvsCancelIrpDatapath;
 
 _IRQL_raises_(DISPATCH_LEVEL)
-_IRQL_saves_global_(OldIrql, gOvsSwitchContext->pidHashLock)
-_Acquires_lock_(gOvsSwitchContext->pidHashLock)
+_IRQL_saves_global_(OldIrql, gOvsPidHashLock)
+_Acquires_lock_(gOvsPidHashLock)
 static __inline VOID
 OvsAcquirePidHashLock()
 {
-    NdisAcquireSpinLock(&(gOvsSwitchContext->pidHashLock));
+    NdisAcquireSpinLock(&gOvsPidHashLock);
 }
 
 _IRQL_requires_(DISPATCH_LEVEL)
-_IRQL_restores_global_(OldIrql, gOvsSwitchContext->pidHashLock)
-_Requires_lock_held_(gOvsSwitchContext->pidHashLock)
-_Releases_lock_(gOvsSwitchContext->pidHashLock)
+_IRQL_restores_global_(OldIrql, gOvsPidHashLock)
+_Requires_lock_held_(gOvsPidHashLock)
+_Releases_lock_(gOvsPidHashLock)
 static __inline VOID
 OvsReleasePidHashLock()
 {
-    NdisReleaseSpinLock(&(gOvsSwitchContext->pidHashLock));
+    NdisReleaseSpinLock(&gOvsPidHashLock);
 }
 
 
@@ -154,13 +156,10 @@ OvsCleanupPacketQueue(POVS_OPEN_INSTANCE instance)
         OvsFreeMemoryWithTag(queue, OVS_USER_POOL_TAG);
     }
 
-    /* Verify if gOvsSwitchContext exists. */
-    if (gOvsSwitchContext) {
-        /* Remove the instance from pidHashArray */
-        OvsAcquirePidHashLock();
-        OvsDelPidInstance(gOvsSwitchContext, instance->pid);
-        OvsReleasePidHashLock();
-    }
+    /* Remove the instance from the (driver-global) pid hash. */
+    OvsAcquirePidHashLock();
+    OvsDelPidInstance(instance->pid);
+    OvsReleasePidHashLock();
 }
 
 NTSTATUS
@@ -192,8 +191,8 @@ OvsSubscribeDpIoctl(PVOID instanceP,
         NdisReleaseSpinLock(&queue->queueLock);
 
         OvsAcquirePidHashLock();
-        /* Insert the instance to pidHashArray */
-        OvsAddPidInstance(gOvsSwitchContext, pid, instance);
+        /* Insert the instance into the (driver-global) pid hash. */
+        OvsAddPidInstance(pid, instance);
         OvsReleasePidHashLock();
 
     } else {
@@ -344,7 +343,7 @@ OvsNlExecuteCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     _MapNlAttrToOvsPktExec(nlMsgHdr, nlAttrs, keyAttrs, &execute);
 
-    status = OvsExecuteDpIoctl(&execute);
+    status = OvsExecuteDpIoctl(&execute, usrParamsCtx->switchContext);
 
     /* Default reply that we want to send */
     if (status == STATUS_SUCCESS) {
@@ -418,7 +417,7 @@ _MapNlAttrToOvsPktExec(PNL_MSG_HDR nlMsgHdr, PNL_ATTR *nlAttrs,
 }
 
 NTSTATUS
-OvsExecuteDpIoctl(OvsPacketExecute *execute)
+OvsExecuteDpIoctl(OvsPacketExecute *execute, POVS_SWITCH_CONTEXT switchContext)
 {
     NTSTATUS                    status = STATUS_SUCCESS;
     NTSTATUS                    ndisStatus = STATUS_SUCCESS;
@@ -446,7 +445,7 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
      * Allocate the NBL, copy the data from the userspace buffer. Allocate
      * also, the forwarding context for the packet.
      */
-    pNbl = OvsAllocateNBLFromBuffer(gOvsSwitchContext, execute->packetBuf,
+    pNbl = OvsAllocateNBLFromBuffer(switchContext, execute->packetBuf,
                                     execute->packetLen);
     if (pNbl == NULL) {
         status = STATUS_NO_MEMORY;
@@ -496,8 +495,8 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
     ctx->mru = execute->mru;
 
     if (ndisStatus == NDIS_STATUS_SUCCESS) {
-        NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState, 0);
-        vport = OvsFindVportByPortNo(gOvsSwitchContext, execute->inPort);
+        NdisAcquireRWLockRead(switchContext->dispatchLock, &lockState, 0);
+        vport = OvsFindVportByPortNo(switchContext, execute->inPort);
         if (vport) {
             fwdDetail->SourcePortId = vport->portId;
             fwdDetail->SourceNicIndex = vport->nicIndex;
@@ -505,14 +504,14 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
             fwdDetail->SourcePortId = NDIS_SWITCH_DEFAULT_PORT_ID;
             fwdDetail->SourceNicIndex = 0;
         }
-        ndisStatus = OvsActionsExecute(gOvsSwitchContext, NULL, pNbl,
+        ndisStatus = OvsActionsExecute(switchContext, NULL, pNbl,
                                        vport ? vport->portNo :
                                                OVS_DPPORT_NUMBER_INVALID,
                                        NDIS_SEND_FLAGS_SWITCH_DESTINATION_GROUP,
                                        &key, NULL, &layers, actions,
                                        execute->actionsLen);
         pNbl = NULL;
-        NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
+        NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
     }
     if (ndisStatus != NDIS_STATUS_SUCCESS) {
         if (ndisStatus == NDIS_STATUS_NOT_SUPPORTED) {
@@ -524,7 +523,7 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
 
 dropit:
     if (pNbl) {
-        OvsCompleteNBL(gOvsSwitchContext, pNbl, TRUE);
+        OvsCompleteNBL(switchContext, pNbl, TRUE);
     }
 exit:
     return status;
@@ -657,7 +656,7 @@ OvsGetQueue(UINT32 pid)
     POVS_OPEN_INSTANCE instance;
     POVS_USER_PACKET_QUEUE ret = NULL;
 
-    instance = OvsGetPidInstance(gOvsSwitchContext, pid);
+    instance = OvsGetPidInstance(pid);
 
     if (instance) {
         ret = instance->packetQueue;
@@ -673,13 +672,13 @@ OvsGetQueue(UINT32 pid)
  * ---------------------------------------------------------------------------
  */
 POVS_OPEN_INSTANCE
-OvsGetPidInstance(POVS_SWITCH_CONTEXT switchContext, UINT32 pid)
+OvsGetPidInstance(UINT32 pid)
 {
     POVS_OPEN_INSTANCE instance;
     PLIST_ENTRY head, link;
     UINT32 hash = OvsJhashBytes((const VOID *)&pid, sizeof(pid),
                                 OVS_HASH_BASIS);
-    head = &(switchContext->pidHashArray[hash & OVS_PID_MASK]);
+    head = &(gOvsPidHashArray[hash & OVS_PID_MASK]);
     LIST_FORALL(head, link) {
         instance = CONTAINING_RECORD(link, OVS_OPEN_INSTANCE, pidLink);
         if (instance->pid == pid) {
@@ -696,13 +695,12 @@ OvsGetPidInstance(POVS_SWITCH_CONTEXT switchContext, UINT32 pid)
  * ---------------------------------------------------------------------------
  */
 VOID
-OvsAddPidInstance(POVS_SWITCH_CONTEXT switchContext, UINT32 pid,
-                  POVS_OPEN_INSTANCE instance)
+OvsAddPidInstance(UINT32 pid, POVS_OPEN_INSTANCE instance)
 {
     PLIST_ENTRY head;
     UINT32 hash = OvsJhashBytes((const VOID *)&pid, sizeof(pid),
                                 OVS_HASH_BASIS);
-    head = &(switchContext->pidHashArray[hash & OVS_PID_MASK]);
+    head = &(gOvsPidHashArray[hash & OVS_PID_MASK]);
     InsertHeadList(head, &(instance->pidLink));
 }
 
@@ -713,9 +711,9 @@ OvsAddPidInstance(POVS_SWITCH_CONTEXT switchContext, UINT32 pid,
  * ---------------------------------------------------------------------------
  */
 VOID
-OvsDelPidInstance(POVS_SWITCH_CONTEXT switchContext, UINT32 pid)
+OvsDelPidInstance(UINT32 pid)
 {
-    POVS_OPEN_INSTANCE instance = OvsGetPidInstance(switchContext, pid);
+    POVS_OPEN_INSTANCE instance = OvsGetPidInstance(pid);
 
     if (instance) {
         RemoveEntryList(&(instance->pidLink));
@@ -834,7 +832,7 @@ OvsCreateAndAddPackets(PVOID userData,
     while (nb) {
         elem = OvsCreateQueueNlPacket(userData, userDataLen,
                                     cmd, vport, key, NULL, nbl, nb,
-                                    isRecv, hdrInfo);
+                                    isRecv, hdrInfo, switchContext->dpNo);
         if (elem) {
             InsertTailList(list, &elem->link);
             (*num)++;
@@ -1020,7 +1018,8 @@ OvsCreateQueueNlPacket(PVOID userData,
                        PNET_BUFFER_LIST nbl,
                        PNET_BUFFER nb,
                        BOOLEAN isRecv,
-                       POVS_PACKET_HDR_INFO hdrInfo)
+                       POVS_PACKET_HDR_INFO hdrInfo,
+                       UINT32 dpNo)
 {
 #define VLAN_TAG_SIZE 4
     UINT32 allocLen, dataLen, extraLen = 0;
@@ -1113,7 +1112,7 @@ OvsCreateQueueNlPacket(PVOID userData,
      */
     if (!NlFillOvsMsg(&nlBuf, OVS_WIN_NL_PACKET_FAMILY_ID, 0,
                       0, pid, (UINT8)cmd, OVS_PACKET_VERSION,
-                      gOvsSwitchContext->dpNo)) {
+                      dpNo)) {
         goto fail;
     }
 

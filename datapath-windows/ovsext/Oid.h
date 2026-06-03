@@ -19,6 +19,7 @@
 
 NDIS_STATUS OvsQuerySwitchActivationComplete(POVS_SWITCH_CONTEXT switchContext,
                                              BOOLEAN *switchActive);
+VOID OvsCaptureSwitchName(POVS_SWITCH_CONTEXT switchContext);
 NDIS_STATUS OvsGetPortsOnSwitch(POVS_SWITCH_CONTEXT switchContext,
                                 PNDIS_SWITCH_PORT_ARRAY *portArrayOut);
 NDIS_STATUS OvsGetNicsOnSwitch(POVS_SWITCH_CONTEXT switchContext,

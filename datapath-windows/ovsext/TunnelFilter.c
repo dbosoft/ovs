@@ -804,9 +804,8 @@ OvsUnsubscribeTunnelInitBfeStateChanges()
  * to be called whenever the state of the filter engine changes.
  *
  * Initialize OVS tunnel filter call hierarchy:
- * <OvsExtAttach>
- *     <OvsCreateSwitch>
- *         <OvsInitTunnelFilter>
+ * <DriverEntry>
+ *     <OvsInitTunnelFilter>
  *             <OvsSubscribeTunnelInitBfeStateChanges>
  *                 --> registers OvsTunnelInitBfeCallback callback
  *                     <OvsTunnelInitBfeCallback>
@@ -859,9 +858,8 @@ OvsInitTunnelFilter(PDRIVER_OBJECT driverObject, PVOID deviceObject)
  * OvsTunnelInitBfeCallback callback from BFE.
  *
  * Uninitialize OVS tunnel filter call hierarchy:
- * <OvsExtDetach>
- *     <OvsDeleteSwitch>
- *         <OvsUninitTunnelFilter>
+ * <OvsExtUnload>
+ *     <OvsUninitTunnelFilter>
  *             <OvsTunnelFilterUninitialize>
  *                 <OvsTunnelFilterStopThreads>
  *                 <OvsTunnelUnregisterCallouts>

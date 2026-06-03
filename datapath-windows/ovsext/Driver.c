@@ -18,6 +18,11 @@
 #include "Switch.h"
 #include "User.h"
 #include "Datapath.h"
+#include "IpHelper.h"
+#include "Conntrack.h"
+#include "IpFragment.h"
+#include "Ip6Fragment.h"
+#include "Meter.h"
 
 #ifdef OVS_DBG_MOD
 #undef OVS_DBG_MOD
@@ -46,6 +51,7 @@ NDIS_HANDLE gOvsExtDriverHandle;
  * function.
  */
 extern POVS_SWITCH_CONTEXT gOvsSwitchContext;
+extern PDEVICE_OBJECT gOvsDeviceObject;
 
 static PWCHAR ovsExtFriendlyName = L"dbosoft Open vSwitch Extension";
 static PWCHAR ovsExtServiceName = L"DBO_OVSE";
@@ -160,6 +166,97 @@ DriverEntry(PDRIVER_OBJECT driverObject,
         goto cleanup;
     }
 
+    /*
+     * The tunnel WFP callouts are a host-global resource independent of any
+     * switch, so they are set up once at driver load rather than per attach.
+     */
+    status = OvsInitTunnelFilter(gOvsExtDriverObject, gOvsDeviceObject);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    /*
+     * The IP helper (host route/neighbor tracking thread and notifications) is
+     * a host-global resource independent of any switch, so it is set up once at
+     * driver load rather than per attach.
+     */
+    status = OvsInitIpHelper(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    /*
+     * Conntrack, connection-tracking helpers, IPv4/IPv6 fragment reassembly and
+     * the meter table are host-global subsystems (static tables and cleaner
+     * threads), so they are set up once at driver load rather than per attach.
+     */
+    status = OvsInitConntrack(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    status = OvsInitCtRelated(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupConntrack();
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    status = OvsInitIpFragment(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupCtRelated();
+        OvsCleanupConntrack();
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    status = OvsInitIp6Fragment(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupIpFragment();
+        OvsCleanupCtRelated();
+        OvsCleanupConntrack();
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    status = OvsInitMeter(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupIp6Fragment();
+        OvsCleanupIpFragment();
+        OvsCleanupCtRelated();
+        OvsCleanupConntrack();
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
 cleanup:
     if (status != NDIS_STATUS_SUCCESS){
         OvsCleanup();
@@ -178,6 +275,26 @@ VOID
 OvsExtUnload(struct _DRIVER_OBJECT *driverObject)
 {
     UNREFERENCED_PARAMETER(driverObject);
+
+    /*
+     * Tear down the tunnel WFP callouts (set up once in DriverEntry) before the
+     * NDIS device and filter-driver registration they were created against.
+     */
+    OvsUninitTunnelFilter(gOvsExtDriverObject);
+
+    /*
+     * Tear down the driver-load-scoped subsystems before the filter-driver
+     * registration whose handle their locks were allocated against, in the
+     * reverse of the DriverEntry init order (IpHelper, Conntrack, CtRelated,
+     * IpFragment, Ip6Fragment, Meter) so IpHelper -- whose worker thread can run
+     * the forwarding path -- is stopped last.
+     */
+    OvsCleanupMeter();
+    OvsCleanupIp6Fragment();
+    OvsCleanupIpFragment();
+    OvsCleanupCtRelated();
+    OvsCleanupConntrack();
+    OvsCleanupIpHelper();
 
     OvsDeleteDeviceObject();
 

@@ -275,9 +275,9 @@ main(int argc, char *argv[])
     memset(&mock, 0, sizeof mock);
     ovsext_set_transport(&mock_transport);
 
-    error = dpif_open("ovs-system", "windows", &dpif);
+    error = dpif_open("ovs-system", "system", &dpif);
     if (error) {
-        fprintf(stderr, "dpif_open(windows) failed: %s\n", ovs_strerror(error));
+        fprintf(stderr, "dpif_open(system) failed: %s\n", ovs_strerror(error));
         return 1;
     }
     printf("dpif_open ok (%s)\n", dpif_name(dpif));

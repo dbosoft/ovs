@@ -13,6 +13,6 @@ Start-Sleep 2
 $ev = "$erun\bin\ovs-vsctl.exe"
 Write-Output '=== eryph vsctl (3.3) show against our ovsdb (3.5) ==='
 & $ev --timeout=10 show 2>&1; Write-Output "show exit=$LASTEXITCODE"
-Write-Output '=== eryph vsctl add-br br-test datapath_type=windows ==='
-& $ev --timeout=10 add-br br-test -- set bridge br-test datapath_type=windows 2>&1; Write-Output "add-br exit=$LASTEXITCODE"
+Write-Output '=== eryph vsctl add-br br-test datapath_type=system ==='
+& $ev --timeout=10 add-br br-test -- set bridge br-test datapath_type=system 2>&1; Write-Output "add-br exit=$LASTEXITCODE"
 & $ev --timeout=10 show 2>&1

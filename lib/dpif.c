@@ -250,6 +250,14 @@ dp_enumerate_types(struct sset *types)
 
     dp_initialize();
 
+#ifdef _WIN32
+    /* The ovsext kernel backs one datapath per Hyper-V switch (named by the
+     * switch GUID).  Register a windows dpif provider alias for each so that a
+     * bridge's datapath_type=<switch-guid> is a known type here, before ofproto
+     * resolves it.  Done outside dpif_mutex (registration takes it itself). */
+    dpif_windows_register_all_switch_types();
+#endif
+
     ovs_mutex_lock(&dpif_mutex);
     SHASH_FOR_EACH(node, &dpif_classes) {
         const struct registered_dpif_class *registered_class = node->data;
@@ -280,6 +288,20 @@ dp_class_lookup(const char *type)
     ovs_mutex_unlock(&dpif_mutex);
 
     return rc;
+}
+
+/* Returns true if a datapath provider of the given 'type' is registered.  Does
+ * not take a reference. */
+bool
+dp_class_is_registered(const char *type)
+{
+    bool registered;
+
+    ovs_mutex_lock(&dpif_mutex);
+    registered = shash_find(&dpif_classes, type) != NULL;
+    ovs_mutex_unlock(&dpif_mutex);
+
+    return registered;
 }
 
 /* Clears 'names' and enumerates the names of all known created datapaths with
@@ -349,6 +371,17 @@ do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
 
     type = dpif_normalize_type(type);
     registered_class = dp_class_lookup(type);
+#ifdef _WIN32
+    if (!registered_class) {
+        /* On Windows the ovsext kernel backs one datapath per Hyper-V switch,
+         * named by the switch GUID.  A bridge may select a specific switch with
+         * datapath_type=<switch-guid>; register a windows dpif provider alias
+         * for that GUID on demand so the backer can be opened. */
+        if (!dpif_windows_register_switch_type(type)) {
+            registered_class = dp_class_lookup(type);
+        }
+    }
+#endif
     if (!registered_class) {
         VLOG_WARN("could not create datapath %s of unknown type %s", name,
                   type);

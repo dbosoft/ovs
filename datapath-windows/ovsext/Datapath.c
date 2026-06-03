@@ -402,7 +402,8 @@ static NTSTATUS ValidateNetlinkCmd(UINT32 devOp,
                                    POVS_OPEN_INSTANCE instance,
                                    POVS_MESSAGE ovsMsg,
                                    UINT32 ovsMgsLength,
-                                   NETLINK_FAMILY *nlFamilyOps);
+                                   NETLINK_FAMILY *nlFamilyOps,
+                                   POVS_SWITCH_CONTEXT datapath);
 static NTSTATUS InvokeNetlinkCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                                         NETLINK_FAMILY *nlFamilyOps,
                                         UINT32 *replyLen);
@@ -481,7 +482,14 @@ OvsInit()
 
     gOvsCtrlLock = &ovsCtrlLockObj;
     NdisAllocateSpinLock(gOvsCtrlLock);
+    /* Init the event queue before the (fallible) datapath registry so that the
+     * OvsCleanup() teardown on a registry-init failure is safe (it frees the
+     * event-queue locks unconditionally). */
     OvsInitEventQueue();
+    status = OvsInitDatapathRegistry();
+    if (status != NDIS_STATUS_SUCCESS) {
+        return status;
+    }
 
     status = OvsPerCpuDataInit();
 
@@ -493,6 +501,7 @@ OvsCleanup()
 {
     OvsPerCpuDataCleanup();
     OvsCleanupEventQueue();
+    OvsCleanupDatapathRegistry();
     if (gOvsCtrlLock) {
         NdisFreeSpinLock(gOvsCtrlLock);
         gOvsCtrlLock = NULL;
@@ -593,17 +602,22 @@ POVS_OPEN_INSTANCE
 OvsGetOpenInstance(PFILE_OBJECT fileObject,
                    UINT32 dpNo)
 {
-    LOCK_STATE_EX lockState;
     POVS_OPEN_INSTANCE instance = (POVS_OPEN_INSTANCE)fileObject->FsContext;
+    POVS_SWITCH_CONTEXT switchContext;
     ASSERT(instance);
     ASSERT(instance->fileObject == fileObject);
-    NdisAcquireRWLockWrite(gOvsSwitchContext->dispatchLock, &lockState, 0);
 
-    if (gOvsSwitchContext->dpNo != dpNo) {
-        instance = NULL;
+    /*
+     * The datapath reference is only an existence gate: the open instance
+     * returned belongs to the file object, not to the switch context, so the
+     * reference is released immediately. A NULL means no such datapath.
+     */
+    switchContext = OvsAcquireDatapathByNumber(dpNo);
+    if (switchContext == NULL) {
+        return NULL;
     }
+    OvsReleaseSwitchContext(switchContext);
 
-    NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
     return instance;
 }
 
@@ -800,6 +814,8 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
     POVS_MESSAGE ovsMsg;
     UINT32 ovsMsgLength = 0;
     NETLINK_FAMILY *nlFamilyOps;
+    POVS_SWITCH_CONTEXT dpCtx = NULL;
+    POVS_SWITCH_CONTEXT defaultDpCtx = NULL;
     OVS_USER_PARAMS_CONTEXT usrParamsCtx;
 
 #pragma warning(suppress: 28118)
@@ -826,13 +842,10 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
     outputBufferLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
     inputBuffer = irp->AssociatedIrp.SystemBuffer;
 
-    /* Check if the extension is enabled. */
-    if (NULL == gOvsSwitchContext) {
-        status = STATUS_NOT_FOUND;
-        goto exit;
-    }
-
-    if (!OvsAcquireSwitchContext()) {
+    /* Hold the default datapath for the request's duration; this also tells us
+     * the extension is enabled. */
+    defaultDpCtx = OvsAcquireSwitchContext();
+    if (defaultDpCtx == NULL) {
         status = STATUS_NOT_FOUND;
         goto exit;
     }
@@ -849,7 +862,7 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
             InitUserParamsCtx(irp, instance, 0, NULL,
                               inputBuffer, inputBufferLen,
                               outputBuffer, outputBufferLen,
-                              &usrParamsCtx);
+                              NULL, &usrParamsCtx);
 
             ASSERT(outputBuffer);
         } else {
@@ -1022,13 +1035,16 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
         goto done;
     }
 
+    /* Resolve the datapath that the request targets, if any. */
+    dpCtx = OvsAcquireDatapathByNumber(ovsMsg->ovsHdr.dp_ifindex);
+
     /*
      * For read operation, avoid duplicate validation since 'ovsMsg' is either
      * "artificial" or was copied from a previously validated 'ovsMsg'.
      */
     if (devOp != OVS_READ_DEV_OP) {
         status = ValidateNetlinkCmd(devOp, instance, ovsMsg,
-                                    ovsMsgLength, nlFamilyOps);
+                                    ovsMsgLength, nlFamilyOps, dpCtx);
         if (status != STATUS_SUCCESS) {
             goto done;
         }
@@ -1037,12 +1053,15 @@ OvsDeviceControl(PDEVICE_OBJECT deviceObject,
     InitUserParamsCtx(irp, instance, devOp, ovsMsg,
                       inputBuffer, inputBufferLen,
                       outputBuffer, outputBufferLen,
-                      &usrParamsCtx);
+                      dpCtx, &usrParamsCtx);
 
     status = InvokeNetlinkCmdHandler(&usrParamsCtx, nlFamilyOps, &replyLen);
 
 done:
-    OvsReleaseSwitchContext(gOvsSwitchContext);
+    if (dpCtx != NULL) {
+        OvsReleaseSwitchContext(dpCtx);
+    }
+    OvsReleaseSwitchContext(defaultDpCtx);
 
 exit:
     /* Should not complete a pending IRP unless proceesing is completed. */
@@ -1064,7 +1083,8 @@ ValidateNetlinkCmd(UINT32 devOp,
                    POVS_OPEN_INSTANCE instance,
                    POVS_MESSAGE ovsMsg,
                    UINT32 ovsMsgLength,
-                   NETLINK_FAMILY *nlFamilyOps)
+                   NETLINK_FAMILY *nlFamilyOps,
+                   POVS_SWITCH_CONTEXT datapath)
 {
     NTSTATUS status = STATUS_INVALID_PARAMETER;
     UINT16 i;
@@ -1115,8 +1135,7 @@ ValidateNetlinkCmd(UINT32 devOp,
 
             /* Validate the DP for commands that require a DP. */
             if (nlFamilyOps->cmds[i].validateDpIndex == TRUE) {
-                if (ovsMsg->ovsHdr.dp_ifindex !=
-                                          (INT)gOvsSwitchContext->dpNo) {
+                if (datapath == NULL) {
                     status = STATUS_INVALID_PARAMETER;
                     goto done;
                 }
@@ -1297,6 +1316,8 @@ OvsDpFillInfo(POVS_SWITCH_CONTEXT ovsSwitchContext,
     writeOk = NlMsgPutHead(nlBuf, (PCHAR)&msgOutTmp, sizeof msgOutTmp);
     if (writeOk) {
         writeOk = NlMsgPutTailString(nlBuf, OVS_DP_ATTR_NAME,
+                                     ovsSwitchContext->dpGuidName[0] ?
+                                     ovsSwitchContext->dpGuidName :
                                      OVS_SYSTEM_DP_NAME);
     }
     if (writeOk) {
@@ -1470,6 +1491,8 @@ HandleGetDpDump(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         NL_BUFFER nlBuf;
         NTSTATUS status;
         POVS_MESSAGE msgIn = instance->dumpState.ovsMsg;
+        POVS_SWITCH_CONTEXT switchContext;
+        UINT32 nextSlot = 0;
 
         ASSERT(usrParamsCtx->devOp == OVS_READ_DEV_OP);
 
@@ -1478,16 +1501,26 @@ HandleGetDpDump(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
             return STATUS_INVALID_DEVICE_STATE;
         }
 
-        /* Dump state must have been deleted after previous dump operation. */
-        ASSERT(instance->dumpState.index[0] == 0);
-
         /* Output buffer has been validated while validating read dev op. */
         ASSERT(msgOut != NULL && usrParamsCtx->outputLength >= sizeof *msgOut);
+
+        /*
+         * 'index[0]' is the registry slot at which to resume the scan. Emit the
+         * next live datapath as one record; an empty reply signals the end.
+         */
+        switchContext = OvsAcquireNextDatapath(instance->dumpState.index[0],
+                                               &nextSlot);
+        if (switchContext == NULL) {
+            *replyLen = 0;
+            FreeUserDumpState(instance);
+            return STATUS_SUCCESS;
+        }
 
         NlBufInit(&nlBuf, usrParamsCtx->outputBuffer,
                   usrParamsCtx->outputLength);
 
-        status = OvsDpFillInfo(gOvsSwitchContext, msgIn, &nlBuf);
+        status = OvsDpFillInfo(switchContext, msgIn, &nlBuf);
+        OvsReleaseSwitchContext(switchContext);
 
         if (status != STATUS_SUCCESS) {
             *replyLen = 0;
@@ -1495,12 +1528,8 @@ HandleGetDpDump(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
             return status;
         }
 
-        /* Increment the dump index. */
-        instance->dumpState.index[0] = 1;
+        instance->dumpState.index[0] = nextSlot;
         *replyLen = msgOut->nlMsg.nlmsgLen;
-
-        /* Free up the dump state, since there's no more data to continue. */
-        FreeUserDumpState(instance);
     }
 
     return STATUS_SUCCESS;
@@ -1537,6 +1566,7 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     NTSTATUS status = STATUS_SUCCESS;
     NL_BUFFER nlBuf;
     NL_ERROR nlError = NL_ERROR_SUCCESS;
+    POVS_SWITCH_CONTEXT switchContext = usrParamsCtx->switchContext;
     static const NL_POLICY ovsDatapathSetPolicy[] = {
         [OVS_DP_ATTR_NAME] = { .type = NL_A_STRING, .maxLen = IFNAMSIZ },
         [OVS_DP_ATTR_UPCALL_PID] = { .type = NL_A_U32, .optional = TRUE },
@@ -1576,6 +1606,13 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     NlBufInit(&nlBuf, usrParamsCtx->outputBuffer, usrParamsCtx->outputLength);
 
+    /* The request's dp_ifindex was resolved to switchContext in
+     * OvsDeviceControl; a NULL context means no such datapath. */
+    if (switchContext == NULL) {
+        nlError = NL_ERROR_NODEV;
+        goto cleanup;
+    }
+
     if (dpAttrs[OVS_DP_ATTR_NAME] != NULL) {
         if (!OvsCompareString(NlAttrGet(dpAttrs[OVS_DP_ATTR_NAME]),
                               OVS_SYSTEM_DP_NAME)) {
@@ -1589,9 +1626,6 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
             nlError = NL_ERROR_NODEV;
             goto cleanup;
         }
-    } else if ((UINT32)msgIn->ovsHdr.dp_ifindex != gOvsSwitchContext->dpNo) {
-        nlError = NL_ERROR_NODEV;
-        goto cleanup;
     }
 
     if (usrParamsCtx->ovsMsg->genlMsg.cmd == OVS_DP_CMD_NEW) {
@@ -1599,7 +1633,7 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         goto cleanup;
     }
 
-    status = OvsDpFillInfo(gOvsSwitchContext, msgIn, &nlBuf);
+    status = OvsDpFillInfo(switchContext, msgIn, &nlBuf);
 
     *replyLen = NlBufSize(&nlBuf);
 
@@ -1715,7 +1749,7 @@ OvsPortFillInfo(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         ASSERT(FALSE);
         return STATUS_UNSUCCESSFUL;
     }
-    msgOutTmp.ovsHdr.dp_ifindex = gOvsSwitchContext->dpNo;
+    msgOutTmp.ovsHdr.dp_ifindex = eventEntry->dpNo;
 
     ok = NlMsgPutHead(nlBuf, (PCHAR)&msgOutTmp, sizeof msgOutTmp);
     if (!ok) {
@@ -1905,7 +1939,7 @@ OvsSockPropCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if(!NlFillOvsMsg(&nlBuf, msgIn->nlMsg.nlmsgType, NLM_F_MULTI,
                       msgIn->nlMsg.nlmsgSeq, msgIn->nlMsg.nlmsgPid,
                       msgIn->genlMsg.cmd, msgIn->genlMsg.version,
-                      gOvsSwitchContext->dpNo)){
+                      msgIn->ovsHdr.dp_ifindex)){
         return STATUS_INVALID_BUFFER_SIZE;
     }
 

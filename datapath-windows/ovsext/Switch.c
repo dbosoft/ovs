@@ -38,7 +38,6 @@
 #include "Debug.h"
 
 POVS_SWITCH_CONTEXT gOvsSwitchContext;
-LONG volatile gOvsInAttach;
 UINT64 ovsTimeIncrementPerTick;
 
 extern NDIS_HANDLE gOvsExtDriverHandle;
@@ -46,10 +45,25 @@ extern NDIS_HANDLE gOvsExtDriverObject;
 extern PDEVICE_OBJECT gOvsDeviceObject;
 
 /*
- * Reference count used to prevent premature deallocation of the global switch
- * context structure, gOvsSwitchContext.
+ * Datapath registry: each attached Hyper-V switch is a datapath, addressed by
+ * its datapath number (dpNo), which is the slot index in 'gOvsDatapaths'.
+ * 'gOvsDatapathLock' serializes registration, lookup and the reference taken
+ * during lookup. 'gOvsSwitchContext' points at the default (first) datapath,
+ * which still backs the paths that have no dp_ifindex of their own.
  */
-volatile LONG      gOvsSwitchContextRefCount = 0;
+#define OVS_MAX_DATAPATHS 16
+POVS_SWITCH_CONTEXT gOvsDatapaths[OVS_MAX_DATAPATHS];
+NDIS_SPIN_LOCK     gOvsDatapathLock;
+
+/*
+ * The upcall pid hash maps a globally-unique handle pid to its open instance.
+ * Pids are allocated from a single driver-wide counter, so the hash is a
+ * driver-global resource (lifetime = driver load), not per-switch: this keeps
+ * it intact when the default datapath detaches and 'gOvsSwitchContext' is
+ * promoted to another datapath. See User.c.
+ */
+PLIST_ENTRY        gOvsPidHashArray;
+NDIS_SPIN_LOCK     gOvsPidHashLock;
 
 static NDIS_STATUS OvsCreateSwitch(NDIS_HANDLE ndisFilterHandle,
                                    POVS_SWITCH_CONTEXT *switchContextOut);
@@ -92,28 +106,8 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
         goto cleanup;
     }
 
-    if (gOvsSwitchContext) {
-        OVS_LOG_TRACE("Exit: Failed to create OVS Switch, only one datapath is"
-                      "supported, %p.", gOvsSwitchContext);
-        goto cleanup;
-    }
-
-    if (InterlockedCompareExchange(&gOvsInAttach, 1, 0)) {
-        /* Just fail the request. */
-        OVS_LOG_TRACE("Exit: Failed to create OVS Switch, since another attach"
-                      "instance is in attach process.");
-        goto cleanup;
-    }
-
-    status = OvsInitIpHelper(ndisFilterHandle);
-    if (status != STATUS_SUCCESS) {
-        OVS_LOG_ERROR("Exit: Failed to initialize IP helper.");
-        goto cleanup;
-    }
-
     status = OvsCreateSwitch(ndisFilterHandle, &switchContext);
     if (status != NDIS_STATUS_SUCCESS) {
-        OvsCleanupIpHelper();
         goto cleanup;
     }
     ASSERT(switchContext);
@@ -132,7 +126,6 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
     status = NdisFSetAttributes(ndisFilterHandle, switchContext, &ovsExtAttributes);
     if (status != NDIS_STATUS_SUCCESS) {
         OVS_LOG_ERROR("Failed to set attributes.");
-        OvsCleanupIpHelper();
         goto cleanup;
     }
 
@@ -140,12 +133,9 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
     switchContext->controlFlowState = OvsSwitchAttached;
     switchContext->dataFlowState = OvsSwitchPaused;
 
-    gOvsSwitchContextRefCount = 1;
-    gOvsSwitchContext = switchContext;
-    KeMemoryBarrier();
+    OvsRegisterDatapath(switchContext);
 
 cleanup:
-    InterlockedExchange(&gOvsInAttach, 0);
     if (status != NDIS_STATUS_SUCCESS) {
         if (switchContext != NULL) {
             OvsDeleteSwitch(switchContext);
@@ -209,46 +199,6 @@ OvsCreateSwitch(NDIS_HANDLE ndisFilterHandle,
         goto create_switch_done;
     }
 
-    status = OvsInitTunnelFilter(gOvsExtDriverObject, gOvsDeviceObject);
-    if (status != NDIS_STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        goto create_switch_done;
-    }
-
-    status = OvsInitConntrack(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Connection tracking");
-        goto create_switch_done;
-    }
-
-    status = OvsInitCtRelated(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Connection tracking");
-    }
-
-    status = OvsInitIpFragment(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Ip Fragment");
-        goto create_switch_done;
-    }
-
-    status = OvsInitIp6Fragment(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Ip6 Fragment");
-        goto create_switch_done;
-    }
-    
-    status = OvsInitMeter(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Ovs meter.");
-        goto create_switch_done;
-    }
-
     *switchContextOut = switchContext;
 
 create_switch_done:
@@ -277,11 +227,6 @@ OvsExtDetach(NDIS_HANDLE filterModuleContext)
         NdisMSleep(1000);
     }
     OvsDeleteSwitch(switchContext);
-    OvsCleanupIpHelper();
-    OvsCleanupConntrack();
-    OvsCleanupCtRelated();
-    OvsCleanupIpFragment();
-    OvsCleanupIp6Fragment();
 
     /* This completes the cleanup, and a new attach can be handled now. */
 
@@ -306,7 +251,7 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
     {
         dpNo = switchContext->dpNo;
         OvsClearAllSwitchVports(switchContext);
-        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsUnregisterDatapath(switchContext);
         OvsUninitSwitchContext(switchContext);
     }
     OVS_LOG_TRACE("Exit: deleted switch %p  dpNo: %d", switchContext, dpNo);
@@ -405,8 +350,6 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
         sizeof(LIST_ENTRY) * OVS_MAX_VPORT_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
     switchContext->portIdHashArray= (PLIST_ENTRY)OvsAllocateMemoryWithTag(
         sizeof(LIST_ENTRY) * OVS_MAX_VPORT_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
-    switchContext->pidHashArray = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
-        sizeof(LIST_ENTRY) * OVS_MAX_PID_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
     switchContext->tunnelVportsArray = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
         sizeof(LIST_ENTRY) * OVS_MAX_VPORT_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
     status = OvsAllocateFlowTable(&switchContext->datapath, switchContext);
@@ -419,7 +362,6 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
         switchContext->portNoHashArray == NULL ||
         switchContext->ovsPortNameHashArray == NULL ||
         switchContext->portIdHashArray== NULL ||
-        switchContext->pidHashArray == NULL ||
         switchContext->tunnelVportsArray == NULL) {
         if (switchContext->dispatchLock) {
             NdisFreeRWLock(switchContext->dispatchLock);
@@ -434,10 +376,6 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
         }
         if (switchContext->portIdHashArray) {
             OvsFreeMemoryWithTag(switchContext->portIdHashArray,
-                                 OVS_SWITCH_POOL_TAG);
-        }
-        if (switchContext->pidHashArray) {
-            OvsFreeMemoryWithTag(switchContext->pidHashArray,
                                  OVS_SWITCH_POOL_TAG);
         }
 
@@ -459,14 +397,9 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
         InitializeListHead(&switchContext->tunnelVportsArray[i]);
     }
 
-    for (i = 0; i < OVS_MAX_PID_ARRAY_SIZE; i++) {
-        InitializeListHead(&switchContext->pidHashArray[i]);
-    }
-
-    NdisAllocateSpinLock(&(switchContext->pidHashLock));
     switchContext->isActivated = FALSE;
     switchContext->isActivateFailed = FALSE;
-    switchContext->dpNo = OVS_DP_NUMBER;
+    switchContext->refCount = 1;
     ovsTimeIncrementPerTick = KeQueryTimeIncrement() / 10000;
 
     OVS_LOG_TRACE("Exit: Succesfully initialized switchContext: %p",
@@ -496,7 +429,6 @@ OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 
     NdisFreeRWLock(switchContext->dispatchLock);
     switchContext->dispatchLock = NULL;
-    NdisFreeSpinLock(&(switchContext->pidHashLock));
     OvsFreeMemoryWithTag(switchContext->ovsPortNameHashArray,
                          OVS_SWITCH_POOL_TAG);
     switchContext->ovsPortNameHashArray = NULL;
@@ -506,9 +438,6 @@ OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
     OvsFreeMemoryWithTag(switchContext->portNoHashArray,
                          OVS_SWITCH_POOL_TAG);
     switchContext->portNoHashArray = NULL;
-    OvsFreeMemoryWithTag(switchContext->pidHashArray,
-                         OVS_SWITCH_POOL_TAG);
-    switchContext->pidHashArray = NULL;
     OvsFreeMemory(switchContext->tunnelVportsArray);
     switchContext->tunnelVportsArray = NULL;
     OvsDeleteFlowTable(&switchContext->datapath);
@@ -521,45 +450,174 @@ OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 VOID
 OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 {
-    LONG ref = 0;
-    LONG newRef = 0;
-    LONG icxRef = 0;
+    if (switchContext == NULL) {
+        return;
+    }
 
-    do {
-        ref = InterlockedAdd(&gOvsSwitchContextRefCount, 0);
-        newRef = (0 == ref) ? 0 : ref - 1;
-        icxRef = InterlockedCompareExchange(&gOvsSwitchContextRefCount,
-                                            newRef,
-                                            ref);
-    } while (icxRef != ref);
-
-    if (ref == 1) {
+    if (InterlockedDecrement(&switchContext->refCount) == 0) {
         OvsDeleteSwitchContext(switchContext);
-        gOvsSwitchContext = NULL;
     }
 }
 
-BOOLEAN
+/*
+ *  Returns the default datapath's switch context with a reference held (release
+ *  it with OvsReleaseSwitchContext), or NULL if no datapath is registered. Used
+ *  by request paths that carry no dp_ifindex of their own.
+ */
+POVS_SWITCH_CONTEXT
 OvsAcquireSwitchContext(VOID)
 {
-    LONG ref = 0;
-    LONG newRef = 0;
-    LONG icxRef = 0;
-    BOOLEAN ret = FALSE;
+    POVS_SWITCH_CONTEXT switchContext;
 
-    do {
-        ref = InterlockedAdd(&gOvsSwitchContextRefCount, 0);
-        newRef = (0 == ref) ? 0 : ref + 1;
-        icxRef = InterlockedCompareExchange(&gOvsSwitchContextRefCount,
-                                            newRef,
-                                            ref);
-    } while (icxRef != ref);
-
-    if (ref != 0) {
-        ret = TRUE;
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    switchContext = gOvsSwitchContext;
+    if (switchContext != NULL) {
+        InterlockedIncrement(&switchContext->refCount);
     }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
 
-    return ret;
+    return switchContext;
+}
+
+/*
+ * --------------------------------------------------------------------------
+ *  Datapath registry: maps a datapath number (dpNo) to its switch context.
+ * --------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsInitDatapathRegistry(VOID)
+{
+    UINT32 i;
+
+    NdisAllocateSpinLock(&gOvsDatapathLock);
+    RtlZeroMemory(gOvsDatapaths, sizeof gOvsDatapaths);
+
+    /* The upcall pid hash is driver-global (see the declaration comment). */
+    gOvsPidHashArray = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
+        sizeof(LIST_ENTRY) * OVS_MAX_PID_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
+    if (gOvsPidHashArray == NULL) {
+        /* gOvsDatapathLock is owned by OvsCleanupDatapathRegistry, which runs on
+         * the failed-OvsInit cleanup path; do not free it here (double-free). */
+        return NDIS_STATUS_RESOURCES;
+    }
+    for (i = 0; i < OVS_MAX_PID_ARRAY_SIZE; i++) {
+        InitializeListHead(&gOvsPidHashArray[i]);
+    }
+    NdisAllocateSpinLock(&gOvsPidHashLock);
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+VOID
+OvsCleanupDatapathRegistry(VOID)
+{
+    if (gOvsPidHashArray != NULL) {
+        NdisFreeSpinLock(&gOvsPidHashLock);
+        OvsFreeMemoryWithTag(gOvsPidHashArray, OVS_SWITCH_POOL_TAG);
+        gOvsPidHashArray = NULL;
+    }
+    NdisFreeSpinLock(&gOvsDatapathLock);
+}
+
+VOID
+OvsRegisterDatapath(POVS_SWITCH_CONTEXT switchContext)
+{
+    UINT32 i;
+
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    for (i = 0; i < OVS_MAX_DATAPATHS; i++) {
+        if (gOvsDatapaths[i] == NULL) {
+            gOvsDatapaths[i] = switchContext;
+            switchContext->dpNo = i;
+            break;
+        }
+    }
+    if (i == OVS_MAX_DATAPATHS) {
+        OVS_LOG_ERROR("Datapath registry full, cannot register %p",
+                      switchContext);
+        ASSERT(FALSE);
+    } else if (gOvsSwitchContext == NULL) {
+        gOvsSwitchContext = switchContext;
+    }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
+}
+
+VOID
+OvsUnregisterDatapath(POVS_SWITCH_CONTEXT switchContext)
+{
+    UINT32 i;
+
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    for (i = 0; i < OVS_MAX_DATAPATHS; i++) {
+        if (gOvsDatapaths[i] == switchContext) {
+            gOvsDatapaths[i] = NULL;
+            break;
+        }
+    }
+    if (gOvsSwitchContext == switchContext) {
+        /*
+         * The default datapath is detaching: promote the next live datapath so
+         * 'gOvsSwitchContext' never dangles while any datapath remains (the
+         * dp_ifindex-less request/packet paths anchor on it). The detaching slot
+         * was cleared above, so the scan never re-selects it. NULL only when no
+         * datapath is left. The pid hash is global, so promotion is safe.
+         */
+        gOvsSwitchContext = NULL;
+        for (i = 0; i < OVS_MAX_DATAPATHS; i++) {
+            if (gOvsDatapaths[i] != NULL) {
+                gOvsSwitchContext = gOvsDatapaths[i];
+                break;
+            }
+        }
+    }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
+
+    /*
+     * Removing the context from the registry stops new lookups from finding it.
+     * The owning reference is dropped by the OvsUninitSwitchContext that follows
+     * in OvsDeleteSwitch; in-flight lookups that already hold a reference keep
+     * the context alive until they release it.
+     */
+}
+
+/*
+ *  Returns the switch context for datapath number 'dpNo' with a reference held
+ *  (release it with OvsReleaseSwitchContext), or NULL if no such datapath
+ *  exists.
+ */
+POVS_SWITCH_CONTEXT
+OvsAcquireDatapathByNumber(UINT32 dpNo)
+{
+    POVS_SWITCH_CONTEXT switchContext = NULL;
+
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    if (dpNo < OVS_MAX_DATAPATHS && gOvsDatapaths[dpNo] != NULL) {
+        switchContext = gOvsDatapaths[dpNo];
+        InterlockedIncrement(&switchContext->refCount);
+    }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
+
+    return switchContext;
+}
+
+POVS_SWITCH_CONTEXT
+OvsAcquireNextDatapath(UINT32 startSlot, UINT32 *nextSlot)
+{
+    POVS_SWITCH_CONTEXT switchContext = NULL;
+    UINT32 i;
+
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    for (i = startSlot; i < OVS_MAX_DATAPATHS; i++) {
+        if (gOvsDatapaths[i] != NULL) {
+            switchContext = gOvsDatapaths[i];
+            InterlockedIncrement(&switchContext->refCount);
+            *nextSlot = i + 1;
+            break;
+        }
+    }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
+
+    return switchContext;
 }
 
 /*
@@ -582,6 +640,8 @@ OvsActivateSwitch(POVS_SWITCH_CONTEXT switchContext)
 
     OVS_LOG_TRACE("Enter: activate switch %p, dpNo: %ld",
                   switchContext, switchContext->dpNo);
+
+    OvsCaptureSwitchName(switchContext);
 
     status = OvsAddConfiguredSwitchPorts(switchContext);
 
