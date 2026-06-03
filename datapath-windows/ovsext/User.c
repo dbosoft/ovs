@@ -344,7 +344,7 @@ OvsNlExecuteCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     _MapNlAttrToOvsPktExec(nlMsgHdr, nlAttrs, keyAttrs, &execute);
 
-    status = OvsExecuteDpIoctl(&execute);
+    status = OvsExecuteDpIoctl(&execute, usrParamsCtx->switchContext);
 
     /* Default reply that we want to send */
     if (status == STATUS_SUCCESS) {
@@ -418,7 +418,7 @@ _MapNlAttrToOvsPktExec(PNL_MSG_HDR nlMsgHdr, PNL_ATTR *nlAttrs,
 }
 
 NTSTATUS
-OvsExecuteDpIoctl(OvsPacketExecute *execute)
+OvsExecuteDpIoctl(OvsPacketExecute *execute, POVS_SWITCH_CONTEXT switchContext)
 {
     NTSTATUS                    status = STATUS_SUCCESS;
     NTSTATUS                    ndisStatus = STATUS_SUCCESS;
@@ -446,7 +446,7 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
      * Allocate the NBL, copy the data from the userspace buffer. Allocate
      * also, the forwarding context for the packet.
      */
-    pNbl = OvsAllocateNBLFromBuffer(gOvsSwitchContext, execute->packetBuf,
+    pNbl = OvsAllocateNBLFromBuffer(switchContext, execute->packetBuf,
                                     execute->packetLen);
     if (pNbl == NULL) {
         status = STATUS_NO_MEMORY;
@@ -496,8 +496,8 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
     ctx->mru = execute->mru;
 
     if (ndisStatus == NDIS_STATUS_SUCCESS) {
-        NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState, 0);
-        vport = OvsFindVportByPortNo(gOvsSwitchContext, execute->inPort);
+        NdisAcquireRWLockRead(switchContext->dispatchLock, &lockState, 0);
+        vport = OvsFindVportByPortNo(switchContext, execute->inPort);
         if (vport) {
             fwdDetail->SourcePortId = vport->portId;
             fwdDetail->SourceNicIndex = vport->nicIndex;
@@ -505,14 +505,14 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
             fwdDetail->SourcePortId = NDIS_SWITCH_DEFAULT_PORT_ID;
             fwdDetail->SourceNicIndex = 0;
         }
-        ndisStatus = OvsActionsExecute(gOvsSwitchContext, NULL, pNbl,
+        ndisStatus = OvsActionsExecute(switchContext, NULL, pNbl,
                                        vport ? vport->portNo :
                                                OVS_DPPORT_NUMBER_INVALID,
                                        NDIS_SEND_FLAGS_SWITCH_DESTINATION_GROUP,
                                        &key, NULL, &layers, actions,
                                        execute->actionsLen);
         pNbl = NULL;
-        NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
+        NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
     }
     if (ndisStatus != NDIS_STATUS_SUCCESS) {
         if (ndisStatus == NDIS_STATUS_NOT_SUPPORTED) {
@@ -524,7 +524,7 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
 
 dropit:
     if (pNbl) {
-        OvsCompleteNBL(gOvsSwitchContext, pNbl, TRUE);
+        OvsCompleteNBL(switchContext, pNbl, TRUE);
     }
 exit:
     return status;
