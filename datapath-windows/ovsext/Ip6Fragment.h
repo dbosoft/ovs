@@ -101,7 +101,7 @@ NDIS_STATUS OvsStorageIpv6ExtHeader(POVS_IP6FRAG_ENTRY entry,
                                     UINT16 priorFragEleOffset,
                                     CHAR *pktBuf,
                                     POVS_PACKET_HDR_INFO layers);
-NDIS_STATUS OvsInitIp6Fragment(POVS_SWITCH_CONTEXT context);
+NDIS_STATUS OvsInitIp6Fragment(NDIS_HANDLE ndisFilterHandle);
 VOID OvsCleanupIp6Fragment(VOID);
 NDIS_STATUS OvsGetPacketMeta(PIP6_PktExtHeader_Meta pktMeta, EthHdr *eth,
                              OvsFlowKey *key, POVS_PACKET_HDR_INFO layers);

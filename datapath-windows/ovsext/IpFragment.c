@@ -41,14 +41,14 @@ static UINT64 ipTotalEntries;
 static PLIST_ENTRY OvsIpFragTable;
 
 NDIS_STATUS
-OvsInitIpFragment(POVS_SWITCH_CONTEXT context)
+OvsInitIpFragment(NDIS_HANDLE ndisFilterHandle)
 {
 
     NDIS_STATUS status;
     HANDLE threadHandle = NULL;
 
     /* Init the sync-lock */
-    ovsIpFragmentHashLockObj = NdisAllocateRWLock(context->NdisFilterHandle);
+    ovsIpFragmentHashLockObj = NdisAllocateRWLock(ndisFilterHandle);
     if (ovsIpFragmentHashLockObj == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -503,6 +503,10 @@ OvsCleanupIpFragment(VOID)
     PLIST_ENTRY link, next;
     POVS_IPFRAG_ENTRY entry;
     LOCK_STATE_EX lockState;
+
+    if (ipFragThreadCtx.threadObject == NULL) {
+        return;
+    }
 
     ipFragThreadCtx.exit = 1;
     KeSetEvent(&ipFragThreadCtx.event, 0, FALSE);

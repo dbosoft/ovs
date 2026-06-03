@@ -127,13 +127,13 @@ OvsIp6FragmentEntryCleaner(PVOID data)
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
-NDIS_STATUS OvsInitIp6Fragment(POVS_SWITCH_CONTEXT context)
+NDIS_STATUS OvsInitIp6Fragment(NDIS_HANDLE ndisFilterHandle)
 {
     NDIS_STATUS status;
     HANDLE threadHandle = NULL;
 
     OVS_LOG_INFO("Init ipv6 fragment.");
-    ovsIp6FragmentHashLockObj = NdisAllocateRWLock(context->NdisFilterHandle);
+    ovsIp6FragmentHashLockObj = NdisAllocateRWLock(ndisFilterHandle);
     if (ovsIp6FragmentHashLockObj == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -206,6 +206,10 @@ VOID OvsCleanupIp6Fragment(VOID)
     PLIST_ENTRY link, next;
     POVS_IP6FRAG_ENTRY entry;
     LOCK_STATE_EX lockState;
+
+    if (ip6FragThreadCtx.threadObject == NULL) {
+        return;
+    }
 
     ip6FragThreadCtx.exit = 1;
     KeSetEvent(&ip6FragThreadCtx.event, 0, FALSE);

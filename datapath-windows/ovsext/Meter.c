@@ -51,11 +51,11 @@ const NL_POLICY bandPolicy[OVS_BAND_ATTR_MAX + 1] = {
 };
 
 NTSTATUS
-OvsInitMeter(POVS_SWITCH_CONTEXT context)
+OvsInitMeter(NDIS_HANDLE ndisFilterHandle)
 {
     UINT32 maxEntry = METER_HASH_BUCKET_MAX;
 
-    meterGlobalTableLock = NdisAllocateRWLock(context->NdisFilterHandle);
+    meterGlobalTableLock = NdisAllocateRWLock(ndisFilterHandle);
     if (meterGlobalTableLock == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -64,6 +64,7 @@ OvsInitMeter(POVS_SWITCH_CONTEXT context)
                                                 OVS_METER_TAG);
     if (!meterGlobalTable) {
         NdisFreeRWLock(meterGlobalTableLock);
+        meterGlobalTableLock = NULL;
         return NDIS_STATUS_RESOURCES;
     }
 
@@ -72,6 +73,20 @@ OvsInitMeter(POVS_SWITCH_CONTEXT context)
     }
 
     return NDIS_STATUS_SUCCESS;
+}
+
+VOID
+OvsCleanupMeter(VOID)
+{
+    if (meterGlobalTableLock == NULL) {
+        return;
+    }
+    if (meterGlobalTable) {
+        OvsFreeMemoryWithTag(meterGlobalTable, OVS_METER_TAG);
+        meterGlobalTable = NULL;
+    }
+    NdisFreeRWLock(meterGlobalTableLock);
+    meterGlobalTableLock = NULL;
 }
 
 NDIS_STATUS

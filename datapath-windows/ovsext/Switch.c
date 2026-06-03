@@ -207,40 +207,6 @@ OvsCreateSwitch(NDIS_HANDLE ndisFilterHandle,
         goto create_switch_done;
     }
 
-    status = OvsInitConntrack(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Connection tracking");
-        goto create_switch_done;
-    }
-
-    status = OvsInitCtRelated(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Connection tracking");
-    }
-
-    status = OvsInitIpFragment(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Ip Fragment");
-        goto create_switch_done;
-    }
-
-    status = OvsInitIp6Fragment(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Ip6 Fragment");
-        goto create_switch_done;
-    }
-    
-    status = OvsInitMeter(switchContext);
-    if (status != STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        OVS_LOG_ERROR("Exit: Failed to initialize Ovs meter.");
-        goto create_switch_done;
-    }
-
     *switchContextOut = switchContext;
 
 create_switch_done:
@@ -269,10 +235,6 @@ OvsExtDetach(NDIS_HANDLE filterModuleContext)
         NdisMSleep(1000);
     }
     OvsDeleteSwitch(switchContext);
-    OvsCleanupConntrack();
-    OvsCleanupCtRelated();
-    OvsCleanupIpFragment();
-    OvsCleanupIp6Fragment();
 
     /* This completes the cleanup, and a new attach can be handled now. */
 

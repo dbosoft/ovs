@@ -70,6 +70,6 @@ NDIS_STATUS OvsProcessIpv4Fragment(POVS_SWITCH_CONTEXT switchContext,
                                    NDIS_SWITCH_PORT_ID sourcePort,
                                    POVS_PACKET_HDR_INFO layers,
                                    ovs_be64 tunnelId);
-NDIS_STATUS OvsInitIpFragment(POVS_SWITCH_CONTEXT context);
+NDIS_STATUS OvsInitIpFragment(NDIS_HANDLE ndisFilterHandle);
 VOID OvsCleanupIpFragment(VOID);
 #endif /* __IPFRAGMENT_H_ */

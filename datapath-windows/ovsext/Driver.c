@@ -19,6 +19,10 @@
 #include "User.h"
 #include "Datapath.h"
 #include "IpHelper.h"
+#include "Conntrack.h"
+#include "IpFragment.h"
+#include "Ip6Fragment.h"
+#include "Meter.h"
 
 #ifdef OVS_DBG_MOD
 #undef OVS_DBG_MOD
@@ -188,6 +192,71 @@ DriverEntry(PDRIVER_OBJECT driverObject,
         goto cleanup;
     }
 
+    /*
+     * Conntrack, connection-tracking helpers, IPv4/IPv6 fragment reassembly and
+     * the meter table are host-global subsystems (static tables and cleaner
+     * threads), so they are set up once at driver load rather than per attach.
+     */
+    status = OvsInitConntrack(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    status = OvsInitCtRelated(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupConntrack();
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    status = OvsInitIpFragment(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupCtRelated();
+        OvsCleanupConntrack();
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    status = OvsInitIp6Fragment(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupIpFragment();
+        OvsCleanupCtRelated();
+        OvsCleanupConntrack();
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+    status = OvsInitMeter(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsCleanupIp6Fragment();
+        OvsCleanupIpFragment();
+        OvsCleanupCtRelated();
+        OvsCleanupConntrack();
+        OvsCleanupIpHelper();
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
 cleanup:
     if (status != NDIS_STATUS_SUCCESS){
         OvsCleanup();
@@ -214,10 +283,15 @@ OvsExtUnload(struct _DRIVER_OBJECT *driverObject)
     OvsUninitTunnelFilter(gOvsExtDriverObject);
 
     /*
-     * Tear down the IP helper (set up once in DriverEntry) before the
-     * filter-driver registration whose handle its lock was allocated against.
+     * Tear down the driver-load-scoped subsystems before the filter-driver
+     * registration whose handle their locks were allocated against.
      */
     OvsCleanupIpHelper();
+    OvsCleanupMeter();
+    OvsCleanupIp6Fragment();
+    OvsCleanupIpFragment();
+    OvsCleanupCtRelated();
+    OvsCleanupConntrack();
 
     OvsDeleteDeviceObject();
 
