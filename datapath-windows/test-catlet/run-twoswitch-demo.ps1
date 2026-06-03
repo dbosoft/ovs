@@ -69,7 +69,7 @@ foreach ($name in $targets.Keys) {
 }
 
 "=== flows on switch-1 datapath (forwarding evidence) ==="
-& $dpctl dump-flows "windows@$DP1" 2>&1 | Select-Object -First 6
+& $dpctl dump-flows "${DP1}@ovs-system" 2>&1 | Select-Object -First 6
 
 "=== driver state ==="
 (Get-CimInstance Win32_SystemDriver -Filter "Name='DBO_OVSE'").State

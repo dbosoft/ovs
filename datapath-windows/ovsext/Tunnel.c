@@ -215,6 +215,15 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
     OvsCompletionList completionList;
     KIRQL irql;
     ULONG SendFlags = NDIS_SEND_FLAGS_SWITCH_DESTINATION_GROUP;
+    /*
+     * VXLAN decap runs from a host-global WFP datagram callout that has no
+     * Hyper-V switch association, so tunnel termination is bound to the default
+     * datapath (gOvsSwitchContext): the tunnel-vport lookup, flow table and the
+     * miss upcall's dp_ifindex all use it. Overlay traffic across multiple
+     * datapaths is out of scope for the L2-only multi-datapath model -- it would
+     * need a cross-datapath tunnel-vport registry keyed by the outer tunnel
+     * identity (e.g. VNI), since the callout can only see the outer key.
+     */
     OVS_DATAPATH *datapath = &gOvsSwitchContext->datapath;
 
     ASSERT(gOvsSwitchContext);

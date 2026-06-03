@@ -70,11 +70,11 @@ Start-Sleep 4
 & $dpctl show 2>&1
 
 "=== 7. POST-PROMOTION: forwarding must continue + fresh upcall must work ==="
-& $dpctl del-flows "windows@$OVERLAY" 2>&1 | Out-Null   # force flow misses -> upcalls
+& $dpctl del-flows "${OVERLAY}@ovs-system" 2>&1 | Out-Null   # force flow misses -> upcalls
 Start-Sleep 1
 PingVMs $idx
 "--- flows re-installed by upcalls (forwarding evidence) ---"
-& $dpctl dump-flows "windows@$OVERLAY" 2>&1 | Select-Object -First 4
+& $dpctl dump-flows "${OVERLAY}@ovs-system" 2>&1 | Select-Object -First 4
 
 "=== 8. vswitchd RESTART after promotion (re-stamp pids on global hash) ==="
 Get-Process ovs-vswitchd -EA SilentlyContinue | Stop-Process -Force

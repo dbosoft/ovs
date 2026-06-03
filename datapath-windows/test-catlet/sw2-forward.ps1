@@ -28,7 +28,7 @@ try {
     Enable-NetAdapter -Name br-test2 -EA Continue
     Start-Sleep 3
     "=== dpctl show switch-2 datapath (must list br-test2 + ovs_ub2) ==="
-    & $dpctl show "windows@$DP2" 2>&1
+    & $dpctl show "${DP2}@ovs-system" 2>&1
 
     $ifIdx = (Get-NetAdapter -Name br-test2 -EA SilentlyContinue).ifIndex
     "br-test2 host ifIndex = $ifIdx"
@@ -37,7 +37,7 @@ try {
     "ping exit=$LASTEXITCODE"
 
     "=== flows on switch-2 datapath ==="
-    & $dpctl dump-flows "windows@$DP2" 2>&1 | Select-Object -First 6
+    & $dpctl dump-flows "${DP2}@ovs-system" 2>&1 | Select-Object -First 6
 }
 finally {
     "=== RESTORE: ub2 -> eryph_overlay ==="

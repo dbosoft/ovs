@@ -12,7 +12,7 @@
 #   ms-dp.ps1 info               switches + GUIDs + ext state + datapaths (copy the GUIDs from here)
 #   ms-dp.ps1 dpctl show         run ovs-dpctl with the env already set
 #   ms-dp.ps1 vsctl show         run ovs-vsctl  with the env already set
-#   ms-dp.ps1 dpctl dump-flows windows@<GUID>
+#   ms-dp.ps1 dpctl dump-flows <GUID>@ovs-system
 #   ms-dp.ps1 ping               ping ub1/ub2 link-local through br-int (switch 1)
 #   ms-dp.ps1 down               del bridges, stop daemons, disable the ovs-test2 ext
 #
@@ -144,7 +144,7 @@ Examples:
   ms-dp.ps1 info
   ms-dp.ps1 dpctl show
   ms-dp.ps1 vsctl show
-  ms-dp.ps1 dpctl dump-flows windows@<GUID-from-info>
+  ms-dp.ps1 dpctl dump-flows <GUID-from-info>@ovs-system
   ms-dp.ps1 vsctl -- add-br br3 -- set bridge br3 datapath_type=<GUID-from-info>
   ms-dp.ps1 ping
   ms-dp.ps1 down

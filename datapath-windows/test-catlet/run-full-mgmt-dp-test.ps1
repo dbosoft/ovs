@@ -65,11 +65,11 @@ Step "APPCTL: live daemon interaction"
 & $appctl --timeout=10 -t ovs-vswitchd vlog/list 2>&1 | Select-Object -First 2
 
 Step "DATAPATH (DRIVER): ovs-dpctl show + flow put/dump/del"
-& $dpctl show windows@ovs-system 2>&1
-& $dpctl add-flow windows@ovs-system "in_port(2),eth(),eth_type(0x0800),ipv4()" "1"; Write-Output "dp add-flow exit=$LASTEXITCODE"
-Write-Output "dump-flows (expect 1):"; & $dpctl dump-flows windows@ovs-system 2>&1
-& $dpctl del-flow windows@ovs-system "in_port(2),eth(),eth_type(0x0800),ipv4()"; Write-Output "dp del-flow exit=$LASTEXITCODE"
-Write-Output "dump-flows (expect empty):"; & $dpctl dump-flows windows@ovs-system 2>&1
+& $dpctl show system@ovs-system 2>&1
+& $dpctl add-flow system@ovs-system "in_port(2),eth(),eth_type(0x0800),ipv4()" "1"; Write-Output "dp add-flow exit=$LASTEXITCODE"
+Write-Output "dump-flows (expect 1):"; & $dpctl dump-flows system@ovs-system 2>&1
+& $dpctl del-flow system@ovs-system "in_port(2),eth(),eth_type(0x0800),ipv4()"; Write-Output "dp del-flow exit=$LASTEXITCODE"
+Write-Output "dump-flows (expect empty):"; & $dpctl dump-flows system@ovs-system 2>&1
 
 Step "LOGS: tails"
 Write-Output "--- ovsdb-server.log ---"; Get-Content "$run\ovsdb-server.log" -Tail 6 -EA SilentlyContinue
