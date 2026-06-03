@@ -1252,7 +1252,7 @@ InitOvsVportCommon(POVS_SWITCH_CONTEXT switchContext,
                              sizeof(dstPort),
                              OVS_HASH_BASIS);
         InsertHeadList(
-            &gOvsSwitchContext->tunnelVportsArray[hash & OVS_VPORT_MASK],
+            &switchContext->tunnelVportsArray[hash & OVS_VPORT_MASK],
             &vport->tunnelVportLink);
         switchContext->numNonHvVports++;
         break;
@@ -1268,13 +1268,13 @@ InitOvsVportCommon(POVS_SWITCH_CONTEXT switchContext,
      * portNo is stored in 2 bytes only (max port number = MAXUINT16).
      */
     hash = OvsJhashWords(&vport->portNo, 1, OVS_HASH_BASIS);
-    InsertHeadList(&gOvsSwitchContext->portNoHashArray[hash & OVS_VPORT_MASK],
+    InsertHeadList(&switchContext->portNoHashArray[hash & OVS_VPORT_MASK],
                    &vport->portNoLink);
 
     hash = OvsJhashBytes(vport->ovsName, strlen(vport->ovsName) + 1,
                          OVS_HASH_BASIS);
     InsertHeadList(
-        &gOvsSwitchContext->ovsPortNameHashArray[hash & OVS_VPORT_MASK],
+        &switchContext->ovsPortNameHashArray[hash & OVS_VPORT_MASK],
         &vport->ovsNameLink);
 
     return STATUS_SUCCESS;
