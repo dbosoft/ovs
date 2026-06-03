@@ -1310,6 +1310,8 @@ OvsDpFillInfo(POVS_SWITCH_CONTEXT ovsSwitchContext,
     writeOk = NlMsgPutHead(nlBuf, (PCHAR)&msgOutTmp, sizeof msgOutTmp);
     if (writeOk) {
         writeOk = NlMsgPutTailString(nlBuf, OVS_DP_ATTR_NAME,
+                                     ovsSwitchContext->dpGuidName[0] ?
+                                     ovsSwitchContext->dpGuidName :
                                      OVS_SYSTEM_DP_NAME);
     }
     if (writeOk) {

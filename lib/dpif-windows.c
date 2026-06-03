@@ -78,6 +78,12 @@ static struct vlog_rate_limit error_rl = VLOG_RATE_LIMIT_INIT(9999, 5);
  * the resolver buffers are sized accordingly. */
 #define OVS_DP_NAME_MAX 64
 
+/* The kernel addresses datapaths by dp_ifindex; for the OVS_DP_ATTR_NAME on the
+ * wire it accepts only this fixed name (any other is rejected with NODEV). We
+ * resolve the caller's name to a dp_ifindex via DP_DUMP, then target that
+ * dp_ifindex while sending this fixed name. */
+#define OVS_WINDOWS_KERNEL_DP_NAME "ovs-system"
+
 /* Upper bound on datapaths to enumerate when resolving a name; matches the
  * driver's OVS_MAX_DATAPATHS. */
 #define DPIF_WINDOWS_MAX_DPS 16
@@ -242,7 +248,7 @@ dpif_windows_dp_get(struct dpif_windows *dpif, struct dpif_windows_dp *reply,
     dpif_windows_dp_init(&request);
     request.cmd = OVS_DP_CMD_GET;
     request.dp_ifindex = dpif->dp_ifindex;
-    request.name = dpif->dp_name;
+    request.name = OVS_WINDOWS_KERNEL_DP_NAME;
 
     return dpif_windows_dp_transact(dpif, &request, reply, bufp);
 }
@@ -835,12 +841,24 @@ dpif_windows_enumerate(struct sset *all_dps,
     ovsext_dump_start(&dump, &channel, buf);
     ofpbuf_delete(buf);
 
+    bool any = false;
     while (ovsext_dump_next(&dump, &msg)) {
         struct dpif_windows_dp dp;
 
         if (!dpif_windows_dp_from_ofpbuf(&dp, &msg)) {
             sset_add(all_dps, dp.name);
+            any = true;
         }
+    }
+
+    /* The kernel now names each datapath by its switch GUID, but ofproto opens
+     * its backer as "ovs-<datapath_type>" and dp_exists() checks this set for
+     * "ovs-system"/"ovs-windows".  Keep those default aliases resolvable as long
+     * as at least one datapath exists; dpif_windows_open maps them to the
+     * lowest-numbered datapath. */
+    if (any) {
+        sset_add(all_dps, "ovs-windows");
+        sset_add(all_dps, "ovs-system");
     }
 
     error = ovsext_dump_done(&dump);
@@ -980,7 +998,7 @@ dpif_windows_open(const struct dpif_class *class, const char *name,
     dpif_windows_dp_init(&dp_request);
     upcall_pid = dpif->channel.pid;
     dp_request.upcall_pid = &upcall_pid;
-    dp_request.name = dp_name;
+    dp_request.name = OVS_WINDOWS_KERNEL_DP_NAME;
     dp_request.dp_ifindex = dp_ifindex;
     dp_request.cmd = create ? OVS_DP_CMD_NEW : OVS_DP_CMD_GET;
 
