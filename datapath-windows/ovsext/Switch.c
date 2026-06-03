@@ -215,12 +215,6 @@ OvsCreateSwitch(NDIS_HANDLE ndisFilterHandle,
         goto create_switch_done;
     }
 
-    status = OvsInitTunnelFilter(gOvsExtDriverObject, gOvsDeviceObject);
-    if (status != NDIS_STATUS_SUCCESS) {
-        OvsUninitSwitchContext(switchContext);
-        goto create_switch_done;
-    }
-
     status = OvsInitConntrack(switchContext);
     if (status != STATUS_SUCCESS) {
         OvsUninitSwitchContext(switchContext);
@@ -312,7 +306,6 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
     {
         dpNo = switchContext->dpNo;
         OvsClearAllSwitchVports(switchContext);
-        OvsUninitTunnelFilter(gOvsExtDriverObject);
         OvsUnregisterDatapath(switchContext);
         OvsUninitSwitchContext(switchContext);
     }

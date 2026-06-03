@@ -46,6 +46,7 @@ NDIS_HANDLE gOvsExtDriverHandle;
  * function.
  */
 extern POVS_SWITCH_CONTEXT gOvsSwitchContext;
+extern PDEVICE_OBJECT gOvsDeviceObject;
 
 static PWCHAR ovsExtFriendlyName = L"dbosoft Open vSwitch Extension";
 static PWCHAR ovsExtServiceName = L"DBO_OVSE";
@@ -160,6 +161,18 @@ DriverEntry(PDRIVER_OBJECT driverObject,
         goto cleanup;
     }
 
+    /*
+     * The tunnel WFP callouts are a host-global resource independent of any
+     * switch, so they are set up once at driver load rather than per attach.
+     */
+    status = OvsInitTunnelFilter(gOvsExtDriverObject, gOvsDeviceObject);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
 cleanup:
     if (status != NDIS_STATUS_SUCCESS){
         OvsCleanup();
@@ -178,6 +191,12 @@ VOID
 OvsExtUnload(struct _DRIVER_OBJECT *driverObject)
 {
     UNREFERENCED_PARAMETER(driverObject);
+
+    /*
+     * Tear down the tunnel WFP callouts (set up once in DriverEntry) before the
+     * NDIS device and filter-driver registration they were created against.
+     */
+    OvsUninitTunnelFilter(gOvsExtDriverObject);
 
     OvsDeleteDeviceObject();
 
