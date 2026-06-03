@@ -1637,7 +1637,7 @@ OvsGetExtInfoIoctl(POVS_VPORT_GET vportGet,
     NTSTATUS status = STATUS_SUCCESS;
     BOOLEAN doConvert = FALSE;
 
-    RtlZeroMemory(extInfo, sizeof (POVS_VPORT_EXT_INFO));
+    RtlZeroMemory(extInfo, sizeof (*extInfo));
     NdisAcquireRWLockRead(switchContext->dispatchLock, &lockState, 0);
     if (vportGet->portNo == 0) {
         vport = OvsFindVportByHvNameA(switchContext, vportGet->name);
