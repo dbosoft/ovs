@@ -230,4 +230,14 @@ OvsAcquireSwitchContext(VOID);
 VOID
 OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext);
 
+/* Datapath registry: maps a datapath number (dpNo) to its switch context. */
+VOID
+OvsRegisterDatapath(POVS_SWITCH_CONTEXT switchContext);
+
+VOID
+OvsUnregisterDatapath(POVS_SWITCH_CONTEXT switchContext);
+
+POVS_SWITCH_CONTEXT
+OvsAcquireDatapathByNumber(UINT32 dpNo);
+
 #endif /* __SWITCH_H_ */

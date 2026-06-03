@@ -140,9 +140,7 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
     switchContext->controlFlowState = OvsSwitchAttached;
     switchContext->dataFlowState = OvsSwitchPaused;
 
-    gOvsSwitchContextRefCount = 1;
-    gOvsSwitchContext = switchContext;
-    KeMemoryBarrier();
+    OvsRegisterDatapath(switchContext);
 
 cleanup:
     InterlockedExchange(&gOvsInAttach, 0);
@@ -307,6 +305,7 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
         dpNo = switchContext->dpNo;
         OvsClearAllSwitchVports(switchContext);
         OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsUnregisterDatapath(switchContext);
         OvsUninitSwitchContext(switchContext);
     }
     OVS_LOG_TRACE("Exit: deleted switch %p  dpNo: %d", switchContext, dpNo);
@@ -560,6 +559,57 @@ OvsAcquireSwitchContext(VOID)
     }
 
     return ret;
+}
+
+/*
+ * --------------------------------------------------------------------------
+ *  Datapath registry: maps a datapath number (dpNo) to its switch context.
+ * --------------------------------------------------------------------------
+ */
+VOID
+OvsRegisterDatapath(POVS_SWITCH_CONTEXT switchContext)
+{
+    ASSERT(gOvsSwitchContext == NULL);
+
+    gOvsSwitchContextRefCount = 1;
+    gOvsSwitchContext = switchContext;
+    KeMemoryBarrier();
+}
+
+VOID
+OvsUnregisterDatapath(POVS_SWITCH_CONTEXT switchContext)
+{
+    /*
+     * The context's storage is released by OvsReleaseSwitchContext when its
+     * last reference drops, so removing it from the registry needs no separate
+     * unlink and must not touch gOvsSwitchContextRefCount (doing so would
+     * double-release the context).
+     */
+    UNREFERENCED_PARAMETER(switchContext);
+}
+
+/*
+ *  Returns the switch context for datapath number 'dpNo' with a reference held
+ *  (release it with OvsReleaseSwitchContext), or NULL if no such datapath
+ *  exists.
+ */
+POVS_SWITCH_CONTEXT
+OvsAcquireDatapathByNumber(UINT32 dpNo)
+{
+    POVS_SWITCH_CONTEXT switchContext;
+
+    if (!OvsAcquireSwitchContext()) {
+        return NULL;
+    }
+
+    /* The held reference keeps the context and gOvsSwitchContext alive. */
+    switchContext = gOvsSwitchContext;
+    if (switchContext != NULL && switchContext->dpNo == dpNo) {
+        return switchContext;
+    }
+
+    OvsReleaseSwitchContext(switchContext);
+    return NULL;
 }
 
 /*
