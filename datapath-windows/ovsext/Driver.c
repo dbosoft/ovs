@@ -18,6 +18,7 @@
 #include "Switch.h"
 #include "User.h"
 #include "Datapath.h"
+#include "IpHelper.h"
 
 #ifdef OVS_DBG_MOD
 #undef OVS_DBG_MOD
@@ -173,6 +174,20 @@ DriverEntry(PDRIVER_OBJECT driverObject,
         goto cleanup;
     }
 
+    /*
+     * The IP helper (host route/neighbor tracking thread and notifications) is
+     * a host-global resource independent of any switch, so it is set up once at
+     * driver load rather than per attach.
+     */
+    status = OvsInitIpHelper(gOvsExtDriverHandle);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OvsUninitTunnelFilter(gOvsExtDriverObject);
+        OvsDeleteDeviceObject();
+        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
 cleanup:
     if (status != NDIS_STATUS_SUCCESS){
         OvsCleanup();
@@ -197,6 +212,12 @@ OvsExtUnload(struct _DRIVER_OBJECT *driverObject)
      * NDIS device and filter-driver registration they were created against.
      */
     OvsUninitTunnelFilter(gOvsExtDriverObject);
+
+    /*
+     * Tear down the IP helper (set up once in DriverEntry) before the
+     * filter-driver registration whose handle its lock was allocated against.
+     */
+    OvsCleanupIpHelper();
 
     OvsDeleteDeviceObject();
 

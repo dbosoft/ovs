@@ -113,15 +113,8 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
         goto cleanup;
     }
 
-    status = OvsInitIpHelper(ndisFilterHandle);
-    if (status != STATUS_SUCCESS) {
-        OVS_LOG_ERROR("Exit: Failed to initialize IP helper.");
-        goto cleanup;
-    }
-
     status = OvsCreateSwitch(ndisFilterHandle, &switchContext);
     if (status != NDIS_STATUS_SUCCESS) {
-        OvsCleanupIpHelper();
         goto cleanup;
     }
     ASSERT(switchContext);
@@ -140,7 +133,6 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
     status = NdisFSetAttributes(ndisFilterHandle, switchContext, &ovsExtAttributes);
     if (status != NDIS_STATUS_SUCCESS) {
         OVS_LOG_ERROR("Failed to set attributes.");
-        OvsCleanupIpHelper();
         goto cleanup;
     }
 
@@ -277,7 +269,6 @@ OvsExtDetach(NDIS_HANDLE filterModuleContext)
         NdisMSleep(1000);
     }
     OvsDeleteSwitch(switchContext);
-    OvsCleanupIpHelper();
     OvsCleanupConntrack();
     OvsCleanupCtRelated();
     OvsCleanupIpFragment();
