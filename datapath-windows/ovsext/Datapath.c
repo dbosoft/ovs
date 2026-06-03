@@ -482,8 +482,14 @@ OvsInit()
 
     gOvsCtrlLock = &ovsCtrlLockObj;
     NdisAllocateSpinLock(gOvsCtrlLock);
-    OvsInitDatapathRegistry();
+    /* Init the event queue before the (fallible) datapath registry so that the
+     * OvsCleanup() teardown on a registry-init failure is safe (it frees the
+     * event-queue locks unconditionally). */
     OvsInitEventQueue();
+    status = OvsInitDatapathRegistry();
+    if (status != NDIS_STATUS_SUCCESS) {
+        return status;
+    }
 
     status = OvsPerCpuDataInit();
 

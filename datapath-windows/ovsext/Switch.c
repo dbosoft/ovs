@@ -55,6 +55,16 @@ extern PDEVICE_OBJECT gOvsDeviceObject;
 POVS_SWITCH_CONTEXT gOvsDatapaths[OVS_MAX_DATAPATHS];
 NDIS_SPIN_LOCK     gOvsDatapathLock;
 
+/*
+ * The upcall pid hash maps a globally-unique handle pid to its open instance.
+ * Pids are allocated from a single driver-wide counter, so the hash is a
+ * driver-global resource (lifetime = driver load), not per-switch: this keeps
+ * it intact when the default datapath detaches and 'gOvsSwitchContext' is
+ * promoted to another datapath. See User.c.
+ */
+PLIST_ENTRY        gOvsPidHashArray;
+NDIS_SPIN_LOCK     gOvsPidHashLock;
+
 static NDIS_STATUS OvsCreateSwitch(NDIS_HANDLE ndisFilterHandle,
                                    POVS_SWITCH_CONTEXT *switchContextOut);
 static NDIS_STATUS OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext);
@@ -340,8 +350,6 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
         sizeof(LIST_ENTRY) * OVS_MAX_VPORT_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
     switchContext->portIdHashArray= (PLIST_ENTRY)OvsAllocateMemoryWithTag(
         sizeof(LIST_ENTRY) * OVS_MAX_VPORT_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
-    switchContext->pidHashArray = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
-        sizeof(LIST_ENTRY) * OVS_MAX_PID_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
     switchContext->tunnelVportsArray = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
         sizeof(LIST_ENTRY) * OVS_MAX_VPORT_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
     status = OvsAllocateFlowTable(&switchContext->datapath, switchContext);
@@ -354,7 +362,6 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
         switchContext->portNoHashArray == NULL ||
         switchContext->ovsPortNameHashArray == NULL ||
         switchContext->portIdHashArray== NULL ||
-        switchContext->pidHashArray == NULL ||
         switchContext->tunnelVportsArray == NULL) {
         if (switchContext->dispatchLock) {
             NdisFreeRWLock(switchContext->dispatchLock);
@@ -369,10 +376,6 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
         }
         if (switchContext->portIdHashArray) {
             OvsFreeMemoryWithTag(switchContext->portIdHashArray,
-                                 OVS_SWITCH_POOL_TAG);
-        }
-        if (switchContext->pidHashArray) {
-            OvsFreeMemoryWithTag(switchContext->pidHashArray,
                                  OVS_SWITCH_POOL_TAG);
         }
 
@@ -394,11 +397,6 @@ OvsInitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
         InitializeListHead(&switchContext->tunnelVportsArray[i]);
     }
 
-    for (i = 0; i < OVS_MAX_PID_ARRAY_SIZE; i++) {
-        InitializeListHead(&switchContext->pidHashArray[i]);
-    }
-
-    NdisAllocateSpinLock(&(switchContext->pidHashLock));
     switchContext->isActivated = FALSE;
     switchContext->isActivateFailed = FALSE;
     switchContext->refCount = 1;
@@ -431,7 +429,6 @@ OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 
     NdisFreeRWLock(switchContext->dispatchLock);
     switchContext->dispatchLock = NULL;
-    NdisFreeSpinLock(&(switchContext->pidHashLock));
     OvsFreeMemoryWithTag(switchContext->ovsPortNameHashArray,
                          OVS_SWITCH_POOL_TAG);
     switchContext->ovsPortNameHashArray = NULL;
@@ -441,9 +438,6 @@ OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
     OvsFreeMemoryWithTag(switchContext->portNoHashArray,
                          OVS_SWITCH_POOL_TAG);
     switchContext->portNoHashArray = NULL;
-    OvsFreeMemoryWithTag(switchContext->pidHashArray,
-                         OVS_SWITCH_POOL_TAG);
-    switchContext->pidHashArray = NULL;
     OvsFreeMemory(switchContext->tunnelVportsArray);
     switchContext->tunnelVportsArray = NULL;
     OvsDeleteFlowTable(&switchContext->datapath);
@@ -490,16 +484,38 @@ OvsAcquireSwitchContext(VOID)
  *  Datapath registry: maps a datapath number (dpNo) to its switch context.
  * --------------------------------------------------------------------------
  */
-VOID
+NDIS_STATUS
 OvsInitDatapathRegistry(VOID)
 {
+    UINT32 i;
+
     NdisAllocateSpinLock(&gOvsDatapathLock);
     RtlZeroMemory(gOvsDatapaths, sizeof gOvsDatapaths);
+
+    /* The upcall pid hash is driver-global (see the declaration comment). */
+    gOvsPidHashArray = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
+        sizeof(LIST_ENTRY) * OVS_MAX_PID_ARRAY_SIZE, OVS_SWITCH_POOL_TAG);
+    if (gOvsPidHashArray == NULL) {
+        /* gOvsDatapathLock is owned by OvsCleanupDatapathRegistry, which runs on
+         * the failed-OvsInit cleanup path; do not free it here (double-free). */
+        return NDIS_STATUS_RESOURCES;
+    }
+    for (i = 0; i < OVS_MAX_PID_ARRAY_SIZE; i++) {
+        InitializeListHead(&gOvsPidHashArray[i]);
+    }
+    NdisAllocateSpinLock(&gOvsPidHashLock);
+
+    return NDIS_STATUS_SUCCESS;
 }
 
 VOID
 OvsCleanupDatapathRegistry(VOID)
 {
+    if (gOvsPidHashArray != NULL) {
+        NdisFreeSpinLock(&gOvsPidHashLock);
+        OvsFreeMemoryWithTag(gOvsPidHashArray, OVS_SWITCH_POOL_TAG);
+        gOvsPidHashArray = NULL;
+    }
     NdisFreeSpinLock(&gOvsDatapathLock);
 }
 
@@ -539,7 +555,20 @@ OvsUnregisterDatapath(POVS_SWITCH_CONTEXT switchContext)
         }
     }
     if (gOvsSwitchContext == switchContext) {
+        /*
+         * The default datapath is detaching: promote the next live datapath so
+         * 'gOvsSwitchContext' never dangles while any datapath remains (the
+         * dp_ifindex-less request/packet paths anchor on it). The detaching slot
+         * was cleared above, so the scan never re-selects it. NULL only when no
+         * datapath is left. The pid hash is global, so promotion is safe.
+         */
         gOvsSwitchContext = NULL;
+        for (i = 0; i < OVS_MAX_DATAPATHS; i++) {
+            if (gOvsDatapaths[i] != NULL) {
+                gOvsSwitchContext = gOvsDatapaths[i];
+                break;
+            }
+        }
     }
     NdisReleaseSpinLock(&gOvsDatapathLock);
 

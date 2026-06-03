@@ -171,8 +171,6 @@ typedef struct _OVS_SWITCH_CONTEXT
     PLIST_ENTRY             portNoHashArray;        // based on ovs port number
     PLIST_ENTRY             tunnelVportsArray;      // based on ovs dst port number
     PLIST_ENTRY             ovsPortNameHashArray;   // based on ovsName
-    PLIST_ENTRY             pidHashArray;           // based on packet pids
-    NDIS_SPIN_LOCK          pidHashLock;            // Lock for pidHash table
 
     UINT32                  numPhysicalNics;        // the number of physical
                                                     // external NICs.
@@ -249,7 +247,7 @@ VOID
 OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext);
 
 /* Datapath registry: maps a datapath number (dpNo) to its switch context. */
-VOID
+NDIS_STATUS
 OvsInitDatapathRegistry(VOID);
 
 VOID
