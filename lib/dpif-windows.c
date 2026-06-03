@@ -33,6 +33,7 @@
 
 #ifdef _WIN32
 
+#include <errno.h>
 #include <stdio.h>              /* EOF */
 #include <net/if.h>             /* IFNAMSIZ */
 
@@ -1654,6 +1655,85 @@ parse_odp_packet(struct dpif_windows *dpif, struct ofpbuf *buf,
     return 0;
 }
 
+/*
+ * Re-stamps the upcall pid on every existing vport to this dpif's channel pid.
+ *
+ * ovs-vswitchd does not re-create the kernel-owned vports (VM NICs, the
+ * external/internal Hyper-V ports) when it (re)starts, so without this they
+ * keep the previous, now-dead vswitchd's upcall pid and every packet miss is
+ * dropped -- the datapath wedges until a reboot.  This mirrors dpif-netlink's
+ * dpif_netlink_refresh_handlers_vport_dispatch, which Linux runs from
+ * recv_set() for the same reason.
+ *
+ * The ovsext channel has a single stateful dump cursor, so the port numbers are
+ * collected first and the SETs issued only after the dump completes; a transact
+ * issued mid-dump would re-arm and destroy the cursor.  recv_set() runs on the
+ * main thread before the upcall handler threads are started, so the channel is
+ * not used concurrently here.
+ */
+static void
+dpif_windows_refresh_port_upcall_pids(struct dpif_windows *dpif)
+{
+    struct ovsext_dump dump;
+    struct dpif_windows_vport request;
+    struct ofpbuf *buf;
+    odp_port_t *ports = NULL;
+    size_t n = 0, allocated = 0;
+    uint32_t pid = dpif->channel.pid;
+    size_t i;
+
+    dpif_windows_vport_init(&request);
+    request.cmd = OVS_VPORT_CMD_GET;
+    request.dp_ifindex = dpif->dp_ifindex;
+    buf = ofpbuf_new(1024);
+    dpif_windows_vport_to_ofpbuf(&request, buf);
+    /* NLM_F_DUMP requests every vport. */
+    nl_msg_nlmsghdr(buf)->nlmsg_flags |= NLM_F_DUMP;
+    ovsext_dump_start(&dump, &dpif->channel, buf);
+    ofpbuf_delete(buf);
+
+    for (;;) {
+        struct dpif_windows_vport vport;
+        struct ofpbuf rec;
+
+        if (!ovsext_dump_next(&dump, &rec)) {
+            break;
+        }
+        if (dpif_windows_vport_from_ofpbuf(&vport, &rec)) {
+            continue;
+        }
+        if (vport.n_upcall_pids == 1 && vport.upcall_pids
+            && vport.upcall_pids[0] == pid) {
+            continue;       /* Already points at this vswitchd. */
+        }
+        if (n >= allocated) {
+            allocated = allocated ? allocated * 2 : 16;
+            ports = xrealloc(ports, allocated * sizeof *ports);
+        }
+        ports[n++] = vport.port_no;
+    }
+    ovsext_dump_done(&dump);
+
+    for (i = 0; i < n; i++) {
+        struct dpif_windows_vport set;
+        int error;
+
+        dpif_windows_vport_init(&set);
+        set.cmd = OVS_VPORT_CMD_SET;
+        set.dp_ifindex = dpif->dp_ifindex;
+        set.port_no = ports[i];
+        set.n_upcall_pids = 1;
+        set.upcall_pids = &pid;
+        error = dpif_windows_vport_transact(dpif, &set, NULL, NULL);
+        if (error && error != ENODEV && error != ENOENT) {
+            VLOG_WARN_RL(&error_rl,
+                         "failed to refresh upcall pid for port %"PRIu32" (%s)",
+                         odp_to_u32(ports[i]), ovs_strerror(error));
+        }
+    }
+    free(ports);
+}
+
 static int
 dpif_windows_recv_set(struct dpif *dpif_, bool enable)
 {
@@ -1663,6 +1743,9 @@ dpif_windows_recv_set(struct dpif *dpif_, bool enable)
     error = ovsext_subscribe_packets(&dpif->channel, enable);
     if (!error) {
         dpif->upcalls_enabled = enable;
+        if (enable) {
+            dpif_windows_refresh_port_upcall_pids(dpif);
+        }
     }
     return error;
 }
