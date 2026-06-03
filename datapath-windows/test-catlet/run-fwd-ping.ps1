@@ -1,6 +1,6 @@
 # Host<->nested-VM forwarding test through the live Windows OVS datapath, run
 # INSIDE the ovs-kerneldev catlet. Brings up our ovsdb+vswitchd, builds a
-# datapath_type=windows bridge, adds the nested guests' OVS ports (already named
+# datapath_type=system bridge, adds the nested guests' OVS ports (already named
 # ovs_ub1/ovs_ub2), enables the bridge host adapter, then pings each guest's
 # IPv6 link-local through the datapath. Stops the daemons at the end so the
 # invoking SSH session (whose pipe the --detach'd daemons inherit) returns.
@@ -21,7 +21,7 @@ Start-Sleep 1
 & "$native\ovs-vswitchd.exe" -vconsole:off -vfile:info --log-file="$run\ovs-vswitchd.log" --pidfile --detach | Out-Null
 Start-Sleep 2
 
-& $vsctl --timeout=25 add-br $br -- set bridge $br datapath_type=windows
+& $vsctl --timeout=25 add-br $br -- set bridge $br datapath_type=system
 Start-Sleep 3
 foreach ($p in 'ovs_ub1','ovs_ub2') {
     & $vsctl --timeout=25 add-port $br $p
@@ -40,7 +40,7 @@ Enable-NetAdapter -Name $br -EA Continue
 Start-Sleep 3
 $ifIdx = (Get-NetAdapter -Name $br -EA SilentlyContinue).ifIndex
 "=== dpctl show ==="
-& $dpctl show windows@ovs-system 2>&1
+& $dpctl show system@ovs-system 2>&1
 "$br host ifIndex = $ifIdx"
 
 $targets = @{ ub1 = 'fe80::d0ab:bfff:fef2:a0bd'; ub2 = 'fe80::d0ab:6fff:fe99:3fd' }
@@ -51,7 +51,7 @@ foreach ($name in $targets.Keys) {
 }
 
 "=== flows on datapath (forwarding evidence) ==="
-& $dpctl dump-flows windows@ovs-system 2>&1 | Select-Object -First 8
+& $dpctl dump-flows system@ovs-system 2>&1 | Select-Object -First 8
 
 "=== cleanup ==="
 & $vsctl --timeout=25 del-br $br 2>&1 | Out-Null

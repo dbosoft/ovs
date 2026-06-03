@@ -67,10 +67,10 @@ static struct vlog_rate_limit error_rl = VLOG_RATE_LIMIT_INIT(9999, 5);
 
 /* The ovsext kernel backs one datapath per Hyper-V switch, each addressed on
  * the wire by its dp_ifindex and named by its switch identity. ofproto-dpif
- * opens its backer under the name "ovs-<datapath_type>" (e.g. "ovs-windows")
+ * opens its backer under the name "ovs-<datapath_type>" (e.g. "ovs-system")
  * and dpctl callers may pass an arbitrary name. dpif_windows_open resolves that
  * name to a dp_ifindex by dumping the datapaths and matching: the default
- * suffix ("windows"/"system") selects the lowest-numbered datapath, otherwise
+ * suffix ("system") selects the lowest-numbered datapath, otherwise
  * the suffix must match a datapath's reported name. The resolved name and
  * dp_ifindex are then used to address the kernel for the lifetime of the dpif.
  *
@@ -83,6 +83,14 @@ static struct vlog_rate_limit error_rl = VLOG_RATE_LIMIT_INIT(9999, 5);
  * resolve the caller's name to a dp_ifindex via DP_DUMP, then target that
  * dp_ifindex while sending this fixed name. */
 #define OVS_WINDOWS_KERNEL_DP_NAME "ovs-system"
+
+/* The base datapath type for the native Windows provider.  Matches Linux's
+ * "system" type so a bridge with no datapath_type (normalized to "system")
+ * resolves here and "ovs-dpctl show" reads "system@ovs-system", as on Linux.
+ * Per-switch datapaths register additional alias types named by the switch
+ * GUID; this base type is the default, resolving to the lowest-numbered
+ * datapath. */
+#define OVS_WINDOWS_DEFAULT_DP_TYPE "system"
 
 /* Upper bound on datapaths to enumerate when resolving a name; matches the
  * driver's OVS_MAX_DATAPATHS. */
@@ -820,9 +828,9 @@ dpif_windows_init_flow_del(struct dpif_windows *dpif,
 /* Lists the names of all datapaths the kernel exposes, mirroring
  * dpif_netlink_enumerate().  dpctl commands that take an optional datapath
  * argument gate on dp_exists()/dp_enumerate_names(): without this method the
- * set comes back empty and even a valid "windows@ovs-system" is rejected with
- * "datapath not found".  On Windows there is a single global datapath, but we
- * still dump it from the kernel rather than hard-coding the name. */
+ * set comes back empty and even a valid "system@ovs-system" is rejected with
+ * "datapath not found".  We dump the datapaths from the kernel rather than
+ * hard-coding the name. */
 static int
 dpif_windows_enumerate(struct sset *all_dps,
                        const struct dpif_class *dpif_class)
@@ -834,11 +842,14 @@ dpif_windows_enumerate(struct sset *all_dps,
     struct ofpbuf msg;
     int error;
 
-    /* The base "windows" class enumerates every datapath plus the default
-     * aliases; a per-switch alias class (type == a switch GUID) enumerates only
-     * its own datapath, so ofproto's stale-backer cleanup stays scoped to that
-     * switch. */
-    bool specific = strcmp(dpif_class->type, "windows") != 0;
+    /* Every datapath is reported with the conventional name "ovs-system" (as on
+     * Linux); the switch identity lives in the dpif type.  A per-switch alias
+     * class (type == a switch GUID) reports "ovs-system" iff its switch's
+     * datapath exists, so it shows as "<switch-guid>@ovs-system".  The base
+     * "system" class reports "ovs-system" for the default (lowest) datapath
+     * ("system@ovs-system").  Thus "ovs-dpctl show" lists each switch once plus
+     * the default. */
+    bool specific = strcmp(dpif_class->type, OVS_WINDOWS_DEFAULT_DP_TYPE) != 0;
 
     error = ovsext_channel_open(&channel);
     if (error) {
@@ -861,22 +872,20 @@ dpif_windows_enumerate(struct sset *all_dps,
         if (!dpif_windows_dp_from_ofpbuf(&dp, &msg) && dp.name) {
             if (specific) {
                 if (!strcmp(dp.name, dpif_class->type)) {
-                    sset_add(all_dps, dp.name);
+                    any = true;
                 }
             } else {
-                sset_add(all_dps, dp.name);
                 any = true;
             }
         }
     }
 
-    /* The kernel names each datapath by its switch GUID, but ofproto opens the
-     * default backer as "ovs-<datapath_type>" and dp_exists() checks this set
-     * for "ovs-system"/"ovs-windows".  Keep those default aliases resolvable as
-     * long as at least one datapath exists; dpif_windows_open maps them to the
-     * lowest-numbered datapath. */
+    /* Report the conventional datapath name when this class' datapath exists:
+     * for a per-switch class that is its own switch ("<guid>@ovs-system"); for
+     * the base "system" class the default (lowest) datapath ("system@ovs-
+     * system").  dpif_windows_open resolves a per-switch class by its type and
+     * the base class by the "ovs-system" name. */
     if (any) {
-        sset_add(all_dps, "ovs-windows");
         sset_add(all_dps, "ovs-system");
     }
 
@@ -930,7 +939,7 @@ dpif_windows_dump_dps(struct ovsext_channel *channel,
 
 /* Resolves the userspace dpif 'name' to a kernel datapath by dumping all
  * datapaths and matching.  The backer name is "ovs-<datapath_type>"; the
- * default suffix ("windows"/"system") selects the lowest-numbered datapath,
+ * default suffix ("system") selects the lowest-numbered datapath,
  * otherwise the suffix must exactly match a datapath's reported name.  On
  * success sets '*dp_ifindex' and '*dp_name' (the caller frees '*dp_name'). */
 static int
@@ -954,7 +963,7 @@ dpif_windows_resolve_dp(struct ovsext_channel *channel, const char *name,
     if (!strncmp(suffix, "ovs-", 4)) {
         suffix += 4;
     }
-    is_default = !strcmp(suffix, "windows") || !strcmp(suffix, "system");
+    is_default = !strcmp(suffix, "system");
 
     for (i = 0; i < n; i++) {
         if (is_default) {
@@ -1085,11 +1094,19 @@ dpif_windows_open(const struct dpif_class *class, const char *name,
     dpif_init(&dpif->dpif, class, name, 0, 0);
     dpif->dp_ifindex = 0;
 
-    /* Resolve 'name' to a concrete kernel datapath. The driver owns datapath
-     * lifetime (one per Hyper-V switch), so we never create one here; an
-     * OVS_DP_CMD_NEW for an existing datapath returns EEXIST, which lets
-     * dpif_create_and_open() fall back to the open path unchanged. */
-    error = dpif_windows_resolve_dp(&dpif->channel, name, &dp_ifindex,
+    /* Resolve to a concrete kernel datapath. The driver owns datapath lifetime
+     * (one per Hyper-V switch), so we never create one here; an OVS_DP_CMD_NEW
+     * for an existing datapath returns EEXIST, which lets dpif_create_and_open()
+     * fall back to the open path unchanged.
+     *
+     * A per-switch alias class carries the switch identity (its GUID) in the
+     * class type, while its datapaths are named with the conventional
+     * "ovs-system"; resolve by the type so the right switch is selected
+     * regardless of the (cosmetic) name.  The base "system" class resolves by
+     * name, mapping the "system" suffix to the lowest datapath. */
+    const char *resolve_key =
+        strcmp(class->type, OVS_WINDOWS_DEFAULT_DP_TYPE) ? class->type : name;
+    error = dpif_windows_resolve_dp(&dpif->channel, resolve_key, &dp_ifindex,
                                     &dp_name);
     if (error) {
         ovsext_channel_close(&dpif->channel);
@@ -2077,7 +2094,7 @@ dpif_windows_recv_purge(struct dpif *dpif_)
  * ==================================================================== */
 
 const struct dpif_class dpif_windows_class = {
-    .type = "windows",
+    .type = OVS_WINDOWS_DEFAULT_DP_TYPE,
     .cleanup_required = false,
     .enumerate = dpif_windows_enumerate,
     .open = dpif_windows_open,

@@ -272,7 +272,7 @@ target_link_directories(ovs-vsctl PRIVATE ${OVS_EXT_LIBDIRS})
 target_link_libraries(ovs-vsctl PRIVATE openvswitch libssl libcrypto pthreadVC3 ${OVS_SYS_LIBS})
 
 # ovs-dpctl drives the dpif layer directly -- the test tool for dpif-windows
-# ("ovs-dpctl show windows@<dp>" routes straight to dpif_windows_class).
+# ("ovs-dpctl show system@<dp>" routes straight to dpif_windows_class).
 add_executable(ovs-dpctl utilities/ovs-dpctl.c)
 ovs_setup(ovs-dpctl)
 target_link_directories(ovs-dpctl PRIVATE ${OVS_EXT_LIBDIRS})
