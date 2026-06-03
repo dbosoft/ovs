@@ -65,24 +65,28 @@ static struct vlog_rate_limit error_rl = VLOG_RATE_LIMIT_INIT(9999, 5);
 #define FLOW_DUMP_MAX_BATCH 50
 #define OPERATE_MAX_OPS 50
 
-/* The ovsext kernel exposes a single, global datapath whose name is fixed to
- * "ovs-system" (OVS_SYSTEM_DP_NAME in the driver): OVS_DP_CMD_GET/NEW/SET reject
- * any other OVS_DP_ATTR_NAME with NL_ERROR_NODEV.  ofproto-dpif, however, opens
- * its backer under the name "ovs-<datapath_type>" (i.e. "ovs-windows"), and
- * dpctl callers may pass an arbitrary name.  We therefore ignore the
- * userspace-facing dpif name when addressing the kernel and always use this
- * fixed name; the single global datapath makes that unambiguous. */
-#define OVS_WINDOWS_KERNEL_DP_NAME "ovs-system"
+/* The ovsext kernel backs one datapath per Hyper-V switch, each addressed on
+ * the wire by its dp_ifindex and named by its switch identity. ofproto-dpif
+ * opens its backer under the name "ovs-<datapath_type>" (e.g. "ovs-windows")
+ * and dpctl callers may pass an arbitrary name. dpif_windows_open resolves that
+ * name to a dp_ifindex by dumping the datapaths and matching: the default
+ * suffix ("windows"/"system") selects the lowest-numbered datapath, otherwise
+ * the suffix must match a datapath's reported name. The resolved name and
+ * dp_ifindex are then used to address the kernel for the lifetime of the dpif.
+ *
+ * Names can be a switch GUID, longer than IFNAMSIZ; the datapath-name parse and
+ * the resolver buffers are sized accordingly. */
+#define OVS_DP_NAME_MAX 64
 
-/* On Windows the kernel datapath uses a single, global datapath whose
- * dp_ifindex the userspace side does not allocate; dpif-netlink threads a
- * dp_ifindex through every message.  We keep the same field, initialized from
- * the OVS_DP_CMD_GET/NEW reply, and default to 0 (the driver accepts 0 for the
- * single datapath). */
+/* Upper bound on datapaths to enumerate when resolving a name; matches the
+ * driver's OVS_MAX_DATAPATHS. */
+#define DPIF_WINDOWS_MAX_DPS 16
+
 struct dpif_windows {
     struct dpif dpif;
     struct ovsext_channel channel;
     int dp_ifindex;
+    char *dp_name;              /* Kernel-reported datapath name. */
     uint32_t user_features;
     bool upcalls_enabled;       /* recv_set() state. */
 };
@@ -154,7 +158,7 @@ dpif_windows_dp_from_ofpbuf(struct dpif_windows_dp *dp,
                             const struct ofpbuf *buf)
 {
     static const struct nl_policy ovs_datapath_policy[] = {
-        [OVS_DP_ATTR_NAME] = { .type = NL_A_STRING, .max_len = IFNAMSIZ },
+        [OVS_DP_ATTR_NAME] = { .type = NL_A_STRING, .max_len = OVS_DP_NAME_MAX },
         [OVS_DP_ATTR_STATS] = { NL_POLICY_FOR(struct ovs_dp_stats),
                                 .optional = true },
         [OVS_DP_ATTR_MEGAFLOW_STATS] = {
@@ -238,7 +242,7 @@ dpif_windows_dp_get(struct dpif_windows *dpif, struct dpif_windows_dp *reply,
     dpif_windows_dp_init(&request);
     request.cmd = OVS_DP_CMD_GET;
     request.dp_ifindex = dpif->dp_ifindex;
-    request.name = OVS_WINDOWS_KERNEL_DP_NAME;
+    request.name = dpif->dp_name;
 
     return dpif_windows_dp_transact(dpif, &request, reply, bufp);
 }
@@ -844,6 +848,97 @@ dpif_windows_enumerate(struct sset *all_dps,
     return error;
 }
 
+/* One datapath as reported by an OVS_DP_CMD_GET dump. */
+struct dpif_windows_dp_entry {
+    int dp_ifindex;
+    char name[OVS_DP_NAME_MAX];
+};
+
+/* Dumps all datapaths on 'channel' into 'entries' (capacity 'max').  Returns
+ * the number collected, or a negative errno on dump failure. */
+static int
+dpif_windows_dump_dps(struct ovsext_channel *channel,
+                      struct dpif_windows_dp_entry *entries, int max)
+{
+    struct ovsext_dump dump;
+    struct dpif_windows_dp request;
+    struct ofpbuf *buf;
+    struct ofpbuf msg;
+    int n = 0;
+    int error;
+
+    dpif_windows_dp_init(&request);
+    request.cmd = OVS_DP_CMD_GET;
+
+    buf = ofpbuf_new(1024);
+    dpif_windows_dp_to_ofpbuf(&request, buf);
+    nl_msg_nlmsghdr(buf)->nlmsg_flags |= NLM_F_DUMP;
+    ovsext_dump_start(&dump, channel, buf);
+    ofpbuf_delete(buf);
+
+    while (ovsext_dump_next(&dump, &msg)) {
+        struct dpif_windows_dp dp;
+
+        if (!dpif_windows_dp_from_ofpbuf(&dp, &msg) && n < max) {
+            entries[n].dp_ifindex = dp.dp_ifindex;
+            ovs_strlcpy(entries[n].name, dp.name ? dp.name : "",
+                        sizeof entries[n].name);
+            n++;
+        }
+    }
+
+    error = ovsext_dump_done(&dump);
+    return error ? -error : n;
+}
+
+/* Resolves the userspace dpif 'name' to a kernel datapath by dumping all
+ * datapaths and matching.  The backer name is "ovs-<datapath_type>"; the
+ * default suffix ("windows"/"system") selects the lowest-numbered datapath,
+ * otherwise the suffix must exactly match a datapath's reported name.  On
+ * success sets '*dp_ifindex' and '*dp_name' (the caller frees '*dp_name'). */
+static int
+dpif_windows_resolve_dp(struct ovsext_channel *channel, const char *name,
+                        int *dp_ifindex, char **dp_name)
+{
+    struct dpif_windows_dp_entry entries[DPIF_WINDOWS_MAX_DPS];
+    const char *suffix;
+    bool is_default;
+    int n, i, best = -1;
+
+    n = dpif_windows_dump_dps(channel, entries, ARRAY_SIZE(entries));
+    if (n < 0) {
+        return -n;
+    }
+    if (n == 0) {
+        return ENODEV;
+    }
+
+    suffix = name;
+    if (!strncmp(suffix, "ovs-", 4)) {
+        suffix += 4;
+    }
+    is_default = !strcmp(suffix, "windows") || !strcmp(suffix, "system");
+
+    for (i = 0; i < n; i++) {
+        if (is_default) {
+            if (best < 0 || entries[i].dp_ifindex < entries[best].dp_ifindex) {
+                best = i;
+            }
+        } else if (!strcmp(entries[i].name, suffix)) {
+            best = i;
+            break;
+        }
+    }
+
+    if (best < 0) {
+        return ENODEV;
+    }
+
+    *dp_ifindex = entries[best].dp_ifindex;
+    *dp_name = xstrdup(entries[best].name);
+    return 0;
+}
+
 static int
 dpif_windows_open(const struct dpif_class *class, const char *name,
                   bool create, struct dpif **dpifp)
@@ -852,6 +947,8 @@ dpif_windows_open(const struct dpif_class *class, const char *name,
     struct dpif_windows_dp dp_request, dp;
     struct ofpbuf *buf = NULL;
     uint32_t upcall_pid;
+    char *dp_name = NULL;
+    int dp_ifindex = 0;
     int error;
 
     dpif = xzalloc(sizeof *dpif);
@@ -867,17 +964,12 @@ dpif_windows_open(const struct dpif_class *class, const char *name,
     dpif_init(&dpif->dpif, class, name, 0, 0);
     dpif->dp_ifindex = 0;
 
-    /* Create or look up the datapath, mirroring dpif_netlink_open() but
-     * without the Linux per-cpu/per-vport feature negotiation (the ovsext
-     * driver implements neither; it always dispatches to the subscribed
-     * userspace pid). */
-    dpif_windows_dp_init(&dp_request);
-    upcall_pid = dpif->channel.pid;
-    dp_request.upcall_pid = &upcall_pid;
-    dp_request.name = OVS_WINDOWS_KERNEL_DP_NAME;
-    dp_request.cmd = create ? OVS_DP_CMD_NEW : OVS_DP_CMD_GET;
-
-    error = dpif_windows_dp_transact(dpif, &dp_request, &dp, &buf);
+    /* Resolve 'name' to a concrete kernel datapath. The driver owns datapath
+     * lifetime (one per Hyper-V switch), so we never create one here; an
+     * OVS_DP_CMD_NEW for an existing datapath returns EEXIST, which lets
+     * dpif_create_and_open() fall back to the open path unchanged. */
+    error = dpif_windows_resolve_dp(&dpif->channel, name, &dp_ifindex,
+                                    &dp_name);
     if (error) {
         ovsext_channel_close(&dpif->channel);
         dpif_uninit(&dpif->dpif, false);
@@ -885,7 +977,24 @@ dpif_windows_open(const struct dpif_class *class, const char *name,
         return error;
     }
 
+    dpif_windows_dp_init(&dp_request);
+    upcall_pid = dpif->channel.pid;
+    dp_request.upcall_pid = &upcall_pid;
+    dp_request.name = dp_name;
+    dp_request.dp_ifindex = dp_ifindex;
+    dp_request.cmd = create ? OVS_DP_CMD_NEW : OVS_DP_CMD_GET;
+
+    error = dpif_windows_dp_transact(dpif, &dp_request, &dp, &buf);
+    if (error) {
+        free(dp_name);
+        ovsext_channel_close(&dpif->channel);
+        dpif_uninit(&dpif->dpif, false);
+        free(dpif);
+        return error;
+    }
+
     dpif->dp_ifindex = dp.dp_ifindex;
+    dpif->dp_name = dp_name;
     dpif->user_features = dp.user_features;
     ofpbuf_delete(buf);
 
@@ -903,6 +1012,7 @@ dpif_windows_close(struct dpif *dpif_)
      * resources and the containing struct (mirrors dpif_netlink_close).
      * Calling dpif_uninit() here double-frees base_name. */
     ovsext_channel_close(&dpif->channel);
+    free(dpif->dp_name);
     free(dpif);
 }
 
