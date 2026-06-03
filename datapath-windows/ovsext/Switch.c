@@ -38,7 +38,6 @@
 #include "Debug.h"
 
 POVS_SWITCH_CONTEXT gOvsSwitchContext;
-LONG volatile gOvsInAttach;
 UINT64 ovsTimeIncrementPerTick;
 
 extern NDIS_HANDLE gOvsExtDriverHandle;
@@ -97,22 +96,6 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
         goto cleanup;
     }
 
-    NdisAcquireSpinLock(&gOvsDatapathLock);
-    if (gOvsSwitchContext) {
-        NdisReleaseSpinLock(&gOvsDatapathLock);
-        OVS_LOG_TRACE("Exit: Failed to create OVS Switch, only one datapath is"
-                      "supported, %p.", gOvsSwitchContext);
-        goto cleanup;
-    }
-    NdisReleaseSpinLock(&gOvsDatapathLock);
-
-    if (InterlockedCompareExchange(&gOvsInAttach, 1, 0)) {
-        /* Just fail the request. */
-        OVS_LOG_TRACE("Exit: Failed to create OVS Switch, since another attach"
-                      "instance is in attach process.");
-        goto cleanup;
-    }
-
     status = OvsCreateSwitch(ndisFilterHandle, &switchContext);
     if (status != NDIS_STATUS_SUCCESS) {
         goto cleanup;
@@ -143,7 +126,6 @@ OvsExtAttach(NDIS_HANDLE ndisFilterHandle,
     OvsRegisterDatapath(switchContext);
 
 cleanup:
-    InterlockedExchange(&gOvsInAttach, 0);
     if (status != NDIS_STATUS_SUCCESS) {
         if (switchContext != NULL) {
             OvsDeleteSwitch(switchContext);

@@ -309,7 +309,7 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
             datapath->misses++;
             elem = OvsCreateQueueNlPacket(NULL, 0, OVS_PACKET_CMD_MISS,
                                           vport, &key, NULL, pNbl, curNb,
-                                          TRUE, &layers);
+                                          TRUE, &layers, gOvsSwitchContext->dpNo);
             if (elem) {
                 /* Complete the packet since it was copied to user buffer. */
                 InsertTailList(&missedPackets, &elem->link);

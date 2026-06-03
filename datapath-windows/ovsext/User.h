@@ -79,7 +79,8 @@ POVS_PACKET_QUEUE_ELEM OvsCreateQueueNlPacket(PVOID userData,
                                               PNET_BUFFER_LIST nbl,
                                               PNET_BUFFER nb,
                                               BOOLEAN isRecv,
-                                              POVS_PACKET_HDR_INFO hdrInfo);
+                                              POVS_PACKET_HDR_INFO hdrInfo,
+                                              UINT32 dpNo);
 
 VOID OvsQueuePackets(PLIST_ENTRY packetList, UINT32 numElems);
 NTSTATUS OvsCreateAndAddPackets(PVOID userData,

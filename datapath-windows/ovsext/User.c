@@ -834,7 +834,7 @@ OvsCreateAndAddPackets(PVOID userData,
     while (nb) {
         elem = OvsCreateQueueNlPacket(userData, userDataLen,
                                     cmd, vport, key, NULL, nbl, nb,
-                                    isRecv, hdrInfo);
+                                    isRecv, hdrInfo, switchContext->dpNo);
         if (elem) {
             InsertTailList(list, &elem->link);
             (*num)++;
@@ -1020,7 +1020,8 @@ OvsCreateQueueNlPacket(PVOID userData,
                        PNET_BUFFER_LIST nbl,
                        PNET_BUFFER nb,
                        BOOLEAN isRecv,
-                       POVS_PACKET_HDR_INFO hdrInfo)
+                       POVS_PACKET_HDR_INFO hdrInfo,
+                       UINT32 dpNo)
 {
 #define VLAN_TAG_SIZE 4
     UINT32 allocLen, dataLen, extraLen = 0;
@@ -1113,7 +1114,7 @@ OvsCreateQueueNlPacket(PVOID userData,
      */
     if (!NlFillOvsMsg(&nlBuf, OVS_WIN_NL_PACKET_FAMILY_ID, 0,
                       0, pid, (UINT8)cmd, OVS_PACKET_VERSION,
-                      gOvsSwitchContext->dpNo)) {
+                      dpNo)) {
         goto fail;
     }
 

@@ -2095,7 +2095,8 @@ OvsOutputUserspaceAction(OvsForwardingContext *ovsFwdCtx,
                                   ovsFwdCtx->curNbl,
                                   NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl),
                                   isRecv,
-                                  layers);
+                                  layers,
+                                  ovsFwdCtx->switchContext->dpNo);
     if (elem) {
         LIST_ENTRY missedPackets;
         InitializeListHead(&missedPackets);
