@@ -1545,6 +1545,7 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     NTSTATUS status = STATUS_SUCCESS;
     NL_BUFFER nlBuf;
     NL_ERROR nlError = NL_ERROR_SUCCESS;
+    POVS_SWITCH_CONTEXT switchContext = usrParamsCtx->switchContext;
     static const NL_POLICY ovsDatapathSetPolicy[] = {
         [OVS_DP_ATTR_NAME] = { .type = NL_A_STRING, .maxLen = IFNAMSIZ },
         [OVS_DP_ATTR_UPCALL_PID] = { .type = NL_A_U32, .optional = TRUE },
@@ -1584,6 +1585,13 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     NlBufInit(&nlBuf, usrParamsCtx->outputBuffer, usrParamsCtx->outputLength);
 
+    /* The request's dp_ifindex was resolved to switchContext in
+     * OvsDeviceControl; a NULL context means no such datapath. */
+    if (switchContext == NULL) {
+        nlError = NL_ERROR_NODEV;
+        goto cleanup;
+    }
+
     if (dpAttrs[OVS_DP_ATTR_NAME] != NULL) {
         if (!OvsCompareString(NlAttrGet(dpAttrs[OVS_DP_ATTR_NAME]),
                               OVS_SYSTEM_DP_NAME)) {
@@ -1597,9 +1605,6 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
             nlError = NL_ERROR_NODEV;
             goto cleanup;
         }
-    } else if ((UINT32)msgIn->ovsHdr.dp_ifindex != gOvsSwitchContext->dpNo) {
-        nlError = NL_ERROR_NODEV;
-        goto cleanup;
     }
 
     if (usrParamsCtx->ovsMsg->genlMsg.cmd == OVS_DP_CMD_NEW) {
@@ -1607,7 +1612,7 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         goto cleanup;
     }
 
-    status = OvsDpFillInfo(gOvsSwitchContext, msgIn, &nlBuf);
+    status = OvsDpFillInfo(switchContext, msgIn, &nlBuf);
 
     *replyLen = NlBufSize(&nlBuf);
 
