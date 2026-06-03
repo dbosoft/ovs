@@ -664,6 +664,8 @@ OvsActivateSwitch(POVS_SWITCH_CONTEXT switchContext)
     OVS_LOG_TRACE("Enter: activate switch %p, dpNo: %ld",
                   switchContext, switchContext->dpNo);
 
+    OvsCaptureSwitchName(switchContext);
+
     status = OvsAddConfiguredSwitchPorts(switchContext);
 
     if (status != NDIS_STATUS_SUCCESS) {

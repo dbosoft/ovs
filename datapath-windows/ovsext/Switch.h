@@ -32,6 +32,10 @@
 
 #define OVS_INTERNAL_VPORT_DEFAULT_INDEX 0
 
+/* Holds a Hyper-V switch GUID string "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}"
+ * (38 chars + NUL); sized with headroom against an unexpectedly longer name. */
+#define OVS_DP_GUID_NAME_LEN     64
+
 //Tunnel port indicies
 #define RESERVED_START_INDEX1    1
 #define OVS_TUNNEL_INDEX_START RESERVED_START_INDEX1
@@ -99,6 +103,10 @@ typedef struct _OVS_SWITCH_CONTEXT
      * drops to zero. The owning reference is taken at creation and released on
      * detach. */
     volatile LONG           refCount;
+
+    /* The Hyper-V switch GUID, captured at activation, used as the datapath's
+     * canonical name. Empty until activation completes or if the query failed. */
+    CHAR                    dpGuidName[OVS_DP_GUID_NAME_LEN];
 
     /*
      * 'virtualExternalVport' represents default external interface. This is

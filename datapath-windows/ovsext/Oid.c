@@ -755,6 +755,69 @@ done:
 
 /*
  * --------------------------------------------------------------------------
+ * Captures the Hyper-V switch GUID into switchContext->dpGuidName, where it
+ * serves as the datapath's canonical name. On any failure the name is left
+ * empty and the datapath falls back to the default name; it is never fatal.
+ * --------------------------------------------------------------------------
+ */
+VOID
+OvsCaptureSwitchName(POVS_SWITCH_CONTEXT switchContext)
+{
+    NDIS_STATUS status;
+    PNDIS_SWITCH_PARAMETERS switchParams;
+    UINT32 outputSizeNeeded;
+    ANSI_STRING astr;
+    UNICODE_STRING ustr;
+
+    switchContext->dpGuidName[0] = '\0';
+
+    switchParams = OvsAllocateMemoryWithTag(sizeof *switchParams,
+                                            OVS_OID_POOL_TAG);
+    if (!switchParams) {
+        return;
+    }
+
+    RtlZeroMemory(switchParams, sizeof *switchParams);
+    switchParams->Header.Revision = NDIS_SWITCH_PARAMETERS_REVISION_1;
+    switchParams->Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    switchParams->Header.Size = NDIS_SIZEOF_NDIS_SWITCH_PARAMETERS_REVISION_1;
+
+    status = OvsIssueOidRequest(switchContext, NdisRequestQueryInformation,
+                                OID_SWITCH_PARAMETERS, NULL, 0,
+                                (PVOID)switchParams, sizeof *switchParams,
+                                &outputSizeNeeded);
+    if (status != NDIS_STATUS_SUCCESS) {
+        OVS_LOG_WARN("Failed to query switch name, status: %x", status);
+        goto cleanup;
+    }
+
+    ustr.Buffer = switchParams->SwitchName.String;
+    ustr.Length = switchParams->SwitchName.Length;
+    ustr.MaximumLength = IF_MAX_STRING_SIZE;
+
+    astr.Buffer = switchContext->dpGuidName;
+    astr.MaximumLength = OVS_DP_GUID_NAME_LEN;
+    astr.Length = 0;
+
+    if (RtlUnicodeStringToAnsiSize(&ustr) > OVS_DP_GUID_NAME_LEN) {
+        OVS_LOG_WARN("Switch name too long for datapath name buffer");
+        goto cleanup;
+    }
+
+    status = RtlUnicodeStringToAnsiString(&astr, &ustr, FALSE);
+    if (status != STATUS_SUCCESS) {
+        switchContext->dpGuidName[0] = '\0';
+        goto cleanup;
+    }
+    switchContext->dpGuidName[astr.Length] = '\0';
+
+cleanup:
+    OvsFreeMemoryWithTag(switchParams, OVS_OID_POOL_TAG);
+}
+
+
+/*
+ * --------------------------------------------------------------------------
  * Utility function to get the array of ports on the extensible switch. Upon
  * success, the caller needs to free the returned array.
  * --------------------------------------------------------------------------
