@@ -401,6 +401,7 @@ struct nlattr;
 struct sset;
 
 int dp_register_provider(const struct dpif_class *);
+bool dp_class_is_registered(const char *type);
 int dp_unregister_provider(const char *type);
 void dp_disallow_provider(const char *type);
 void dp_enumerate_types(struct sset *types);

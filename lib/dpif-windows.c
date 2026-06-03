@@ -1025,6 +1025,41 @@ dpif_windows_register_switch_type(const char *type)
     return 0;
 }
 
+/* Registers a per-switch alias of 'dpif_windows_class' for every Hyper-V switch
+ * the kernel currently exposes a datapath for.  ofproto resolves a bridge's
+ * datapath_type by enumerating registered dpif types before opening a backer,
+ * so the switch-GUID types must be registered up front (lazy registration at
+ * open time would be rejected earlier as an "unknown datapath type").  Already
+ * registered types are skipped; failures are non-fatal. */
+void
+dpif_windows_register_all_switch_types(void)
+{
+    struct dpif_windows_dp_entry entries[DPIF_WINDOWS_MAX_DPS];
+    struct ovsext_channel channel;
+    int n, i;
+
+    if (ovsext_channel_open(&channel)) {
+        return;
+    }
+    n = dpif_windows_dump_dps(&channel, entries, ARRAY_SIZE(entries));
+    ovsext_channel_close(&channel);
+
+    for (i = 0; i < n; i++) {
+        struct dpif_class *alias;
+
+        if (!entries[i].name[0] || dp_class_is_registered(entries[i].name)) {
+            continue;
+        }
+        /* Any registration failure just means we free the unused alias. */
+        alias = xmemdup(&dpif_windows_class, sizeof dpif_windows_class);
+        alias->type = xstrdup(entries[i].name);
+        if (dp_register_provider(alias)) {
+            free(CONST_CAST(char *, alias->type));
+            free(alias);
+        }
+    }
+}
+
 static int
 dpif_windows_open(const struct dpif_class *class, const char *name,
                   bool create, struct dpif **dpifp)

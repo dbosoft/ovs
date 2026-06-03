@@ -712,6 +712,9 @@ extern const struct dpif_class dpif_windows_class;
  * 'type' (a switch GUID) so ofproto can open a datapath_type=<switch-guid>
  * backer.  See lib/dpif-windows.c. */
 int dpif_windows_register_switch_type(const char *type);
+/* Registers such an alias for every switch the kernel currently exposes a
+ * datapath for; called during datapath-type enumeration. */
+void dpif_windows_register_all_switch_types(void);
 #endif
 extern const struct dpif_class dpif_netdev_class;
 
