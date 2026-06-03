@@ -264,4 +264,13 @@ OvsUnregisterDatapath(POVS_SWITCH_CONTEXT switchContext);
 POVS_SWITCH_CONTEXT
 OvsAcquireDatapathByNumber(UINT32 dpNo);
 
+/*
+ * Returns the first registered datapath at or after registry slot 'startSlot'
+ * with a reference held (release it with OvsReleaseSwitchContext), or NULL if
+ * none. On success '*nextSlot' is set to the slot after the one returned, so a
+ * dump can resume the scan from there.
+ */
+POVS_SWITCH_CONTEXT
+OvsAcquireNextDatapath(UINT32 startSlot, UINT32 *nextSlot);
+
 #endif /* __SWITCH_H_ */

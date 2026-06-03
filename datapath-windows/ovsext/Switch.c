@@ -643,6 +643,26 @@ OvsAcquireDatapathByNumber(UINT32 dpNo)
     return switchContext;
 }
 
+POVS_SWITCH_CONTEXT
+OvsAcquireNextDatapath(UINT32 startSlot, UINT32 *nextSlot)
+{
+    POVS_SWITCH_CONTEXT switchContext = NULL;
+    UINT32 i;
+
+    NdisAcquireSpinLock(&gOvsDatapathLock);
+    for (i = startSlot; i < OVS_MAX_DATAPATHS; i++) {
+        if (gOvsDatapaths[i] != NULL) {
+            switchContext = gOvsDatapaths[i];
+            InterlockedIncrement(&switchContext->refCount);
+            *nextSlot = i + 1;
+            break;
+        }
+    }
+    NdisReleaseSpinLock(&gOvsDatapathLock);
+
+    return switchContext;
+}
+
 /*
  * --------------------------------------------------------------------------
  *  This function activates the switch by initializing it with all the runtime

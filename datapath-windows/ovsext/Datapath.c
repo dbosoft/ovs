@@ -1483,6 +1483,8 @@ HandleGetDpDump(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         NL_BUFFER nlBuf;
         NTSTATUS status;
         POVS_MESSAGE msgIn = instance->dumpState.ovsMsg;
+        POVS_SWITCH_CONTEXT switchContext;
+        UINT32 nextSlot = 0;
 
         ASSERT(usrParamsCtx->devOp == OVS_READ_DEV_OP);
 
@@ -1491,16 +1493,26 @@ HandleGetDpDump(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
             return STATUS_INVALID_DEVICE_STATE;
         }
 
-        /* Dump state must have been deleted after previous dump operation. */
-        ASSERT(instance->dumpState.index[0] == 0);
-
         /* Output buffer has been validated while validating read dev op. */
         ASSERT(msgOut != NULL && usrParamsCtx->outputLength >= sizeof *msgOut);
+
+        /*
+         * 'index[0]' is the registry slot at which to resume the scan. Emit the
+         * next live datapath as one record; an empty reply signals the end.
+         */
+        switchContext = OvsAcquireNextDatapath(instance->dumpState.index[0],
+                                               &nextSlot);
+        if (switchContext == NULL) {
+            *replyLen = 0;
+            FreeUserDumpState(instance);
+            return STATUS_SUCCESS;
+        }
 
         NlBufInit(&nlBuf, usrParamsCtx->outputBuffer,
                   usrParamsCtx->outputLength);
 
-        status = OvsDpFillInfo(gOvsSwitchContext, msgIn, &nlBuf);
+        status = OvsDpFillInfo(switchContext, msgIn, &nlBuf);
+        OvsReleaseSwitchContext(switchContext);
 
         if (status != STATUS_SUCCESS) {
             *replyLen = 0;
@@ -1508,12 +1520,8 @@ HandleGetDpDump(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
             return status;
         }
 
-        /* Increment the dump index. */
-        instance->dumpState.index[0] = 1;
+        instance->dumpState.index[0] = nextSlot;
         *replyLen = msgOut->nlMsg.nlmsgLen;
-
-        /* Free up the dump state, since there's no more data to continue. */
-        FreeUserDumpState(instance);
     }
 
     return STATUS_SUCCESS;
