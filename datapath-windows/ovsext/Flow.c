@@ -34,7 +34,6 @@
 #pragma warning( push )
 #pragma warning( disable:4127 )
 
-extern POVS_SWITCH_CONTEXT gOvsSwitchContext;
 extern UINT64 ovsTimeIncrementPerTick;
 
 static NTSTATUS ReportFlowInfo(OvsFlow *flow, UINT32 getFlags,
@@ -83,7 +82,8 @@ static NTSTATUS _MapFlowArpKeyToNlKey(PNL_BUFFER nlBuf,
 static NTSTATUS _MapFlowMplsKeyToNlKey(PNL_BUFFER nlBuf,
                                        MplsKey *mplsFlowPutKey);
 
-static NTSTATUS OvsDoDumpFlows(OvsFlowDumpInput *dumpInput,
+static NTSTATUS OvsDoDumpFlows(POVS_SWITCH_CONTEXT switchContext,
+                               OvsFlowDumpInput *dumpInput,
                                OvsFlowDumpOutput *dumpOutput,
                                UINT32 *replyLen);
 static NTSTATUS OvsProbeSupportedFeature(POVS_MESSAGE msgIn,
@@ -303,7 +303,8 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if ((genlMsgHdr->cmd == OVS_FLOW_CMD_DEL) &&
         (!NlMsgAttrsLen(nlMsgHdr))) {
 
-        rc = OvsFlushFlowIoctl(ovsHdr->dp_ifindex);
+        rc = OvsFlushFlowIoctl(usrParamsCtx->switchContext,
+                               ovsHdr->dp_ifindex);
 
        if (rc == STATUS_SUCCESS) {
             /* XXX: refactor this code. */
@@ -354,8 +355,8 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         goto done;
     }
 
-    rc = OvsPutFlowIoctl(&mappedFlow, sizeof (struct OvsFlowPut),
-                         &stats);
+    rc = OvsPutFlowIoctl(usrParamsCtx->switchContext, &mappedFlow,
+                         sizeof (struct OvsFlowPut), &stats);
     if (rc != STATUS_SUCCESS) {
         OVS_LOG_ERROR("OvsPutFlowIoctl failed.");
         /*
@@ -566,7 +567,7 @@ _FlowNlGetCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     /* 4th argument is a no op.
      * We are keeping this argument to be compatible
      * with our dpif-windows based interface. */
-    rc = OvsGetFlowIoctl(&getInput, &getOutput);
+    rc = OvsGetFlowIoctl(usrParamsCtx->switchContext, &getInput, &getOutput);
     if (rc != STATUS_SUCCESS) {
         OVS_LOG_ERROR("OvsGetFlowIoctl failed.");
         /*
@@ -670,7 +671,8 @@ _FlowNlDumpCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         dumpInput.position[0] = instance->dumpState.index[0];
         dumpInput.position[1] = instance->dumpState.index[1];
 
-        rc = OvsDoDumpFlows(&dumpInput, &dumpOutput, &temp);
+        rc = OvsDoDumpFlows(usrParamsCtx->switchContext, &dumpInput,
+                            &dumpOutput, &temp);
         if (rc != STATUS_SUCCESS) {
             OVS_LOG_ERROR("OvsDoDumpFlows failed with rc: %d", rc);
             /*
@@ -2848,7 +2850,8 @@ FreeFlow(OvsFlow *flow)
 }
 
 NTSTATUS
-OvsDoDumpFlows(OvsFlowDumpInput *dumpInput,
+OvsDoDumpFlows(POVS_SWITCH_CONTEXT switchContext,
+               OvsFlowDumpInput *dumpInput,
                OvsFlowDumpOutput *dumpOutput,
                UINT32 *replyLen)
 {
@@ -2863,7 +2866,7 @@ OvsDoDumpFlows(OvsFlowDumpInput *dumpInput,
     BOOLEAN findNextNonEmpty = FALSE;
 
     dpNo = dumpInput->dpNo;
-    if (gOvsSwitchContext->dpNo != dpNo) {
+    if (switchContext == NULL || switchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
         goto exit;
     }
@@ -2877,7 +2880,7 @@ OvsDoDumpFlows(OvsFlowDumpInput *dumpInput,
 
     columnIndex = dumpInput->position[1];
 
-    datapath = &gOvsSwitchContext->datapath;
+    datapath = &switchContext->datapath;
     ASSERT(datapath);
     OvsAcquireDatapathRead(datapath, &dpLockState, FALSE);
 
@@ -2980,7 +2983,8 @@ ReportFlowInfo(OvsFlow *flow,
 }
 
 NTSTATUS
-OvsPutFlowIoctl(PVOID inputBuffer,
+OvsPutFlowIoctl(POVS_SWITCH_CONTEXT switchContext,
+                PVOID inputBuffer,
                 UINT32 inputLength,
                 struct OvsFlowStats *stats)
 {
@@ -3003,12 +3007,12 @@ OvsPutFlowIoctl(PVOID inputBuffer,
     }
 
     dpNo = put->dpNo;
-    if (gOvsSwitchContext->dpNo != dpNo) {
+    if (switchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
         goto exit;
     }
 
-    datapath = &gOvsSwitchContext->datapath;
+    datapath = &switchContext->datapath;
     ASSERT(datapath);
     OvsAcquireDatapathWrite(datapath, &dpLockState, FALSE);
     status = HandleFlowPut(put, datapath, stats);
@@ -3154,7 +3158,8 @@ OvsPrepareFlow(OvsFlow **flow,
 }
 
 NTSTATUS
-OvsGetFlowIoctl(PVOID inputBuffer,
+OvsGetFlowIoctl(POVS_SWITCH_CONTEXT switchContext,
+                PVOID inputBuffer,
                 PVOID outputBuffer)
 {
     NTSTATUS status = STATUS_SUCCESS;
@@ -3176,12 +3181,12 @@ OvsGetFlowIoctl(PVOID inputBuffer,
     }
 
     dpNo = getInput->dpNo;
-    if (gOvsSwitchContext->dpNo != dpNo) {
+    if (switchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
         goto exit;
     }
 
-    datapath = &gOvsSwitchContext->datapath;
+    datapath = &switchContext->datapath;
     ASSERT(datapath);
     OvsAcquireDatapathRead(datapath, &dpLockState, FALSE);
     flow = OvsLookupFlow(datapath, &getInput->key, &hash, FALSE);
@@ -3200,18 +3205,19 @@ exit:
 }
 
 NTSTATUS
-OvsFlushFlowIoctl(UINT32 dpNo)
+OvsFlushFlowIoctl(POVS_SWITCH_CONTEXT switchContext,
+                  UINT32 dpNo)
 {
     NTSTATUS status = STATUS_SUCCESS;
     OVS_DATAPATH *datapath = NULL;
     LOCK_STATE_EX dpLockState;
 
-    if (gOvsSwitchContext->dpNo != dpNo) {
+    if (switchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
         goto exit;
     }
 
-    datapath = &gOvsSwitchContext->datapath;
+    datapath = &switchContext->datapath;
     ASSERT(datapath);
     OvsAcquireDatapathWrite(datapath, &dpLockState, FALSE);
     DeleteAllFlows(datapath);
