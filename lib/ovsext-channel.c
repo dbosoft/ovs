@@ -328,7 +328,7 @@ ovsext_subscribe_packets__(struct ovsext_channel *ch, bool subscribe)
                           OVS_WIN_CONTROL_VERSION);
 
     ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
-    ovs_header->dp_ifindex = 0;
+    ovs_header->dp_ifindex = ch->dp_ifindex;
     nl_msg_put_u8(&request, OVS_NL_ATTR_PACKET_SUBSCRIBE, subscribe ? 1 : 0);
     nl_msg_put_u32(&request, OVS_NL_ATTR_PACKET_PID, ch->pid);
 
@@ -409,7 +409,7 @@ ovsext_recv_wait(struct ovsext_channel *ch)
                               OVS_CTRL_CMD_WIN_PEND_PACKET_REQ,
                               OVS_WIN_CONTROL_VERSION);
         ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
-        ovs_header->dp_ifindex = 0;
+        ovs_header->dp_ifindex = ch->dp_ifindex;
         ovsext_stamp_request(ch, &request);
 
         ok = DeviceIoControl(ch->handle, OVS_IOCTL_WRITE,

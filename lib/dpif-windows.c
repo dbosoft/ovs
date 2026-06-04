@@ -1134,6 +1134,10 @@ dpif_windows_open(const struct dpif_class *class, const char *name,
     dpif->dp_ifindex = dp.dp_ifindex;
     dpif->dp_name = dp_name;
     dpif->user_features = dp.user_features;
+    /* The channel stamps this on the packet subscribe/pend requests, which the
+     * kernel validates against a live datapath.  The default datapath need not
+     * be slot 0 (it is promoted on detach), so use the resolved index. */
+    dpif->channel.dp_ifindex = dp.dp_ifindex;
     ofpbuf_delete(buf);
 
     *dpifp = &dpif->dpif;

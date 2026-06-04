@@ -35,6 +35,12 @@ struct ovsext_channel {
     OVERLAPPED overlapped;  /* For a pended READ_PACKET / READ_EVENT. */
     HANDLE rx_event;        /* Manual-reset event; parked in poll_wevent_wait(). */
     uint32_t pid;           /* From OVS_IOCTL_GET_PID; the upcall routing key. */
+    uint32_t dp_ifindex;    /* Datapath this channel targets; stamped on the
+                             * packet subscribe/pend requests, which the kernel
+                             * validates against a live datapath.  The default
+                             * datapath is not always slot 0 (it is promoted on
+                             * detach), so this must carry the resolved index,
+                             * not a hardcoded 0. */
     uint32_t next_seq;      /* Netlink sequence allocator for this channel. */
     DWORD read_ioctl;       /* OVS_IOCTL_READ | _READ_EVENT | _READ_PACKET. */
     bool rx_pending;        /* True while an overlapped read is armed. */

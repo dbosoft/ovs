@@ -16,6 +16,15 @@ $ext='dbosoft Open vSwitch Extension'
 $OVERLAY = (Get-VMSwitch -Name eryph_overlay).Id.ToString().ToUpper()
 
 function DrvState { (Get-CimInstance Win32_SystemDriver -Filter "Name='DBO_OVSE'").State }
+# A subscribe/listen failure makes ovs-vswitchd exit; without this assert a ping
+# can still pass from the kernel flow cache and mask the crash (false green).
+function AssertVswitchd($where) {
+    if (Get-Process ovs-vswitchd -EA SilentlyContinue) { "vswitchd alive ($where): OK" }
+    else { "*** FAIL: vswitchd NOT running ($where) ***" }
+    $bad = Select-String -Path "$run\ovs-vswitchd.log" -EA SilentlyContinue `
+        -Pattern 'could not subscribe packets','failed to listen on datapath'
+    if ($bad) { "*** FAIL: subscribe/listen error in log ($where) ***"; $bad.Line | Select-Object -Last 2 }
+}
 function PingVMs($idx) {
     foreach ($vm in 'ub1','ub2') {
         $ll = (Get-VMNetworkAdapter -VMName $vm -EA SilentlyContinue).IPAddresses | Where-Object { $_ -match '^fe80' } | Select-Object -First 1
@@ -60,6 +69,7 @@ Enable-NetAdapter -Name br-int -EA Continue | Out-Null
 Start-Sleep 3
 $idx = (Get-NetAdapter -Name br-int -EA SilentlyContinue).ifIndex
 "=== 5. BASELINE forwarding (default=ovs-test2 anchor, traffic on eryph_overlay dp1) ==="
+AssertVswitchd 'baseline'
 PingVMs $idx
 
 "=== 6. DETACH THE DEFAULT: disable ovs-test2 ext (dp0) -> promotion ==="
@@ -76,12 +86,22 @@ PingVMs $idx
 "--- flows re-installed by upcalls (forwarding evidence) ---"
 & $dpctl dump-flows "${OVERLAY}@ovs-system" 2>&1 | Select-Object -First 4
 
-"=== 8. vswitchd RESTART after promotion (re-stamp pids on global hash) ==="
+"=== 8. vswitchd RESTART after promotion (FRESH subscribe against promoted dp) ==="
+# This is the regression case: the restarted vswitchd re-opens the dpif and
+# re-subscribes for upcalls.  The default datapath is now the PROMOTED survivor
+# (not slot 0), so a packet-subscribe carrying a hardcoded dp_ifindex=0 is
+# rejected EINVAL and vswitchd exits ("could not subscribe packets").
 Get-Process ovs-vswitchd -EA SilentlyContinue | Stop-Process -Force
 Start-Sleep 2
+Remove-Item "$run\ovs-vswitchd.log" -EA SilentlyContinue   # so the log scan only sees this run
 & "$native\ovs-vswitchd.exe" -vconsole:off -vfile:info --log-file="$run\ovs-vswitchd.log" --pidfile --detach | Out-Null
 Start-Sleep 4
+AssertVswitchd 'after restart post-promotion'
+& $dpctl del-flows "${OVERLAY}@ovs-system" 2>&1 | Out-Null   # force fresh upcall, not cache
+Start-Sleep 1
 PingVMs $idx
+"--- flows must be re-installed by the restarted vswitchd's upcalls ---"
+& $dpctl dump-flows "${OVERLAY}@ovs-system" 2>&1 | Select-Object -First 4
 
 "=== cleanup: stop daemons, restore baseline (overlay ext on, test2 off) ==="
 & $vsctl --timeout=20 del-br br-int 2>&1 | Out-Null
