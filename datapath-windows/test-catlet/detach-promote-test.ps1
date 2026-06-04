@@ -16,14 +16,20 @@ $ext='dbosoft Open vSwitch Extension'
 $OVERLAY = (Get-VMSwitch -Name eryph_overlay).Id.ToString().ToUpper()
 
 function DrvState { (Get-CimInstance Win32_SystemDriver -Filter "Name='DBO_OVSE'").State }
+# Records a regression so the script exits non-zero (see the tail). Cleanup still
+# runs, so the test VM is restored before we report failure.
+$script:Failed = $false
 # A subscribe/listen failure makes ovs-vswitchd exit; without this assert a ping
 # can still pass from the kernel flow cache and mask the crash (false green).
 function AssertVswitchd($where) {
     if (Get-Process ovs-vswitchd -EA SilentlyContinue) { "vswitchd alive ($where): OK" }
-    else { "*** FAIL: vswitchd NOT running ($where) ***" }
+    else { "*** FAIL: vswitchd NOT running ($where) ***"; $script:Failed = $true }
     $bad = Select-String -Path "$run\ovs-vswitchd.log" -EA SilentlyContinue `
         -Pattern 'could not subscribe packets','failed to listen on datapath'
-    if ($bad) { "*** FAIL: subscribe/listen error in log ($where) ***"; $bad.Line | Select-Object -Last 2 }
+    if ($bad) {
+        "*** FAIL: subscribe/listen error in log ($where) ***"; $bad.Line | Select-Object -Last 2
+        $script:Failed = $true
+    }
 }
 function PingVMs($idx) {
     foreach ($vm in 'ub1','ub2') {
@@ -107,4 +113,5 @@ PingVMs $idx
 & $vsctl --timeout=20 del-br br-int 2>&1 | Out-Null
 Get-Process ovs-vswitchd,ovsdb-server -EA SilentlyContinue | Stop-Process -Force
 "driver = $(DrvState)"
-"DETACH-TEST-DONE"
+if ($script:Failed) { "DETACH-TEST-DONE (FAILED)"; exit 1 }
+"DETACH-TEST-DONE (PASSED)"

@@ -15,12 +15,18 @@ $ANCHOR='ovs-promote-a'   # temp internal switch, enabled FIRST -> dp0 (detached
 $SURV='LANbond'           # enabled SECOND -> dp1 (promoted survivor)
 
 function DrvState { (Get-CimInstance Win32_SystemDriver -Filter "Name='DBO_OVSE'").State }
+# Records a regression so the script exits non-zero (see the tail). Cleanup still
+# runs, so the test VM is restored before we report failure.
+$script:Failed = $false
 function AssertVswitchd($where) {
     if (Get-Process ovs-vswitchd -EA SilentlyContinue) { "vswitchd alive ($where): OK" }
-    else { "*** FAIL: vswitchd NOT running ($where) ***" }
+    else { "*** FAIL: vswitchd NOT running ($where) ***"; $script:Failed = $true }
     $bad = Select-String -Path "$run\ovs-vswitchd.log" -EA SilentlyContinue `
         -Pattern 'could not subscribe packets','failed to listen on datapath'
-    if ($bad) { "*** FAIL: subscribe/listen error in log ($where) ***"; $bad.Line | Select-Object -Last 2 }
+    if ($bad) {
+        "*** FAIL: subscribe/listen error in log ($where) ***"; $bad.Line | Select-Object -Last 2
+        $script:Failed = $true
+    }
     else { "log clean ($where): no subscribe/listen error" }
 }
 
@@ -86,4 +92,5 @@ AssertVswitchd 'after restart post-promotion'
 Get-Process ovs-vswitchd,ovsdb-server -EA SilentlyContinue | Stop-Process -Force
 Remove-VMSwitch -Name $ANCHOR -Force -EA SilentlyContinue
 "driver = $(DrvState)"
-"REPRO-DONE"
+if ($script:Failed) { "REPRO-DONE (FAILED)"; exit 1 }
+"REPRO-DONE (PASSED)"
