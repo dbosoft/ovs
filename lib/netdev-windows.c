@@ -24,6 +24,7 @@
 #include "coverage.h"
 #include "fatal-signal.h"
 #include "netdev-provider.h"
+#include "openvswitch/list.h"
 #include "openvswitch/ofpbuf.h"
 #include "packets.h"
 #include "openvswitch/poll-loop.h"
@@ -33,6 +34,7 @@
 #include "odp-netlink.h"
 #include "netlink.h"
 #include "ovsext-channel.h"
+#include "timeval.h"
 
 VLOG_DEFINE_THIS_MODULE(netdev_windows);
 static struct vlog_rate_limit error_rl = VLOG_RATE_LIMIT_INIT(9999, 5);
@@ -56,7 +58,27 @@ struct netdev_windows {
     struct eth_addr mac;
     uint32_t mtu;
     unsigned int ifi_flags;
+
+    struct ovs_list list_node;       /* In 'netdev_windows_list'. */
+    bool carrier;                    /* Last observed media carrier state. */
+    long long int carrier_resets;    /* # of carrier transitions observed. */
+    NET_LUID if_luid;                /* Host interface LUID (carrier lookup). */
+    bool if_luid_valid;              /* 'if_luid' has been resolved. */
 };
+
+/* All constructed netdev_windows, so the periodic carrier refresh in
+ * netdev_windows_run()/wait() can iterate them. */
+static struct ovs_list netdev_windows_list
+    = OVS_LIST_INITIALIZER(&netdev_windows_list);
+static struct ovs_mutex netdev_windows_list_mutex = OVS_MUTEX_INITIALIZER;
+
+/* How often the media carrier of each netdev is re-queried from the kernel.
+ * The kernel learns link-state changes from NDIS indications immediately; this
+ * is just the userspace poll cadence that bounds bond failover latency. */
+#define NETDEV_WINDOWS_CARRIER_INTERVAL_MS 1000
+
+/* time_msec() at which the next carrier refresh is due (shared by run/wait). */
+static long long int netdev_windows_next_refresh = 0;
 
 /* Utility structure for netdev commands. */
 struct netdev_windows_netdev_info {
@@ -188,6 +210,15 @@ netdev_windows_system_construct(struct netdev *netdev_)
     netdev->ifi_flags = dp_to_netdev_ifi_flags(info.ifi_flags);
     netdev->cache_valid |= VALID_IFFLAG;
 
+    /* Default carrier up (the historical always-up behavior); the periodic
+     * refresh in netdev_windows_run() corrects it from the kernel's media link
+     * state, so a startup race never falsely disables a bond member. */
+    netdev->carrier = true;
+    netdev->carrier_resets = 0;
+    ovs_mutex_lock(&netdev_windows_list_mutex);
+    ovs_list_push_back(&netdev_windows_list, &netdev->list_node);
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
+
     VLOG_DBG("construct device %s, ovs_type: %u.",
              netdev_get_name(&netdev->up), info.ovs_type);
     return 0;
@@ -311,7 +342,11 @@ query_netdev(const char *devname,
 static void
 netdev_windows_destruct(struct netdev *netdev_)
 {
+    struct netdev_windows *netdev = netdev_windows_cast(netdev_);
 
+    ovs_mutex_lock(&netdev_windows_list_mutex);
+    ovs_list_remove(&netdev->list_node);
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
 }
 
 static void
@@ -487,6 +522,127 @@ netdev_windows_internal_construct(struct netdev *netdev_)
 }
 
 
+/* Resolves and caches 'netdev''s host interface LUID by matching its MAC in the
+ * system interface table.  This walk of the full table happens at most once per
+ * netdev (and again only if the interface disappears); the per-poll carrier read
+ * then uses a single-interface GetIfEntry2() instead of re-enumerating every
+ * tick.  Returns true once 'if_luid' is valid. */
+static bool
+netdev_windows_resolve_luid(struct netdev_windows *netdev)
+{
+    MIB_IF_TABLE2 *table = NULL;
+    ULONG i;
+
+    if (!(netdev->cache_valid & VALID_ETHERADDR)
+        || GetIfTable2(&table) != NO_ERROR || table == NULL) {
+        return false;
+    }
+    for (i = 0; i < table->NumEntries; i++) {
+        const MIB_IF_ROW2 *row = &table->Table[i];
+
+        if (row->PhysicalAddressLength == ETH_ADDR_LEN
+            && !memcmp(row->PhysicalAddress, netdev->mac.ea, ETH_ADDR_LEN)) {
+            netdev->if_luid = row->InterfaceLuid;
+            netdev->if_luid_valid = true;
+            break;
+        }
+    }
+    FreeMibTable(table);
+    return netdev->if_luid_valid;
+}
+
+/* Queries the current media carrier of 'netdev' from the Windows IP Helper.  On
+ * success stores it in '*carrier' and returns true; on failure leaves '*carrier'
+ * untouched and returns false (caller keeps its cached value).
+ *
+ * The Hyper-V extensible switch does not deliver an external adapter's
+ * link-state change down to a forwarding extension (the ovsext datapath): the
+ * NIC status indication is consumed at the switch's miniport/protocol edge, so
+ * the datapath never sees a member's carrier go down.  This is not specific to
+ * teaming -- it holds for any external NIC, SET member or single adapter.  The
+ * host network stack does track each adapter's media state, so carrier is read
+ * from MIB_IF_ROW2.MediaConnectState here. */
+static bool
+netdev_windows_query_carrier(struct netdev_windows *netdev, bool *carrier)
+{
+    MIB_IF_ROW2 row;
+
+    if (!netdev->if_luid_valid && !netdev_windows_resolve_luid(netdev)) {
+        return false;
+    }
+    memset(&row, 0, sizeof row);
+    row.InterfaceLuid = netdev->if_luid;
+    if (GetIfEntry2(&row) != NO_ERROR) {
+        /* The adapter likely went away; re-resolve the LUID next tick. */
+        netdev->if_luid_valid = false;
+        return false;
+    }
+    *carrier = (row.MediaConnectState == MediaConnectStateConnected);
+    return true;
+}
+
+static int
+netdev_windows_get_carrier(const struct netdev *netdev_, bool *carrier)
+{
+    struct netdev_windows *netdev = netdev_windows_cast(netdev_);
+
+    /* netdev_windows_run() updates 'carrier' under this mutex; guard the read
+     * with the same lock since netdev APIs may be called from other threads. */
+    ovs_mutex_lock(&netdev_windows_list_mutex);
+    *carrier = netdev->carrier;
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
+    return 0;
+}
+
+static long long int
+netdev_windows_get_carrier_resets(const struct netdev *netdev_)
+{
+    struct netdev_windows *netdev = netdev_windows_cast(netdev_);
+    long long int resets;
+
+    ovs_mutex_lock(&netdev_windows_list_mutex);
+    resets = netdev->carrier_resets;
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
+    return resets;
+}
+
+/* Periodically re-queries the media carrier of every Windows netdev and, on a
+ * transition, bumps the change sequence so dependent logic (notably bonding)
+ * re-evaluates which members are usable.  The whole list is refreshed together
+ * regardless of which class triggered the tick. */
+static void
+netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
+{
+    struct netdev_windows *netdev;
+    long long int now = time_msec();
+
+    if (now < netdev_windows_next_refresh) {
+        return;
+    }
+    netdev_windows_next_refresh = now + NETDEV_WINDOWS_CARRIER_INTERVAL_MS;
+
+    ovs_mutex_lock(&netdev_windows_list_mutex);
+    LIST_FOR_EACH (netdev, list_node, &netdev_windows_list) {
+        bool carrier;
+
+        if (netdev_windows_query_carrier(netdev, &carrier)
+            && carrier != netdev->carrier) {
+            netdev->carrier = carrier;
+            netdev->carrier_resets++;
+            netdev_change_seq_changed(&netdev->up);
+            VLOG_DBG("%s: carrier %s", netdev_get_name(&netdev->up),
+                     carrier ? "up" : "down");
+        }
+    }
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
+}
+
+static void
+netdev_windows_wait(const struct netdev_class *netdev_class OVS_UNUSED)
+{
+    poll_timer_wait_until(netdev_windows_next_refresh);
+}
+
 #define NETDEV_WINDOWS_CLASS(NAME, CONSTRUCT)                           \
 {                                                                       \
     .type               = NAME,                                         \
@@ -495,8 +651,12 @@ netdev_windows_internal_construct(struct netdev *netdev_)
     .construct          = CONSTRUCT,                                    \
     .destruct           = netdev_windows_destruct,                      \
     .dealloc            = netdev_windows_dealloc,                       \
+    .run                = netdev_windows_run,                           \
+    .wait               = netdev_windows_wait,                          \
     .get_etheraddr      = netdev_windows_get_etheraddr,                 \
     .set_etheraddr      = netdev_windows_set_etheraddr,                 \
+    .get_carrier        = netdev_windows_get_carrier,                   \
+    .get_carrier_resets = netdev_windows_get_carrier_resets,            \
     .update_flags       = netdev_windows_update_flags,                  \
     .get_next_hop       = netdev_windows_get_next_hop,                  \
     .arp_lookup         = netdev_windows_arp_lookup,                    \
