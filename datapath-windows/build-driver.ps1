@@ -3,15 +3,16 @@
   Dev build for the dbosoft OVS Hyper-V forwarding extension (DBO_OVSE.sys).
 
 .DESCRIPTION
-  Wraps the MSBuild invocation with the two settings the WDK 10.0.26100 build
-  on this machine needs:
-    -p:Version=...                a concrete DriverVer version, because the
-                                  vcxproj's <Inf><TimeStamp>$(Version)</TimeStamp>
-                                  is empty and stampinf.exe rejects an empty -v.
+  Wraps the MSBuild invocation with the setting the WDK 10.0.26100 build on this
+  machine needs:
     -p:SkipPackageVerification    skips the DPVerifier/InfVerif step, whose x86
                                   InfVerif.dll is not present in this WDK install.
                                   (Verification is a packaging lint, not a build
                                   or signing requirement.)
+
+  The DriverVer version is no longer injected here: the vcxproj derives it from
+  the OVS source version in configure.ac (AC_INIT). Pass -Version only to
+  override (e.g. a dev build that must outrank an already-installed driver).
 
   Produces a test-signed package under:
     ovsext\x64\<Config>\package\   and   x64\<Config>\package\
@@ -24,9 +25,14 @@
 param(
     [ValidateSet('Win10Debug', 'Win10Release')]
     [string]$Config = 'Win10Debug',
-    # Dev DriverVer must outrank the eryph-shipped 3.3.90 in the test VM so
-    # pnputil/PnP prefers our build when superseding the installed extension.
-    [string]$Version = '3.99.0.0',
+    # DriverVer version. Empty => the vcxproj derives it from the OVS source
+    # version in configure.ac (AC_INIT). Override only for a dev build that must
+    # outrank an already-installed driver via pnputil/PnP ranking.
+    [string]$Version = '',
+    # NDIS contract for the Win10 configs. Empty = the vcxproj default (660, the
+    # floor binary). Set to 685 for the modern Server-2022/Win11 feature binary.
+    [ValidateSet('', '660', '670', '680', '681', '682', '683', '684', '685')]
+    [string]$NdisLevel = '',
     [switch]$Rebuild
 )
 
@@ -49,11 +55,12 @@ $msbuildArgs = @(
     "-t:$target"
     "-p:Configuration=$Config"
     '-p:Platform=x64'
-    "-p:Version=$Version"
     '-p:SkipPackageVerification=true'
     '-m'
     '-nologo'
 )
+if ($Version)   { $msbuildArgs += "-p:Version=$Version" }
+if ($NdisLevel) { $msbuildArgs += "-p:OvsNdisLevel=$NdisLevel" }
 
 & $msbuild @msbuildArgs
 

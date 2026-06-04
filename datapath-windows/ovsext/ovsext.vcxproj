@@ -118,6 +118,22 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <OutDir>$(IntDir)</OutDir>
+    <!-- NDIS contract level for the Win10 configs. Overridable on the command
+         line (-p:OvsNdisLevel=685) to produce a higher-contract binary; the
+         declared NDIS version is a hard load-floor, so we ship one binary per
+         supported floor (660 = Server 2016 and up, 685 = Server 2022 / Win11). -->
+    <OvsNdisLevel Condition="'$(OvsNdisLevel)'==''">660</OvsNdisLevel>
+    <!-- DriverVer / FILEVERSION version. When not supplied on the command line
+         (-p:Version=x.y.z.w), derive it from the OVS source version in
+         configure.ac (AC_INIT) so a plain MSBuild / Visual Studio build is
+         stamped correctly without anyone having to inject it. This replaces the
+         easy-to-forget external injection (an empty version makes stampinf
+         reject the INF). A dev build that must outrank an already-installed
+         driver can still override with -p:Version. -->
+    <OvsConfigureAc>$(MSBuildThisFileDirectory)..\..\configure.ac</OvsConfigureAc>
+    <OvsAcText Condition="Exists('$(OvsConfigureAc)')">$([System.IO.File]::ReadAllText('$(OvsConfigureAc)'))</OvsAcText>
+    <OvsSourceVersion Condition="'$(OvsAcText)' != ''">$([System.Text.RegularExpressions.Regex]::Match(`$(OvsAcText)`, `(?&lt;=AC_INIT\(openvswitch,\s*)\d+\.\d+\.\d+`))</OvsSourceVersion>
+    <Version Condition="'$(Version)' == '' and '$(OvsSourceVersion)' != ''">$(OvsSourceVersion).0</Version>
   </PropertyGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Win8 Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
@@ -252,13 +268,13 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">
     <ClCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </ClCompile>
     <Midl>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </Midl>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win8 Debug|x64'">
@@ -307,24 +323,24 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">
     <ClCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </ClCompile>
     <Midl>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </Midl>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10Analyze|x64'">
     <ClCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </ClCompile>
     <Midl>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </Midl>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1</PreprocessorDefinitions>
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
@@ -440,9 +456,9 @@
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win8.1 Release|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win8.1 Debug|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win8.1Analyze|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win10Analyze|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS640=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win10 Debug|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win10Analyze|x64'">%(PreprocessorDefinitions);NDIS_WDM=1;NDIS$(OvsNdisLevel)=1;VersionWithDots=$(Version);VersionWithCommas=$(Version.Replace('.',','))</PreprocessorDefinitions>
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>

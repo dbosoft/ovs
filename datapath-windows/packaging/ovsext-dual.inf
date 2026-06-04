@@ -1,0 +1,147 @@
+;
+; Copyright (c) dbosoft GmbH. All Rights Reserved.
+;
+; Dual-binary package for the dbosoft Open vSwitch forwarding extension.
+;
+; The declared NDIS version is a hard load-floor (a filter that declares a higher
+; MinorNdisVersion than the running OS fails NdisFRegisterFilterDriver), so each OS
+; is given the highest binary it can load:
+;   * Windows Server 2022 (build 20348) and Windows 11 (22000+) -> NDIS 6.85
+;     "modern" binary (DBO_OVSE.sys), run from the driver store (DIRID 13).
+;   * Windows 10 21H2 (19044) up to pre-2022 builds -> NDIS 6.60 "floor" binary
+;     (DBO_OVSE60.sys), run from the driver store (DIRID 13 works on 19044+).
+;   * Older (Windows Server 2016/2019, pre-21H2 Windows 10) -> NDIS 6.60 floor,
+;     copied to %systemroot%\system32\drivers (DIRID 12) because run-from-store
+;     service installation fails on Server 2019.
+;
+; Both binaries are built from one source tree via build-driver.ps1 -NdisLevel.
+;
+
+[version]
+Signature   = "$Windows NT$"
+Class       = NetService
+ClassGUID   = {4D36E974-E325-11CE-BFC1-08002BE10318}
+Provider    = %OVS%
+CatalogFile = DBO_OVSE.cat
+DriverVer   = 10/10/2013,1.0.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%OVS% = OVS, NTamd64.10.0...20348, NTamd64.10.0...19044, NTamd64
+
+; Windows Server 2022 (20348) and Windows 11 (22000+): NDIS 6.85 modern.
+[OVS.NTamd64.10.0...20348]
+%DBO_OVSE_Desc% = OVS_Modern, DBO_OVSE
+
+; Windows 10 21H2..pre-20348 (19044+): the 6.85 binary cannot load here; use the
+; 6.60 floor binary. Run-from-store (DIRID 13) works on 19044 and later.
+[OVS.NTamd64.10.0...19044]
+%DBO_OVSE_Desc% = OVS_Floor13, DBO_OVSE
+
+; Older (Windows Server 2016/2019, pre-21H2 Windows 10): 6.60 floor, DIRID 12.
+[OVS.NTamd64]
+%DBO_OVSE_Desc% = OVS_Floor12, DBO_OVSE
+
+[SourceDisksNames]
+1 = %DBO_OVSE_Desc%
+
+[SourceDisksFiles]
+DBO_OVSE.sys   = 1
+DBO_OVSE60.sys = 1
+
+[DestinationDirs]
+CF_Modern  = 13
+CF_Floor13 = 13
+CF_Floor12 = 12
+
+;------------------------------------------------------------------ Modern (6.85)
+[OVS_Modern]
+AddReg           = OVS_Ndi
+Characteristics  = 0x40000
+NetCfgInstanceId = "{63E968D9-754E-4704-A5CE-6E3BF7DDF59B}"
+Copyfiles        = CF_Modern
+
+[CF_Modern]
+DBO_OVSE.sys,,,2
+
+[OVS_Modern.Services]
+AddService = DBO_OVSE,,Svc_Modern
+
+[Svc_Modern]
+DisplayName    = %DBO_OVSE_Desc%
+ServiceType    = 1 ;SERVICE_KERNEL_DRIVER
+StartType      = 1 ;SERVICE_SYSTEM_START
+ErrorControl   = 1 ;SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\DBO_OVSE.sys
+LoadOrderGroup = NDIS
+Description    = %DBO_OVSE_Desc%
+
+[OVS_Modern.Remove.Services]
+DelService = DBO_OVSE,0x200
+
+;------------------------------------------------------- Floor (6.60), run-from-store
+[OVS_Floor13]
+AddReg           = OVS_Ndi
+Characteristics  = 0x40000
+NetCfgInstanceId = "{63E968D9-754E-4704-A5CE-6E3BF7DDF59B}"
+Copyfiles        = CF_Floor13
+
+[CF_Floor13]
+DBO_OVSE60.sys,,,2
+
+[OVS_Floor13.Services]
+AddService = DBO_OVSE,,Svc_Floor13
+
+[Svc_Floor13]
+DisplayName    = %DBO_OVSE_Desc%
+ServiceType    = 1
+StartType      = 1
+ErrorControl   = 1
+ServiceBinary  = %13%\DBO_OVSE60.sys
+LoadOrderGroup = NDIS
+Description    = %DBO_OVSE_Desc%
+
+[OVS_Floor13.Remove.Services]
+DelService = DBO_OVSE,0x200
+
+;-------------------------------------------------- Floor (6.60), system32\drivers
+[OVS_Floor12]
+AddReg           = OVS_Ndi
+Characteristics  = 0x40000
+NetCfgInstanceId = "{63E968D9-754E-4704-A5CE-6E3BF7DDF59B}"
+Copyfiles        = CF_Floor12
+
+[CF_Floor12]
+DBO_OVSE60.sys,,,2
+
+[OVS_Floor12.Services]
+AddService = DBO_OVSE,,Svc_Floor12
+
+[Svc_Floor12]
+DisplayName    = %DBO_OVSE_Desc%
+ServiceType    = 1
+StartType      = 1
+ErrorControl   = 1
+ServiceBinary  = %12%\DBO_OVSE60.sys
+LoadOrderGroup = NDIS
+Description    = %DBO_OVSE_Desc%
+
+[OVS_Floor12.Remove.Services]
+DelService = DBO_OVSE,0x200
+
+;------------------------------------------------------------------- Ndi (shared)
+[OVS_Ndi]
+HKR, Ndi,Service,,"DBO_OVSE"
+HKR, Ndi,CoServices,0x00010000,"DBO_OVSE"
+HKR, Ndi,HelpText,,%DBO_OVSE_HelpText%
+HKR, Ndi,FilterClass,,"ms_switch_forward"
+HKR, Ndi,FilterType,0x00010001,0x00000002
+HKR, Ndi\Interfaces,UpperRange,,"noupper"
+HKR, Ndi\Interfaces,LowerRange,,"nolower"
+HKR, Ndi\Interfaces,FilterMediaTypes,,"vmnetextension"
+HKR, Ndi,FilterRunType,0x00010001, 2 ; optional
+
+[Strings]
+OVS = "dbosoft GmbH"
+DBO_OVSE_Desc = "dbosoft Open vSwitch Extension"
+DBO_OVSE_HelpText = "Open vSwitch forwarding switch extension"

@@ -113,8 +113,22 @@ DriverEntry(PDRIVER_OBJECT driverObject,
 
     RtlZeroMemory(&driverChars, sizeof driverChars);
     driverChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-    driverChars.Header.Size = sizeof driverChars;
+    /*
+     * The characteristics revision must match the declared NDIS version. NDIS
+     * requires filters declaring MinorNdisVersion >= 80 to present REVISION_3
+     * (which carries the synchronous-OID handler slots); registering a lower
+     * revision at that contract is rejected (surfaces as "Access is denied").
+     * Older contracts use REVISION_2. The synchronous-OID handlers are left
+     * NULL above by RtlZeroMemory, which is valid - this filter has no
+     * synchronous-OID path. Size must always match the declared revision.
+     */
+#if (NDIS_SUPPORT_NDIS680)
+    driverChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_3;
+    driverChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_3;
+#else
     driverChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;
+    driverChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2;
+#endif
     driverChars.MajorNdisVersion = NDIS_FILTER_MAJOR_VERSION;
     driverChars.MinorNdisVersion = NDIS_FILTER_MINOR_VERSION;
     driverChars.MajorDriverVersion = 1;
