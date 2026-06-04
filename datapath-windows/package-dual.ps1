@@ -50,9 +50,13 @@ Write-Host "Signing cert: $($cert.Subject) [$thumb]" -ForegroundColor DarkGray
 Write-Host "`n== Building NDIS 6.60 floor ($cfg) ==" -ForegroundColor Cyan
 & (Join-Path $here 'build-driver.ps1') -Config $cfg -NdisLevel 660 -Version $Version -Rebuild
 if ($LASTEXITCODE) { throw 'floor build failed' }
-$floorSys = Join-Path $here "x64\$cfg\package\DBO_OVSE.sys"
-$floorTmp = Join-Path $here "x64\$cfg\DBO_OVSE60.sys"
-Copy-Item $floorSys $floorTmp -Force   # stash before the modern build overwrites it
+$floorSys    = Join-Path $here "x64\$cfg\package\DBO_OVSE.sys"
+$floorPdb    = Join-Path $here "ovsext\x64\$cfg\DBO_OVSE.pdb"
+$floorSysTmp = Join-Path $here "x64\$cfg\DBO_OVSE60.sys"
+$floorPdbTmp = Join-Path $here "x64\$cfg\DBO_OVSE60.pdb"
+# Stash the floor binary + symbols before the modern build overwrites them.
+Copy-Item $floorSys $floorSysTmp -Force
+Copy-Item $floorPdb $floorPdbTmp -Force
 
 Write-Host "`n== Building NDIS 6.85 modern ($cfg) ==" -ForegroundColor Cyan
 & (Join-Path $here 'build-driver.ps1') -Config $cfg -NdisLevel 685 -Version $Version -Rebuild
@@ -64,8 +68,14 @@ $pkg = Join-Path $here "x64\dual-$Config\package"
 if (Test-Path $pkg) { Remove-Item $pkg -Recurse -Force }
 New-Item -ItemType Directory -Force $pkg | Out-Null
 Copy-Item $modernSys (Join-Path $pkg 'DBO_OVSE.sys')   -Force   # 6.85 modern
-Copy-Item $floorTmp  (Join-Path $pkg 'DBO_OVSE60.sys') -Force   # 6.60 floor
+Copy-Item $floorSysTmp (Join-Path $pkg 'DBO_OVSE60.sys') -Force # 6.60 floor
 Copy-Item (Join-Path $here 'packaging\ovsext-dual.inf') (Join-Path $pkg 'ovsext.inf') -Force
+# Symbols + the test certificate, so this dir is a complete driver/ staging set
+# that build-ovn-package.ps1 can consume verbatim.
+Copy-Item (Join-Path $here "ovsext\x64\$cfg\DBO_OVSE.pdb") (Join-Path $pkg 'DBO_OVSE.pdb')   -Force
+Copy-Item $floorPdbTmp                                     (Join-Path $pkg 'DBO_OVSE60.pdb') -Force
+$cer = Join-Path $here "x64\$cfg\package.cer"
+if (Test-Path $cer) { Copy-Item $cer (Join-Path $pkg 'package.cer') -Force }
 
 # 3. Stamp the INF version, embed-sign both binaries, catalog, sign the catalog.
 & $stampinf -f (Join-Path $pkg 'ovsext.inf') -d '*' -v $Version
