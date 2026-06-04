@@ -27,6 +27,10 @@ param(
     # Dev DriverVer must outrank the eryph-shipped 3.3.90 in the test VM so
     # pnputil/PnP prefers our build when superseding the installed extension.
     [string]$Version = '3.99.0.0',
+    # NDIS contract for the Win10 configs. Empty = the vcxproj default (660, the
+    # floor binary). Set to 685 for the modern Server-2022/Win11 feature binary.
+    [ValidateSet('', '660', '670', '680', '681', '682', '683', '684', '685')]
+    [string]$NdisLevel = '',
     [switch]$Rebuild
 )
 
@@ -54,6 +58,7 @@ $msbuildArgs = @(
     '-m'
     '-nologo'
 )
+if ($NdisLevel) { $msbuildArgs += "-p:OvsNdisLevel=$NdisLevel" }
 
 & $msbuild @msbuildArgs
 
