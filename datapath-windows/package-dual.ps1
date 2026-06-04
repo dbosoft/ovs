@@ -22,12 +22,27 @@
 param(
     [ValidateSet('Release', 'Debug')]
     [string]$Config  = 'Release',
-    [string]$Version = '3.99.0.0'
+    # Empty => derive from the OVS source version in configure.ac (AC_INIT), the
+    # same source the vcxproj uses. Override only to force a specific DriverVer.
+    [string]$Version = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $cfg  = "Win10$Config"
+
+# Derive the DriverVer version from the OVS source (configure.ac) when not given,
+# so the INF stamp, both binaries and the catalog all carry the real version.
+if (-not $Version) {
+    $acPath = Join-Path $here '..\configure.ac'
+    $ac = Get-Content -Raw -LiteralPath $acPath
+    if ($ac -match 'AC_INIT\(openvswitch,\s*([0-9]+\.[0-9]+\.[0-9]+)') {
+        $Version = "$($Matches[1]).0"
+        Write-Host "Driver version derived from configure.ac: $Version" -ForegroundColor DarkGray
+    } else {
+        throw "Could not derive version from $acPath (no AC_INIT match); pass -Version."
+    }
+}
 
 # Locate the WDK signing/cataloging tools (x86 flavor, as the WDK build uses).
 $wdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
