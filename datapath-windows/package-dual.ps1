@@ -112,5 +112,7 @@ if ($LASTEXITCODE) { throw "signtool sign DBO_OVSE.cat failed ($LASTEXITCODE)" }
 Write-Host "`n== Package ==" -ForegroundColor Green
 Get-ChildItem $pkg | Select-Object Name, Length, LastWriteTime
 & $signtool verify /pa /c (Join-Path $pkg 'DBO_OVSE.cat') (Join-Path $pkg 'DBO_OVSE.sys')
+if ($LASTEXITCODE) { throw "catalog verify failed for DBO_OVSE.sys ($LASTEXITCODE)" }
 & $signtool verify /pa /c (Join-Path $pkg 'DBO_OVSE.cat') (Join-Path $pkg 'DBO_OVSE60.sys')
+if ($LASTEXITCODE) { throw "catalog verify failed for DBO_OVSE60.sys ($LASTEXITCODE)" }
 Write-Host "`nDual-binary package: $pkg" -ForegroundColor Green

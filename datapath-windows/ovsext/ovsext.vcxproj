@@ -131,7 +131,7 @@
          reject the INF). A dev build that must outrank an already-installed
          driver can still override with -p:Version. -->
     <OvsConfigureAc>$(MSBuildThisFileDirectory)..\..\configure.ac</OvsConfigureAc>
-    <OvsAcText Condition="Exists('$(OvsConfigureAc)')">$([System.IO.File]::ReadAllText($(OvsConfigureAc)))</OvsAcText>
+    <OvsAcText Condition="Exists('$(OvsConfigureAc)')">$([System.IO.File]::ReadAllText('$(OvsConfigureAc)'))</OvsAcText>
     <OvsSourceVersion Condition="'$(OvsAcText)' != ''">$([System.Text.RegularExpressions.Regex]::Match(`$(OvsAcText)`, `(?&lt;=AC_INIT\(openvswitch,\s*)\d+\.\d+\.\d+`))</OvsSourceVersion>
     <Version Condition="'$(Version)' == '' and '$(OvsSourceVersion)' != ''">$(OvsSourceVersion).0</Version>
   </PropertyGroup>
