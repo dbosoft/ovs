@@ -178,11 +178,24 @@ netdev_windows_system_construct(struct netdev *netdev_)
 
     /* Query the attributes and runtime status of the netdev. */
     ret = query_netdev(netdev_get_name(&netdev->up), &info, &buf);
-    /* "Internal" netdevs do not exist in the kernel yet.  They need to be
-     * transformed into a netdev object and passed to dpif_port_add(), which
-     * will add them to the kernel.  */
-    if (strcmp(netdev_get_type(&netdev->up), "internal") && ret) {
-        return ret;
+    /* Build a placeholder netdev only when the kernel reports the device truly
+     * absent (ENODEV).  An "internal" netdev does not exist in the kernel yet:
+     * it is created later by passing the netdev object to dpif_port_add().  A
+     * "system" (NETDEV) port whose backing Hyper-V adapter is not present yet
+     * is deferred the same way so dpif_port_add() pre-creates a userspace-first
+     * ghost vport, resurrected when the Hyper-V port appears.  This mirrors
+     * netdev-linux.c, which ignores ENODEV at construct only for these cases;
+     * any other query error -- or an absent device of a non-deferrable type --
+     * is a real failure and must fail netdev_open().  On the deferred path
+     * query_netdev() zero-initializes 'info' and NULLs 'buf', so the netdev is
+     * built from sane defaults and resynced from the kernel by the periodic
+     * refresh in netdev_windows_run() once the device appears. */
+    {
+        const char *t = netdev_get_type(&netdev->up);
+        bool deferrable = !strcmp(t, "internal") || !strcmp(t, "system");
+        if (ret && !(deferrable && ret == ENODEV)) {
+            return ret;
+        }
     }
     ofpbuf_delete(buf);
 
@@ -534,7 +547,10 @@ netdev_windows_resolve_luid(struct netdev_windows *netdev)
     ULONG i;
 
     if (!(netdev->cache_valid & VALID_ETHERADDR)
+        || eth_addr_is_zero(netdev->mac)
         || GetIfTable2(&table) != NO_ERROR || table == NULL) {
+        /* No usable MAC to match (e.g. a ghost constructed while its device was
+         * absent) -- do not match a host pseudo-interface with a zero MAC. */
         return false;
     }
     for (i = 0; i < table->NumEntries; i++) {
@@ -551,34 +567,82 @@ netdev_windows_resolve_luid(struct netdev_windows *netdev)
     return netdev->if_luid_valid;
 }
 
-/* Queries the current media carrier of 'netdev' from the Windows IP Helper.  On
- * success stores it in '*carrier' and returns true; on failure leaves '*carrier'
- * untouched and returns false (caller keeps its cached value).
+/* Re-syncs 'netdev''s cached device properties (admin flags, MAC, MTU) from its
+ * kernel vport and reports the datapath link state.  Windows has no asynchronous
+ * device-change notification; the Linux netdev keeps 'ifi_flags' current from
+ * rtnetlink RTM_NEWLINK messages, and the periodic refresh in
+ * netdev_windows_run() is the equivalent resync point here.  This matters for a
+ * userspace-first ghost (constructed while its Hyper-V adapter was absent, so
+ * query_netdev() failed and the cached flags came up empty): once the port is
+ * resurrected the vport reports OVS_WIN_NETDEV_IFF_UP, without which the shared
+ * netdev_get_carrier() would short-circuit the interface to admin-down.  On
+ * success stores the kernel link state (OVS_WIN_NETDEV_IFF_RUNNING) in '*up' and
+ * returns true. */
+static bool
+netdev_windows_refresh_kernel(struct netdev_windows *netdev, bool *up)
+{
+    struct netdev_windows_netdev_info info;
+    struct ofpbuf *buf;
+
+    if (query_netdev(netdev_get_name(&netdev->up), &info, &buf)) {
+        return false;
+    }
+
+    netdev->ifi_flags = dp_to_netdev_ifi_flags(info.ifi_flags);
+    netdev->cache_valid |= VALID_IFFLAG;
+    /* A changed MAC (notably a ghost gaining its real address at resurrection)
+     * invalidates the cached host-interface LUID, which is keyed by MAC. */
+    if (!eth_addr_equals(netdev->mac, info.mac_address)) {
+        netdev->if_luid_valid = false;
+    }
+    netdev->mac = info.mac_address;
+    netdev->cache_valid |= VALID_ETHERADDR;
+    netdev->mtu = info.mtu;
+    netdev->cache_valid |= VALID_MTU;
+
+    *up = (info.ifi_flags & OVS_WIN_NETDEV_IFF_RUNNING) != 0;
+    ofpbuf_delete(buf);
+    return true;
+}
+
+/* Queries the current carrier of 'netdev'.  On success stores it in '*carrier'
+ * and returns true; on failure leaves '*carrier' untouched and returns false
+ * (caller keeps its cached value).
  *
- * The Hyper-V extensible switch does not deliver an external adapter's
- * link-state change down to a forwarding extension (the ovsext datapath): the
- * NIC status indication is consumed at the switch's miniport/protocol edge, so
- * the datapath never sees a member's carrier go down.  This is not specific to
- * teaming -- it holds for any external NIC, SET member or single adapter.  The
- * host network stack does track each adapter's media state, so carrier is read
- * from MIB_IF_ROW2.MediaConnectState here. */
+ * Two link-state sources are combined.  A physical adapter / SET member
+ * resolves to a host interface whose MIB_IF_ROW2.MediaConnectState detects a
+ * physical link-down that the datapath port state cannot see -- the Hyper-V
+ * switch consumes the NIC status indication at its miniport/protocol edge and
+ * never delivers it to the forwarding extension.  A virtual port (a VM vNIC, or
+ * a userspace-first ghost awaiting attach) has no host interface and no host
+ * MAC to match, so the kernel datapath link state (IFF_RUNNING) is the only
+ * truth.  Carrier is media-up AND kernel-up where both apply, else whichever is
+ * available. */
 static bool
 netdev_windows_query_carrier(struct netdev_windows *netdev, bool *carrier)
 {
+    bool kernel_up = false;
+    bool have_kernel = netdev_windows_refresh_kernel(netdev, &kernel_up);
     MIB_IF_ROW2 row;
 
-    if (!netdev->if_luid_valid && !netdev_windows_resolve_luid(netdev)) {
-        return false;
+    if (netdev->if_luid_valid || netdev_windows_resolve_luid(netdev)) {
+        memset(&row, 0, sizeof row);
+        row.InterfaceLuid = netdev->if_luid;
+        if (GetIfEntry2(&row) != NO_ERROR) {
+            /* The adapter likely went away; re-resolve the LUID next tick. */
+            netdev->if_luid_valid = false;
+        } else {
+            bool media = (row.MediaConnectState == MediaConnectStateConnected);
+            *carrier = have_kernel ? (kernel_up && media) : media;
+            return true;
+        }
     }
-    memset(&row, 0, sizeof row);
-    row.InterfaceLuid = netdev->if_luid;
-    if (GetIfEntry2(&row) != NO_ERROR) {
-        /* The adapter likely went away; re-resolve the LUID next tick. */
-        netdev->if_luid_valid = false;
-        return false;
+
+    if (have_kernel) {
+        *carrier = kernel_up;
+        return true;
     }
-    *carrier = (row.MediaConnectState == MediaConnectStateConnected);
-    return true;
+    return false;
 }
 
 static int
@@ -624,14 +688,25 @@ netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
     ovs_mutex_lock(&netdev_windows_list_mutex);
     LIST_FOR_EACH (netdev, list_node, &netdev_windows_list) {
         bool carrier;
+        uint32_t old_flags = netdev->ifi_flags;
+        bool changed = false;
 
         if (netdev_windows_query_carrier(netdev, &carrier)
             && carrier != netdev->carrier) {
             netdev->carrier = carrier;
             netdev->carrier_resets++;
-            netdev_change_seq_changed(&netdev->up);
+            changed = true;
             VLOG_DBG("%s: carrier %s", netdev_get_name(&netdev->up),
                      carrier ? "up" : "down");
+        }
+        /* netdev_windows_query_carrier() re-syncs the cached admin flags from
+         * the kernel; a transition (notably a resurrected ghost coming up)
+         * must wake the status refresh that publishes admin_state/link_state. */
+        if (netdev->ifi_flags != old_flags) {
+            changed = true;
+        }
+        if (changed) {
+            netdev_change_seq_changed(&netdev->up);
         }
     }
     ovs_mutex_unlock(&netdev_windows_list_mutex);

@@ -155,6 +155,7 @@ OvsPostVportEvent(POVS_VPORT_EVENT_ENTRY event)
     LIST_ENTRY list;
     PLIST_ENTRY entry;
     PIRP irp;
+    UINT32 eventType = event->type;
 
     InitializeListHead(&list);
 
@@ -165,10 +166,9 @@ OvsPostVportEvent(POVS_VPORT_EVENT_ENTRY event)
 
     LIST_FORALL(&ovsEventQueueArr[OVS_MCAST_VPORT_EVENT], link) {
         queue = CONTAINING_RECORD(link, OVS_EVENT_QUEUE, queueLink);
-        if ((event->type & queue->mask) == 0) {
+        if ((eventType & queue->mask) == 0) {
             continue;
         }
-        event->type &= queue->mask;
 
         elem = (POVS_EVENT_QUEUE_ELEM)OvsAllocateMemoryWithTag(
             sizeof(*elem), OVS_EVENT_POOL_TAG);
@@ -180,6 +180,10 @@ OvsPostVportEvent(POVS_VPORT_EVENT_ENTRY event)
         }
 
         RtlCopyMemory(&elem->vportEvent, event, sizeof elem->vportEvent);
+        /* Deliver only the bits this queue subscribed to, without mutating the
+         * shared 'event' -- otherwise a later queue with a disjoint mask would
+         * test an already-stripped type and miss a multi-bit event. */
+        elem->vportEvent.type = eventType & queue->mask;
         InsertTailList(&queue->elemList, &elem->link);
         queue->numElems++;
         OVS_LOG_INFO("Queue: %p, numElems: %d",

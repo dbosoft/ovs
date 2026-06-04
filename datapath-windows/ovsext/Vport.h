@@ -117,6 +117,11 @@ typedef struct _OVS_VPORT_ENTRY {
     PNL_ATTR                     portOptions;
     BOOLEAN                      isAbsentOnHv; /* Is this port present on the
                                                   Hyper-V switch? */
+    BOOLEAN                      hvAttachPending; /* Userspace-first ghost: the
+                                                  port was created from OVS
+                                                  before its Hyper-V port
+                                                  existed, and is awaiting
+                                                  attach by HvCreatePort(). */
 } OVS_VPORT_ENTRY, *POVS_VPORT_ENTRY;
 
 struct _OVS_SWITCH_CONTEXT;

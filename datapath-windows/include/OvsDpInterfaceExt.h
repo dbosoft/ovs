@@ -166,6 +166,7 @@ enum ovs_win_netdev_attr {
 
 #define OVS_WIN_NETDEV_IFF_UP                   (1 << 0)
 #define OVS_WIN_NETDEV_IFF_PROMISC              (1 << 1)
+#define OVS_WIN_NETDEV_IFF_RUNNING              (1 << 2)
 
 typedef struct ovs_dp_stats OVS_DP_STATS;
 typedef enum ovs_vport_type OVS_VPORT_TYPE;
