@@ -93,15 +93,20 @@ $cer = Join-Path $here "x64\$cfg\package.cer"
 if (Test-Path $cer) { Copy-Item $cer (Join-Path $pkg 'package.cer') -Force }
 
 # 3. Stamp the INF version, embed-sign both binaries, catalog, sign the catalog.
+# Check every external tool: a silent failure here would leave an unstamped or
+# unsigned package that only fails much later (at install/load on the VM).
 & $stampinf -f (Join-Path $pkg 'ovsext.inf') -d '*' -v $Version
+if ($LASTEXITCODE) { throw "stampinf failed ($LASTEXITCODE)" }
 foreach ($s in 'DBO_OVSE.sys','DBO_OVSE60.sys') {
     & $signtool sign /fd SHA256 /sha1 $thumb /ph (Join-Path $pkg $s) | Out-Null
+    if ($LASTEXITCODE) { throw "signtool sign $s failed ($LASTEXITCODE)" }
 }
 
 $osTokens = '10_X64,Server2016_X64,ServerRS5_X64,10_VB_X64,ServerFE_X64,10_NI_X64,10_GE_X64,10_CO_X64'
 & $inf2cat "/driver:$pkg" "/os:$osTokens" /uselocaltime
 if ($LASTEXITCODE) { throw 'inf2cat failed' }
 & $signtool sign /fd SHA256 /sha1 $thumb /ph (Join-Path $pkg 'DBO_OVSE.cat')
+if ($LASTEXITCODE) { throw "signtool sign DBO_OVSE.cat failed ($LASTEXITCODE)" }
 
 # 4. Verify the catalog covers both binaries.
 Write-Host "`n== Package ==" -ForegroundColor Green
