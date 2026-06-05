@@ -1778,6 +1778,13 @@ test_netdev_refresh(struct mock_kernel *m)
     CHECK(netdev_get_change_seq(netdev) != seq0);
 
     netdev_close(netdev);
+
+    /* A userspace-first ghost (the device is absent at construct) has no kernel
+     * MTU yet; get_mtu must report it unknown rather than a bogus 0. */
+    m->nd_present = false;
+    CHECK(netdev_open("nd-ghost", "system", &netdev) == 0);
+    CHECK(netdev_get_mtu(netdev, &mtu) != 0);
+    netdev_close(netdev);
 }
 
 /* Concurrency for the refactored refresh: netdev_windows_run() now does its
@@ -1929,8 +1936,8 @@ main(int argc, char *argv[])
     test_meters(dpif, &mock);
     test_feature_negotiation(dpif, &mock);
 
-    /* The "system" netdev provider shares the mock ovsext transport. */
-    netdev_register_provider(&netdev_windows_class);
+    /* The "system" netdev provider shares the mock ovsext transport; it is
+     * registered by netdev_initialize() the first time a netdev is opened. */
     test_netdev_refresh(&mock);
     test_netdev_refresh_concurrent(&mock);
 
