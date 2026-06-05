@@ -109,6 +109,8 @@ struct mock_kernel {
     struct mock_record dp[MOCK_MAX_RECORDS];    int n_dp;
     struct mock_record vport[MOCK_MAX_RECORDS]; int n_vport;
     struct mock_record flow[MOCK_MAX_RECORDS];  int n_flow;
+    bool flow_dump_done;        /* FLOW dump ends with an NLMSG_DONE record
+                                 * (as the kernel does), not a zero-length read. */
 
     /* Queued packet upcalls, delivered one per OVS_IOCTL_READ_PACKET. */
     struct mock_record pkt[MOCK_MAX_RECORDS];   int pkt_head, pkt_len;
@@ -599,6 +601,21 @@ mock_read_dump(struct mock_kernel *m, struct mock_handle *h,
     }
 
     if (h->cursor >= n) {
+        if (h->dump == DUMP_FLOW && m->flow_dump_done) {
+            /* The flow dump ends with an NLMSG_DONE record (Flow.c); emit it
+             * once, then the next read is the zero-length EOF. */
+            struct nlmsghdr *nlh = out;
+            if (out_len < NLMSG_HDRLEN) {
+                SetLastError(ERROR_INSUFFICIENT_BUFFER);
+                return FALSE;       /* leave the dump armed so a retry works */
+            }
+            h->dump = DUMP_NONE;
+            memset(out, 0, NLMSG_HDRLEN);
+            nlh->nlmsg_len = NLMSG_HDRLEN;
+            nlh->nlmsg_type = NLMSG_DONE;
+            *bytes = NLMSG_HDRLEN;
+            return TRUE;
+        }
         h->dump = DUMP_NONE;        /* exhausted: zero-length read = EOF */
         return TRUE;
     }
@@ -720,6 +737,7 @@ mock_reset_content(struct mock_kernel *m)
     m->evt_len = 0;
     m->fail_open = false;
     m->validate_dp_failed = false;
+    m->flow_dump_done = false;
     m->flow_reply = FR_ACK;
     /* Keep one datapath so dpif_open()'s resolve dump always succeeds. */
     m->n_dp = 1;
@@ -926,6 +944,53 @@ test_flow_dump_multi_record(struct dpif *dpif, struct mock_kernel *m)
         CHECK(memcmp(keys[1], keys[2], key_lens[1]) != 0);
         CHECK(memcmp(keys[0], keys[2], key_lens[0]) != 0);
     }
+}
+
+/* The flow dump terminates with an NLMSG_DONE record (unlike vport/datapath
+ * dumps, which end with a zero-length read).  The transport must treat that
+ * record as end-of-dump, not feed it back as a flow whose decode then fails and
+ * makes dpif_flow_dump_destroy report EINVAL.  Covers the zero-flow case (the
+ * lone record is the terminator) and a non-empty dump. */
+static void
+test_flow_dump_done_terminator(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct dpif_flow_dump_types types = { .ovs_flows = true };
+    struct dpif_flow_dump *dump;
+    struct dpif_flow_dump_thread *thread;
+    struct dpif_flow batch[8];
+    int total, n;
+
+    printf("test_flow_dump_done_terminator:\n");
+
+    /* Zero flows: the only record read is the NLMSG_DONE terminator. */
+    mock_reset_content(m);
+    m->flow_dump_done = true;
+    m->n_flow = 0;
+    dump = dpif_flow_dump_create(dpif, false, &types);
+    thread = dpif_flow_dump_thread_create(dump);
+    total = 0;
+    while ((n = dpif_flow_dump_next(thread, batch, ARRAY_SIZE(batch))) > 0) {
+        total += n;
+    }
+    dpif_flow_dump_thread_destroy(thread);
+    CHECK(total == 0);
+    CHECK(dpif_flow_dump_destroy(dump) == 0);   /* NLMSG_DONE is not an error */
+
+    /* Two flows followed by the NLMSG_DONE terminator. */
+    mock_reset_content(m);
+    m->flow_dump_done = true;
+    m->n_flow = 2;
+    build_flow_record(&m->flow[0], 100, false);
+    build_flow_record(&m->flow[1], 200, false);
+    dump = dpif_flow_dump_create(dpif, false, &types);
+    thread = dpif_flow_dump_thread_create(dump);
+    total = 0;
+    while ((n = dpif_flow_dump_next(thread, batch, ARRAY_SIZE(batch))) > 0) {
+        total += n;
+    }
+    dpif_flow_dump_thread_destroy(thread);
+    CHECK(total == 2);
+    CHECK(dpif_flow_dump_destroy(dump) == 0);
 }
 
 /* Each dump must run on its own kernel handle, because the dump cursor is per
@@ -1538,6 +1603,7 @@ main(int argc, char *argv[])
     test_recv_large_upcall(dpif, &mock);
     test_recv_multi_dp_filter(dpif, &mock);
     test_flow_dump_multi_record(dpif, &mock);
+    test_flow_dump_done_terminator(dpif, &mock);
     test_per_dump_channel(dpif, &mock);
     test_flow_dump_deferred_error(dpif, &mock);
     test_flow_dump_open_failure(dpif, &mock);
