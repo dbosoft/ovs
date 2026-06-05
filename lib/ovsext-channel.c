@@ -373,11 +373,19 @@ ovsext_recv(struct ovsext_channel *ch, struct ofpbuf *buf)
 {
     DWORD bytes = 0;
 
-    /* Same shape as nl_sock_recv__()'s _WIN32 path: a synchronous read of one
-     * queued message into the buffer's tailroom. */
+    /* The driver dequeues one queued message and copies it into the supplied
+     * output buffer, truncating it to the output length.  The caller's buffer
+     * can be small (the upcall handler hands us a 512-byte stub), while a packet
+     * upcall carries a full frame plus its flow key and so is frequently larger;
+     * reading straight into that stub would silently truncate the message and
+     * drop its trailing OVS_PACKET_ATTR_PACKET, failing the netlink policy parse.
+     * Mirror nl_sock_recv__()'s _WIN32 path: read into a buffer large enough for
+     * any Netlink message (64 kB, the max attribute length), then grow 'buf' to
+     * hold the result. */
+    uint8_t tail[65536];
+
     if (!ovsext_dev_ioctl(ch, ch->read_ioctl, NULL, 0,
-                          ofpbuf_tail(buf), ofpbuf_tailroom(buf),
-                          &bytes)) {
+                          tail, sizeof tail, &bytes)) {
         VLOG_DBG("read IOCTL failed (%s)", ovs_lasterror_to_string());
         return EINVAL;
     }
@@ -387,7 +395,7 @@ ovsext_recv(struct ovsext_channel *ch, struct ofpbuf *buf)
     if (bytes < sizeof(struct nlmsghdr)) {
         return EINVAL;
     }
-    buf->size += bytes;
+    ofpbuf_put(buf, tail, bytes);
     return 0;
 }
 
