@@ -2261,8 +2261,7 @@ OvsCreateNlMsgFromCtLimit(POVS_MESSAGE msgIn,
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
-    if (genlMsgHdr->cmd == OVS_CT_LIMIT_CMD_GET && numAttrs) {
-        POVS_CT_ZONE_LIMIT zoneLimitAttr = (POVS_CT_ZONE_LIMIT) attr;
+    if (genlMsgHdr->cmd == OVS_CT_LIMIT_CMD_GET) {
         UINT32 offset = NlMsgStartNested(&nlBuffer, OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
         if (!offset) {
             /* Starting the nested attribute failed. */
@@ -2270,22 +2269,55 @@ OvsCreateNlMsgFromCtLimit(POVS_MESSAGE msgIn,
             goto done;
         }
 
-        /* Insert OVS_CT_ZONE_LIMIT attributes.*/
-        for (UINT32 i = 0; i < numAttrs; i++) {
-            if (zoneLimitAttr) {
-                zoneLimitAttr->limit = zoneInfo[zoneLimitAttr->zone_id].limit;
-                zoneLimitAttr->count = zoneInfo[zoneLimitAttr->zone_id].entries;
-                if (zoneLimitAttr->zone_id == -1) {
-                    zoneLimitAttr->limit = defaultCtLimit;
+        if (numAttrs) {
+            /* Echo back the limit and live count of each requested zone. */
+            POVS_CT_ZONE_LIMIT zoneLimitAttr = (POVS_CT_ZONE_LIMIT) attr;
+            for (UINT32 i = 0; i < numAttrs; i++) {
+                if (zoneLimitAttr) {
+                    if (zoneLimitAttr->zone_id == -1) {
+                        /* The default zone has no zoneInfo[] slot; never index
+                         * the array with the -1 sentinel. */
+                        zoneLimitAttr->limit = defaultCtLimit;
+                        zoneLimitAttr->count = 0;
+                    } else {
+                        UINT16 zone = (UINT16)zoneLimitAttr->zone_id;
+                        zoneLimitAttr->limit = zoneInfo[zone].limit;
+                        zoneLimitAttr->count = zoneInfo[zone].entries;
+                    }
+                    NlMsgPutTail(&nlBuffer, (const PCHAR)zoneLimitAttr,
+                                 sizeof(OVS_CT_ZONE_LIMIT));
+                } else {
+                    status = STATUS_INVALID_PARAMETER;
+                    break;
                 }
-                NlMsgPutTail(&nlBuffer, (const PCHAR)zoneLimitAttr,
-                             sizeof(OVS_CT_ZONE_LIMIT));
-            } else {
-                status = STATUS_INVALID_PARAMETER;
-                break;
+                zoneLimitAttr = (POVS_CT_ZONE_LIMIT)((PCHAR) zoneLimitAttr +
+                                    sizeof(OVS_CT_ZONE_LIMIT));
             }
-            zoneLimitAttr = (POVS_CT_ZONE_LIMIT)((PCHAR) zoneLimitAttr +
-                                sizeof(OVS_CT_ZONE_LIMIT));
+        } else {
+            /* No zone was named in the request: enumerate the default zone plus
+             * every zone whose limit was explicitly set (i.e. differs from the
+             * default), so a bare ct-get-limits lists all configured zones
+             * instead of returning an empty, attribute-less reply. */
+            OVS_CT_ZONE_LIMIT zoneLimit;
+            zoneLimit.zone_id = -1;
+            zoneLimit.limit = defaultCtLimit;
+            zoneLimit.count = 0;
+            if (NlMsgPutTail(&nlBuffer, (const PCHAR)&zoneLimit,
+                             sizeof zoneLimit)) {
+                for (UINT32 zone = 0; zone < (UINT32)CT_MAX_ZONE; zone++) {
+                    if (zoneInfo[zone].limit == defaultCtLimit) {
+                        continue;
+                    }
+                    zoneLimit.zone_id = (int)zone;
+                    zoneLimit.limit = zoneInfo[zone].limit;
+                    zoneLimit.count = zoneInfo[zone].entries;
+                    if (!NlMsgPutTail(&nlBuffer, (const PCHAR)&zoneLimit,
+                                      sizeof zoneLimit)) {
+                        /* Reply buffer is full; return the zones that fit. */
+                        break;
+                    }
+                }
+            }
         }
         NlMsgEndNested(&nlBuffer, offset);
     }
