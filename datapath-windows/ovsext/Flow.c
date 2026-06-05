@@ -216,6 +216,10 @@ const NL_POLICY nlFlowTunnelKeyPolicy[] = {
                                   .maxLen = 0, .optional = TRUE},
     [OVS_TUNNEL_KEY_ATTR_OAM] = {.type = NL_A_UNSPEC, .minLen = 0,
                                  .maxLen = 0, .optional = TRUE},
+    [OVS_TUNNEL_KEY_ATTR_TP_SRC] = {.type = NL_A_UNSPEC, .minLen = 2,
+                                    .maxLen = 2, .optional = TRUE},
+    [OVS_TUNNEL_KEY_ATTR_TP_DST] = {.type = NL_A_UNSPEC, .minLen = 2,
+                                    .maxLen = 2, .optional = TRUE},
     [OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS] = {.type = NL_A_VAR_LEN,
                                          .optional = TRUE}
 };
@@ -1901,6 +1905,9 @@ OvsTunnelAttrToIPTunnelKey(PNL_ATTR attr,
         case OVS_TUNNEL_KEY_ATTR_OAM:
             tunKey->flags |= OVS_TNL_F_OAM;
             break;
+        case OVS_TUNNEL_KEY_ATTR_TP_SRC:
+            tunKey->flow_hash = NlAttrGetU16(a);
+            break;
         case OVS_TUNNEL_KEY_ATTR_TP_DST:
             tunKey->dst_port = NlAttrGetBe16(a);
             break;
@@ -1917,8 +1924,8 @@ OvsTunnelAttrToIPTunnelKey(PNL_ATTR attr,
             hasOpt = 1;
             break;
         default:
-            // XXX: Support OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS
-            return STATUS_INVALID_PARAMETER;
+            /* Unknown tunnel attribute: skip for forward compatibility. */
+            break;
         }
     }
 
@@ -1997,6 +2004,11 @@ MapTunAttrToFlowPut(PNL_ATTR *keyAttrs,
 
         if (tunAttrs[OVS_TUNNEL_KEY_ATTR_OAM]) {
             destKey->tunKey.flags |= OVS_TNL_F_OAM;
+        }
+
+        if (tunAttrs[OVS_TUNNEL_KEY_ATTR_TP_SRC]) {
+            destKey->tunKey.flow_hash =
+                NlAttrGetU16(tunAttrs[OVS_TUNNEL_KEY_ATTR_TP_SRC]);
         }
 
         if (tunAttrs[OVS_TUNNEL_KEY_ATTR_TP_DST]) {
