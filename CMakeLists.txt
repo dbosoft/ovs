@@ -214,6 +214,18 @@ set(OVS_INCLUDES
   "${PTHREADS_ROOT}/include" "${OPENSSL_ROOT}/include")
 set(OVS_DEFS HAVE_CONFIG_H _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS
              _WINSOCK_DEPRECATED_NO_WARNINGS)
+# -DOVS_ASAN=ON instruments every OVS target with AddressSanitizer (MSVC
+# /fsanitize=address), so the unit tests catch heap overruns / use-after-free in
+# the userspace marshalling.  Off by default; use a dedicated build directory and
+# a Release/RelWithDebInfo config (build --config Release).  MSVC's ASAN is
+# incompatible with the runtime checks (/RTC1) the Debug config injects, so strip
+# them here to keep a Debug+ASAN build from failing to link.
+option(OVS_ASAN "Build with AddressSanitizer instrumentation" OFF)
+if(OVS_ASAN)
+  string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+  string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+endif()
+
 function(ovs_setup t)
   target_include_directories(${t} PRIVATE ${OVS_INCLUDES})
   target_compile_definitions(${t} PRIVATE ${OVS_DEFS})
@@ -223,6 +235,12 @@ function(ovs_setup t)
   # strips them at compile time -> vlog module self-registration dies and ovs-vsctl
   # aborts ('no destination, level, or module "reconnect"').
   target_compile_options(${t} PRIVATE /Zc:inline-)
+  if(OVS_ASAN)
+    # MSVC ASAN is incompatible with the /RTC checks and incremental/edit-and-
+    # continue linking; /fsanitize=address auto-links the ASAN runtime.
+    target_compile_options(${t} PRIVATE /fsanitize=address /Oy-)
+    target_link_options(${t} PRIVATE /INCREMENTAL:NO)
+  endif()
 endfunction()
 ovs_setup(openvswitch)
 
