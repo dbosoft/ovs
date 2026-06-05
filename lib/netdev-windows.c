@@ -562,19 +562,39 @@ netdev_windows_internal_construct(struct netdev *netdev_)
 }
 
 
-/* Resolves and caches 'netdev''s host interface LUID by matching its MAC in the
- * system interface table.  This walk of the full table happens at most once per
- * netdev (and again only if the interface disappears); the per-poll carrier read
- * then uses a single-interface GetIfEntry2() instead of re-enumerating every
- * tick.  Returns true once 'if_luid' is valid. */
+/* One netdev's link state, gathered by the periodic refresh without holding
+ * netdev_windows_list_mutex (the per-port kernel/host I/O would otherwise block
+ * every netdev API call for the duration of all the round trips) and committed
+ * back under the lock.  'name' is the stable identity used to match the result
+ * to the still-listed netdev; the 'in_*' fields are the cached inputs the probe
+ * needs, snapshotted under the lock. */
+struct netdev_windows_probe {
+    char *name;                        /* owned; the netdev's unique identity. */
+    struct eth_addr in_mac;            /* cached MAC, to reuse a resolved LUID. */
+    NET_LUID in_luid;
+    bool in_luid_valid;
+
+    bool kernel_valid;                 /* the OVS_WIN_NETDEV_CMD_GET succeeded. */
+    uint32_t ifi_flags;
+    struct eth_addr mac;
+    int mtu;
+    bool carrier_valid;                /* a link state was determined. */
+    bool carrier;
+    bool luid_valid;                   /* resolved host-interface LUID. */
+    NET_LUID if_luid;
+};
+
+/* Finds the host interface LUID whose MAC is 'mac' by matching the system
+ * interface table.  Returns true and stores it in '*luid' on a match.  Touches
+ * no netdev state, so it is safe to call without netdev_windows_list_mutex. */
 static bool
-netdev_windows_resolve_luid(struct netdev_windows *netdev)
+netdev_windows_lookup_luid(struct eth_addr mac, NET_LUID *luid)
 {
     MIB_IF_TABLE2 *table = NULL;
+    bool found = false;
     ULONG i;
 
-    if (!(netdev->cache_valid & VALID_ETHERADDR)
-        || eth_addr_is_zero(netdev->mac)
+    if (eth_addr_is_zero(mac)
         || GetIfTable2(&table) != NO_ERROR || table == NULL) {
         /* No usable MAC to match (e.g. a ghost constructed while its device was
          * absent) -- do not match a host pseudo-interface with a zero MAC. */
@@ -584,57 +604,24 @@ netdev_windows_resolve_luid(struct netdev_windows *netdev)
         const MIB_IF_ROW2 *row = &table->Table[i];
 
         if (row->PhysicalAddressLength == ETH_ADDR_LEN
-            && !memcmp(row->PhysicalAddress, netdev->mac.ea, ETH_ADDR_LEN)) {
-            netdev->if_luid = row->InterfaceLuid;
-            netdev->if_luid_valid = true;
+            && !memcmp(row->PhysicalAddress, mac.ea, ETH_ADDR_LEN)) {
+            *luid = row->InterfaceLuid;
+            found = true;
             break;
         }
     }
     FreeMibTable(table);
-    return netdev->if_luid_valid;
+    return found;
 }
 
-/* Re-syncs 'netdev''s cached device properties (admin flags, MAC, MTU) from its
- * kernel vport and reports the datapath link state.  Windows has no asynchronous
- * device-change notification; the Linux netdev keeps 'ifi_flags' current from
- * rtnetlink RTM_NEWLINK messages, and the periodic refresh in
- * netdev_windows_run() is the equivalent resync point here.  This matters for a
+/* Gathers 'p''s link state from the kernel vport and the host interface,
+ * performing all the I/O without touching any netdev or the list mutex.
+ *
+ * The kernel GET re-syncs admin flags, MAC and MTU; this matters for a
  * userspace-first ghost (constructed while its Hyper-V adapter was absent, so
- * query_netdev() failed and the cached flags came up empty): once the port is
- * resurrected the vport reports OVS_WIN_NETDEV_IFF_UP, without which the shared
- * netdev_get_carrier() would short-circuit the interface to admin-down.  On
- * success stores the kernel link state (OVS_WIN_NETDEV_IFF_RUNNING) in '*up' and
- * returns true. */
-static bool
-netdev_windows_refresh_kernel(struct netdev_windows *netdev, bool *up)
-{
-    struct netdev_windows_netdev_info info;
-    struct ofpbuf *buf;
-
-    if (query_netdev(netdev_get_name(&netdev->up), &info, &buf)) {
-        return false;
-    }
-
-    netdev->ifi_flags = dp_to_netdev_ifi_flags(info.ifi_flags);
-    netdev->cache_valid |= VALID_IFFLAG;
-    /* A changed MAC (notably a ghost gaining its real address at resurrection)
-     * invalidates the cached host-interface LUID, which is keyed by MAC. */
-    if (!eth_addr_equals(netdev->mac, info.mac_address)) {
-        netdev->if_luid_valid = false;
-    }
-    netdev->mac = info.mac_address;
-    netdev->cache_valid |= VALID_ETHERADDR;
-    netdev->mtu = info.mtu;
-    netdev->cache_valid |= VALID_MTU;
-
-    *up = (info.ifi_flags & OVS_WIN_NETDEV_IFF_RUNNING) != 0;
-    ofpbuf_delete(buf);
-    return true;
-}
-
-/* Queries the current carrier of 'netdev'.  On success stores it in '*carrier'
- * and returns true; on failure leaves '*carrier' untouched and returns false
- * (caller keeps its cached value).
+ * the flags came up empty): once the port is resurrected the vport reports
+ * OVS_WIN_NETDEV_IFF_UP, without which netdev_get_carrier() would short-circuit
+ * the interface to admin-down.
  *
  * Two link-state sources are combined.  A physical adapter / SET member
  * resolves to a host interface whose MIB_IF_ROW2.MediaConnectState detects a
@@ -645,31 +632,82 @@ netdev_windows_refresh_kernel(struct netdev_windows *netdev, bool *up)
  * MAC to match, so the kernel datapath link state (IFF_RUNNING) is the only
  * truth.  Carrier is media-up AND kernel-up where both apply, else whichever is
  * available. */
-static bool
-netdev_windows_query_carrier(struct netdev_windows *netdev, bool *carrier)
+static void
+netdev_windows_probe_gather(struct netdev_windows_probe *p)
 {
+    struct netdev_windows_netdev_info info;
+    struct ofpbuf *buf;
     bool kernel_up = false;
-    bool have_kernel = netdev_windows_refresh_kernel(netdev, &kernel_up);
+    struct eth_addr mac;
+    NET_LUID luid = p->in_luid;
+    bool luid_valid;
     MIB_IF_ROW2 row;
 
-    if (netdev->if_luid_valid || netdev_windows_resolve_luid(netdev)) {
-        memset(&row, 0, sizeof row);
-        row.InterfaceLuid = netdev->if_luid;
-        if (GetIfEntry2(&row) != NO_ERROR) {
-            /* The adapter likely went away; re-resolve the LUID next tick. */
-            netdev->if_luid_valid = false;
-        } else {
-            bool media = (row.MediaConnectState == MediaConnectStateConnected);
-            *carrier = have_kernel ? (kernel_up && media) : media;
-            return true;
-        }
+    if (!query_netdev(p->name, &info, &buf)) {
+        p->kernel_valid = true;
+        p->ifi_flags = dp_to_netdev_ifi_flags(info.ifi_flags);
+        p->mac = info.mac_address;
+        p->mtu = info.mtu;
+        kernel_up = (info.ifi_flags & OVS_WIN_NETDEV_IFF_RUNNING) != 0;
+        ofpbuf_delete(buf);
     }
 
-    if (have_kernel) {
-        *carrier = kernel_up;
-        return true;
+    /* Match the host interface on the freshest MAC.  A changed MAC (a ghost
+     * gaining its real address at resurrection) invalidates a cached LUID. */
+    mac = p->kernel_valid ? p->mac : p->in_mac;
+    luid_valid = p->in_luid_valid && eth_addr_equals(mac, p->in_mac);
+    if (!luid_valid) {
+        luid_valid = netdev_windows_lookup_luid(mac, &luid);
     }
-    return false;
+
+    if (luid_valid) {
+        memset(&row, 0, sizeof row);
+        row.InterfaceLuid = luid;
+        if (GetIfEntry2(&row) != NO_ERROR) {
+            /* The adapter likely went away; re-resolve the LUID next tick. */
+            luid_valid = false;
+        } else {
+            bool media = (row.MediaConnectState == MediaConnectStateConnected);
+            p->carrier = p->kernel_valid ? (kernel_up && media) : media;
+            p->carrier_valid = true;
+        }
+    }
+    if (!p->carrier_valid && p->kernel_valid) {
+        p->carrier = kernel_up;
+        p->carrier_valid = true;
+    }
+    p->luid_valid = luid_valid;
+    p->if_luid = luid;
+}
+
+/* Commits a gathered probe to its 'netdev', returning true if anything the
+ * change sequence covers (admin flags, MAC, MTU or carrier) changed. */
+static bool
+netdev_windows_probe_commit(struct netdev_windows *netdev,
+                            const struct netdev_windows_probe *p)
+    OVS_REQUIRES(netdev_windows_list_mutex)
+{
+    bool changed = false;
+
+    if (p->kernel_valid) {
+        changed = netdev->ifi_flags != p->ifi_flags
+                  || !eth_addr_equals(netdev->mac, p->mac)
+                  || netdev->mtu != p->mtu;
+        netdev->ifi_flags = p->ifi_flags;
+        netdev->mac = p->mac;
+        netdev->mtu = p->mtu;
+        netdev->cache_valid |= VALID_IFFLAG | VALID_ETHERADDR | VALID_MTU;
+    }
+    netdev->if_luid = p->if_luid;
+    netdev->if_luid_valid = p->luid_valid;
+
+    if (p->carrier_valid && p->carrier != netdev->carrier) {
+        netdev->carrier = p->carrier;
+        netdev->carrier_resets++;
+        changed = true;
+        VLOG_DBG("%s: carrier %s", p->name, p->carrier ? "up" : "down");
+    }
+    return changed;
 }
 
 static int
@@ -697,15 +735,25 @@ netdev_windows_get_carrier_resets(const struct netdev *netdev_)
     return resets;
 }
 
-/* Periodically re-queries the media carrier of every Windows netdev and, on a
- * transition, bumps the change sequence so dependent logic (notably bonding)
- * re-evaluates which members are usable.  The whole list is refreshed together
- * regardless of which class triggered the tick. */
+/* Periodically re-queries every Windows netdev's link state and, on a change to
+ * carrier / admin flags / MAC / MTU, bumps the change sequence so dependent
+ * logic (notably bonding) re-evaluates it.  The whole list is refreshed
+ * together regardless of which class triggered the tick.
+ *
+ * The per-port kernel/host I/O runs outside netdev_windows_list_mutex: the lock
+ * is taken only to snapshot the probe inputs and again to commit the results,
+ * so it never spans the DeviceIoControl/GetIfEntry2 round trips and cannot
+ * block unrelated netdev API calls for their duration.  Results are matched
+ * back by the netdev's stable, unique name, so a port deleted during the probe
+ * window is simply skipped (no reference is held across the I/O, avoiding a
+ * lock-order inversion with netdev_unref()'s destruct path). */
 static void
 netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
 {
+    struct netdev_windows_probe *probes;
     struct netdev_windows *netdev;
     long long int now = time_msec();
+    size_t n = 0, cap, i;
 
     if (now < netdev_windows_next_refresh) {
         return;
@@ -713,36 +761,40 @@ netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
     netdev_windows_next_refresh = now + NETDEV_WINDOWS_CARRIER_INTERVAL_MS;
 
     ovs_mutex_lock(&netdev_windows_list_mutex);
+    cap = ovs_list_size(&netdev_windows_list);
+    probes = cap ? xmalloc(cap * sizeof *probes) : NULL;
     LIST_FOR_EACH (netdev, list_node, &netdev_windows_list) {
-        bool carrier;
-        uint32_t old_flags = netdev->ifi_flags;
-        struct eth_addr old_mac = netdev->mac;
-        int old_mtu = netdev->mtu;
-        bool changed = false;
+        struct netdev_windows_probe *p = &probes[n++];
 
-        if (netdev_windows_query_carrier(netdev, &carrier)
-            && carrier != netdev->carrier) {
-            netdev->carrier = carrier;
-            netdev->carrier_resets++;
-            changed = true;
-            VLOG_DBG("%s: carrier %s", netdev_get_name(&netdev->up),
-                     carrier ? "up" : "down");
-        }
-        /* netdev_windows_query_carrier() re-syncs the cached admin flags, MAC
-         * and MTU from the kernel; any of these changing (notably a resurrected
-         * ghost coming up or gaining its real MAC without an IFF_UP transition)
-         * must bump change_seq so consumers re-read etheraddr/mtu and the status
-         * refresh re-publishes admin_state/link_state. */
-        if (netdev->ifi_flags != old_flags
-            || !eth_addr_equals(netdev->mac, old_mac)
-            || netdev->mtu != old_mtu) {
-            changed = true;
-        }
-        if (changed) {
-            netdev_change_seq_changed(&netdev->up);
+        memset(p, 0, sizeof *p);
+        p->name = xstrdup(netdev_get_name(&netdev->up));
+        p->in_mac = netdev->mac;
+        p->in_luid = netdev->if_luid;
+        p->in_luid_valid = netdev->if_luid_valid;
+    }
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
+
+    for (i = 0; i < n; i++) {
+        netdev_windows_probe_gather(&probes[i]);
+    }
+
+    ovs_mutex_lock(&netdev_windows_list_mutex);
+    LIST_FOR_EACH (netdev, list_node, &netdev_windows_list) {
+        for (i = 0; i < n; i++) {
+            if (!strcmp(probes[i].name, netdev_get_name(&netdev->up))) {
+                if (netdev_windows_probe_commit(netdev, &probes[i])) {
+                    netdev_change_seq_changed(&netdev->up);
+                }
+                break;
+            }
         }
     }
     ovs_mutex_unlock(&netdev_windows_list_mutex);
+
+    for (i = 0; i < n; i++) {
+        free(probes[i].name);
+    }
+    free(probes);
 }
 
 static void
