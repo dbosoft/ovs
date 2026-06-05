@@ -22,10 +22,13 @@
  * the fixed Windows genl family IDs (OVS_WIN_NL_*_FAMILY_ID) in place of the
  * runtime-resolved Linux genl families.
  *
- * Operations that dpif-netlink itself stubs out under '#ifdef _WIN32' (the
- * conntrack/meter/bond/timeout-policy management members) are simply absent
- * from this class' initializer, exactly as the corresponding members default
- * to NULL.  Upcalls use a single handler, as Windows always has.
+ * Conntrack zone-limit management (ct_set/get/del_limits, ct_get_features) is
+ * wired against the kernel's OVS_CT_LIMIT genl family.  The conntrack
+ * dump/flush members ride the ctnetlink (NETLINK_NETFILTER) transport in
+ * lib/netlink-conntrack.c, which is not built on Windows, so they stay absent
+ * along with the meter, bond and timeout-policy management members; the
+ * corresponding class members default to NULL.  Upcalls use a single handler,
+ * as Windows always has.
  *
  * See datapath-windows/NATIVE-DPIF-EXPERIMENT.md for the full spec. */
 
@@ -37,6 +40,7 @@
 #include <stdio.h>              /* EOF */
 #include <net/if.h>             /* IFNAMSIZ */
 
+#include "ct-dpif.h"
 #include "dpif-provider.h"
 #include "odp-netlink.h"        /* struct ovs_header, OVS_*_ATTR_*. */
 #include "ovsext-channel.h"
@@ -2228,6 +2232,177 @@ dpif_windows_recv_purge(struct dpif *dpif_)
 }
 
 /* ====================================================================
+ * Conntrack zone limits (mirrors dpif-netlink's ct_*_limits).
+ *
+ * The ovsext kernel serves the OVS_CT_LIMIT genl family at the fixed id
+ * OVS_WIN_NL_CTLIMIT_FAMILY_ID, so there is no runtime family lookup: the
+ * family is always present and a zone-limit request round-trips through the
+ * ordinary transaction channel.  A zone_id of OVS_ZONE_LIMIT_DEFAULT_ZONE
+ * carries the default (all-zones) limit.
+ * ==================================================================== */
+
+/* Parses a CT_LIMIT reply (struct ovs_header + a nested array of struct
+ * ovs_zone_limit) into 'zone_limits' as ct_dpif_zone_limit nodes. */
+static int
+dpif_windows_ct_limits_from_ofpbuf(const struct ofpbuf *buf,
+                                   struct ovs_list *zone_limits)
+{
+    static const struct nl_policy ovs_ct_limit_policy[] = {
+        [OVS_CT_LIMIT_ATTR_ZONE_LIMIT] = { .type = NL_A_NESTED,
+                                           .optional = true },
+    };
+
+    struct ofpbuf b = ofpbuf_const_initializer(buf->data, buf->size);
+    struct nlmsghdr *nlmsg = ofpbuf_try_pull(&b, sizeof *nlmsg);
+    struct genlmsghdr *genl = ofpbuf_try_pull(&b, sizeof *genl);
+    struct ovs_header *ovs_header = ofpbuf_try_pull(&b, sizeof *ovs_header);
+
+    struct nlattr *attr[ARRAY_SIZE(ovs_ct_limit_policy)];
+    if (!nlmsg || !genl || !ovs_header
+        || nlmsg->nlmsg_type != OVS_WIN_NL_CTLIMIT_FAMILY_ID
+        || !nl_policy_parse(&b, 0, ovs_ct_limit_policy, attr,
+                            ARRAY_SIZE(ovs_ct_limit_policy))) {
+        return EINVAL;
+    }
+
+    if (!attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]) {
+        return EINVAL;
+    }
+
+    int rem = NLA_ALIGN(nl_attr_get_size(attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]));
+    const struct ovs_zone_limit *zone_limit =
+        nl_attr_get(attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]);
+
+    while (rem >= sizeof *zone_limit) {
+        if (zone_limit->zone_id >= OVS_ZONE_LIMIT_DEFAULT_ZONE &&
+            zone_limit->zone_id <= UINT16_MAX) {
+            ct_dpif_push_zone_limit(zone_limits, zone_limit->zone_id,
+                                    zone_limit->limit, zone_limit->count);
+        }
+        rem -= NLA_ALIGN(sizeof *zone_limit);
+        zone_limit = ALIGNED_CAST(struct ovs_zone_limit *,
+            (unsigned char *) zone_limit + NLA_ALIGN(sizeof *zone_limit));
+    }
+    return 0;
+}
+
+static int
+dpif_windows_ct_set_limits(struct dpif *dpif_,
+                           const struct ovs_list *zone_limits)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+    struct ofpbuf *request = ofpbuf_new(1024);
+    struct ovs_header *ovs_header;
+    int error;
+
+    nl_msg_put_genlmsghdr(request, 0, OVS_WIN_NL_CTLIMIT_FAMILY_ID,
+                          NLM_F_REQUEST | NLM_F_ECHO, OVS_CT_LIMIT_CMD_SET,
+                          OVS_CT_LIMIT_VERSION);
+    ovs_header = ofpbuf_put_uninit(request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+
+    size_t opt_offset = nl_msg_start_nested(request,
+                                            OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
+    if (!ovs_list_is_empty(zone_limits)) {
+        struct ct_dpif_zone_limit *zone_limit;
+        LIST_FOR_EACH (zone_limit, node, zone_limits) {
+            struct ovs_zone_limit req_zone_limit = {
+                .zone_id = zone_limit->zone,
+                .limit   = zone_limit->limit,
+            };
+            nl_msg_put(request, &req_zone_limit, sizeof req_zone_limit);
+        }
+    }
+    nl_msg_end_nested(request, opt_offset);
+
+    error = ovsext_transact(&dpif->channel, request, NULL);
+    ofpbuf_delete(request);
+    return error;
+}
+
+static int
+dpif_windows_ct_get_limits(struct dpif *dpif_,
+                           const struct ovs_list *zone_limits_request,
+                           struct ovs_list *zone_limits_reply)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+    struct ofpbuf *request = ofpbuf_new(1024);
+    struct ofpbuf *reply = NULL;
+    struct ovs_header *ovs_header;
+    int error;
+
+    nl_msg_put_genlmsghdr(request, 0, OVS_WIN_NL_CTLIMIT_FAMILY_ID,
+                          NLM_F_REQUEST | NLM_F_ECHO, OVS_CT_LIMIT_CMD_GET,
+                          OVS_CT_LIMIT_VERSION);
+    ovs_header = ofpbuf_put_uninit(request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+
+    if (!ovs_list_is_empty(zone_limits_request)) {
+        size_t opt_offset = nl_msg_start_nested(request,
+                                                OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
+        struct ct_dpif_zone_limit *zone_limit;
+        LIST_FOR_EACH (zone_limit, node, zone_limits_request) {
+            struct ovs_zone_limit req_zone_limit = {
+                .zone_id = zone_limit->zone,
+            };
+            nl_msg_put(request, &req_zone_limit, sizeof req_zone_limit);
+        }
+        nl_msg_end_nested(request, opt_offset);
+    }
+
+    error = ovsext_transact(&dpif->channel, request, &reply);
+    if (!error) {
+        error = dpif_windows_ct_limits_from_ofpbuf(reply, zone_limits_reply);
+    }
+    ofpbuf_delete(request);
+    ofpbuf_delete(reply);
+    return error;
+}
+
+static int
+dpif_windows_ct_del_limits(struct dpif *dpif_,
+                           const struct ovs_list *zone_limits)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+    struct ofpbuf *request = ofpbuf_new(1024);
+    struct ovs_header *ovs_header;
+    int error;
+
+    nl_msg_put_genlmsghdr(request, 0, OVS_WIN_NL_CTLIMIT_FAMILY_ID,
+                          NLM_F_REQUEST | NLM_F_ECHO, OVS_CT_LIMIT_CMD_DEL,
+                          OVS_CT_LIMIT_VERSION);
+    ovs_header = ofpbuf_put_uninit(request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+
+    if (!ovs_list_is_empty(zone_limits)) {
+        size_t opt_offset = nl_msg_start_nested(request,
+                                                OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
+        struct ct_dpif_zone_limit *zone_limit;
+        LIST_FOR_EACH (zone_limit, node, zone_limits) {
+            struct ovs_zone_limit req_zone_limit = {
+                .zone_id = zone_limit->zone,
+            };
+            nl_msg_put(request, &req_zone_limit, sizeof req_zone_limit);
+        }
+        nl_msg_end_nested(request, opt_offset);
+    }
+
+    error = ovsext_transact(&dpif->channel, request, NULL);
+    ofpbuf_delete(request);
+    return error;
+}
+
+static int
+dpif_windows_ct_get_features(struct dpif *dpif_ OVS_UNUSED,
+                             enum ct_features *features)
+{
+    if (features != NULL) {
+        *features = 0;
+    }
+    return 0;
+}
+
+/* ====================================================================
  * Class.
  * ==================================================================== */
 
@@ -2264,6 +2439,10 @@ const struct dpif_class dpif_windows_class = {
     .recv_wait = dpif_windows_recv_wait,
     .recv_purge = dpif_windows_recv_purge,
     .get_datapath_version = dpif_windows_get_datapath_version,
+    .ct_set_limits = dpif_windows_ct_set_limits,
+    .ct_get_limits = dpif_windows_ct_get_limits,
+    .ct_del_limits = dpif_windows_ct_del_limits,
+    .ct_get_features = dpif_windows_ct_get_features,
 };
 
 #endif /* _WIN32 */

@@ -30,9 +30,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <crtdbg.h>
 #include <windows.h>
 
 #include "dpif.h"
+#include "ct-dpif.h"
 #include "ovsext-channel.h"
 #include "dp-packet.h"
 #include "flow.h"
@@ -119,6 +121,14 @@ struct mock_kernel {
     /* Set when a validateDpIndex control command (subscribe/pend) arrives with a
      * dp_ifindex that is not the mock datapath -- the kernel rejects these. */
     bool validate_dp_failed;
+
+    /* OVS_CT_LIMIT family state.  SET records the requested zone+limit; GET
+     * echoes ct_limit/ct_count back for the requested zone (or the default zone
+     * when the request carries none). */
+    int      ct_last_cmd;
+    int32_t  ct_zone;
+    uint32_t ct_limit;
+    uint32_t ct_count;
 };
 
 /* ---- record builders ----------------------------------------------------- */
@@ -278,6 +288,66 @@ reply_nlmsgerr(int err, void *out, DWORD out_len, DWORD *bytes)
     return TRUE;
 }
 
+/* Extracts the first 'struct ovs_zone_limit' from a CT_LIMIT request's nested
+ * OVS_CT_LIMIT_ATTR_ZONE_LIMIT array, returning false when the request carries
+ * no zone (the "all zones / default" form). */
+static bool
+ct_parse_first_zone(const void *in, DWORD in_len, struct ovs_zone_limit *zlp)
+{
+    struct ofpbuf b = ofpbuf_const_initializer(in, in_len);
+    static const struct nl_policy pol[] = {
+        [OVS_CT_LIMIT_ATTR_ZONE_LIMIT] = { .type = NL_A_NESTED,
+                                           .optional = true },
+    };
+    struct nlattr *attr[ARRAY_SIZE(pol)];
+
+    if (!ofpbuf_try_pull(&b, NLMSG_HDRLEN)
+        || !ofpbuf_try_pull(&b, GENL_HDRLEN)
+        || !ofpbuf_try_pull(&b, sizeof(struct ovs_header))
+        || !nl_policy_parse(&b, 0, pol, attr, ARRAY_SIZE(pol))
+        || !attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]
+        || nl_attr_get_size(attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]) < sizeof *zlp) {
+        return false;
+    }
+    memcpy(zlp, nl_attr_get(attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]), sizeof *zlp);
+    return true;
+}
+
+/* Answers an OVS_CT_LIMIT_CMD_GET: echoes one zone limit (the requested zone,
+ * or the default zone) carrying the mock's ct_limit/ct_count, exactly as the
+ * kernel's OvsCreateNlMsgFromCtLimit lays it out. */
+static BOOL
+mock_ct_limit_get(struct mock_kernel *m, const void *in, DWORD in_len,
+                  void *out, DWORD out_len, DWORD *bytes)
+{
+    struct ovs_zone_limit req;
+    int32_t zone = ct_parse_first_zone(in, in_len, &req)
+                   ? req.zone_id : OVS_ZONE_LIMIT_DEFAULT_ZONE;
+    uint64_t stub[256 / 8];
+    struct ofpbuf r;
+    struct ovs_header *oh;
+    size_t nest;
+    DWORD n;
+
+    ofpbuf_use_stub(&r, stub, sizeof stub);
+    nl_msg_put_genlmsghdr(&r, 0, OVS_WIN_NL_CTLIMIT_FAMILY_ID, 0,
+                          OVS_CT_LIMIT_CMD_GET, OVS_CT_LIMIT_VERSION);
+    oh = ofpbuf_put_uninit(&r, sizeof *oh);
+    oh->dp_ifindex = 0;
+    nest = nl_msg_start_nested(&r, OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
+    struct ovs_zone_limit zl = { .zone_id = zone, .limit = m->ct_limit,
+                                 .count = m->ct_count };
+    nl_msg_put(&r, &zl, sizeof zl);
+    nl_msg_end_nested(&r, nest);
+    nl_msg_nlmsghdr(&r)->nlmsg_len = r.size;
+
+    n = r.size < out_len ? (DWORD) r.size : out_len;
+    memcpy(out, r.data, n);
+    *bytes = n;
+    ofpbuf_uninit(&r);
+    return TRUE;
+}
+
 static BOOL
 mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
               void *out, DWORD out_len, DWORD *bytes)
@@ -291,6 +361,26 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
     }
 
     switch (nlh->nlmsg_type) {
+    case OVS_WIN_NL_CTLIMIT_FAMILY_ID: {
+        const struct genlmsghdr *genl = ALIGNED_CAST(const struct genlmsghdr *,
+                                            (const char *) in + NLMSG_HDRLEN);
+        struct ovs_zone_limit req;
+
+        m->ct_last_cmd = genl->cmd;
+        if (genl->cmd == OVS_CT_LIMIT_CMD_GET) {
+            return mock_ct_limit_get(m, in, in_len, out, out_len, bytes);
+        }
+        if (ct_parse_first_zone(in, in_len, &req)) {
+            m->ct_zone = req.zone_id;
+            if (genl->cmd == OVS_CT_LIMIT_CMD_SET) {
+                m->ct_limit = req.limit;
+            } else {
+                m->ct_limit = 0;       /* DEL resets to unbounded. */
+            }
+        }
+        return TRUE;                   /* ack, empty reply */
+    }
+
     case OVS_WIN_NL_DATAPATH_FAMILY_ID:
         return record_copy(&m->dp[0], out, out_len, bytes);
 
@@ -1144,6 +1234,67 @@ test_port_poll(struct dpif *dpif, struct mock_kernel *m)
     CHECK(!m->validate_dp_failed);
 }
 
+/* Conntrack zone-limit management round-trips through the OVS_CT_LIMIT genl
+ * family: SET records a per-zone limit, GET reads it back with the current
+ * count, DEL removes it, and an empty GET request targets the default zone.
+ * ct_get_features reports no extra capabilities on Windows. */
+static void
+test_ct_limits(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct ovs_list req = OVS_LIST_INITIALIZER(&req);
+    struct ovs_list reply = OVS_LIST_INITIALIZER(&reply);
+    struct ct_dpif_zone_limit *zl;
+    enum ct_features feat = 0xdead;
+
+    printf("test_ct_limits:\n");
+    m->ct_last_cmd = -1;
+    m->ct_zone = 0;
+    m->ct_limit = 0;
+    m->ct_count = 0;
+
+    /* SET zone 5 -> limit 200 reaches the kernel as CMD_SET. */
+    ct_dpif_push_zone_limit(&req, 5, 200, 0);
+    CHECK(ct_dpif_set_limits(dpif, &req) == 0);
+    CHECK(m->ct_last_cmd == OVS_CT_LIMIT_CMD_SET);
+    CHECK(m->ct_zone == 5);
+    CHECK(m->ct_limit == 200);
+    ct_dpif_free_zone_limits(&req);
+
+    /* GET zone 5 reads back the limit and the live count. */
+    m->ct_count = 7;
+    ovs_list_init(&req);
+    ct_dpif_push_zone_limit(&req, 5, 0, 0);
+    CHECK(ct_dpif_get_limits(dpif, &req, &reply) == 0);
+    CHECK(m->ct_last_cmd == OVS_CT_LIMIT_CMD_GET);
+    CHECK(!ovs_list_is_empty(&reply));
+    zl = CONTAINER_OF(ovs_list_front(&reply), struct ct_dpif_zone_limit, node);
+    CHECK(zl->zone == 5);
+    CHECK(zl->limit == 200);
+    CHECK(zl->count == 7);
+    ct_dpif_free_zone_limits(&req);
+    ct_dpif_free_zone_limits(&reply);
+
+    /* DEL zone 5 reaches the kernel as CMD_DEL. */
+    ovs_list_init(&req);
+    ct_dpif_push_zone_limit(&req, 5, 0, 0);
+    CHECK(ct_dpif_del_limits(dpif, &req) == 0);
+    CHECK(m->ct_last_cmd == OVS_CT_LIMIT_CMD_DEL);
+    CHECK(m->ct_zone == 5);
+    ct_dpif_free_zone_limits(&req);
+
+    /* An empty GET request carries no zone, so it targets the default zone. */
+    ovs_list_init(&reply);
+    CHECK(ct_dpif_get_limits(dpif, &req, &reply) == 0);
+    CHECK(!ovs_list_is_empty(&reply));
+    zl = CONTAINER_OF(ovs_list_front(&reply), struct ct_dpif_zone_limit, node);
+    CHECK(zl->zone == OVS_ZONE_LIMIT_DEFAULT_ZONE);
+    ct_dpif_free_zone_limits(&reply);
+
+    /* Windows advertises no extra conntrack features. */
+    CHECK(ct_dpif_get_features(dpif, &feat) == 0);
+    CHECK(feat == 0);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1151,6 +1302,14 @@ main(int argc, char *argv[])
     static struct ovsext_transport mock_transport;
     struct dpif *dpif;
     int error;
+
+    /* Route the Debug CRT's assert / runtime-check (/RTC1) reports to stderr
+     * instead of a modal dialog, so the test runs unattended under CTest/CI
+     * rather than blocking on an invisible message box. */
+    for (int rt = 0; rt <= _CRT_ASSERT; rt++) {
+        _CrtSetReportMode(rt, _CRTDBG_MODE_FILE);
+        _CrtSetReportFile(rt, _CRTDBG_FILE_STDERR);
+    }
 
     set_program_name(argv[0]);
     vlog_set_levels(NULL, VLF_ANY_DESTINATION, VLL_WARN);
@@ -1184,6 +1343,7 @@ main(int argc, char *argv[])
     test_flow_del_stats(dpif, &mock);
     test_operate_batch(dpif, &mock);
     test_port_poll(dpif, &mock);
+    test_ct_limits(dpif, &mock);
 
     dpif_close(dpif);
     ovsext_set_transport(NULL);
