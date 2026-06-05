@@ -258,9 +258,12 @@ ovsext_send(struct ovsext_channel *ch, const struct ofpbuf *msg)
  * The ovsext driver implements a dump the same way the Linux kernel does over
  * a netlink socket: an OVS_IOCTL_WRITE carrying the NLM_F_DUMP request arms a
  * per-handle dump cursor (OvsSetupDumpStart), then each OVS_IOCTL_READ returns
- * the next single record.  A zero-length read marks end-of-dump; the driver
- * does not send an NLMSG_DONE (see OvsGetVportDumpNext in
- * datapath-windows/ovsext/Vport.c).  This mirrors nl_dump_start/nl_dump_next. */
+ * the next single record.  End-of-dump is signalled in one of two ways
+ * depending on the family: the vport and datapath dumps return a zero-length
+ * read (OvsGetVportDumpNext), while the flow dump returns a final NLMSG_DONE
+ * record (see _FlowNlDumpCmdHandler in datapath-windows/ovsext/Flow.c).
+ * ovsext_dump_next() treats both as the end.  This mirrors
+ * nl_dump_start/nl_dump_next. */
 void
 ovsext_dump_start(struct ovsext_dump *dump, struct ovsext_channel *ch,
                   const struct ofpbuf *request)
@@ -314,8 +317,9 @@ ovsext_dump_next(struct ovsext_dump *dump, struct ofpbuf *reply)
     }
 
     if (bytes == 0) {
-        /* End-of-dump: the driver replies with zero bytes once the cursor is
-         * exhausted (no NLMSG_DONE record is sent). */
+        /* End-of-dump for the vport/datapath dumps: the driver replies with
+         * zero bytes once the cursor is exhausted.  (The flow dump instead
+         * ends with the NLMSG_DONE record handled below.) */
         return false;
     }
     if (bytes < sizeof *nlmsg) {
@@ -328,6 +332,11 @@ ovsext_dump_next(struct ovsext_dump *dump, struct ofpbuf *reply)
     dump->buf->size = bytes;
 
     nlmsg = dump->buf->data;
+    if (nlmsg->nlmsg_type == NLMSG_DONE) {
+        /* The flow dump ends with an NLMSG_DONE record rather than a
+         * zero-length read; treat it as end-of-dump (not a flow record). */
+        return false;
+    }
     if (nlmsg->nlmsg_type == NLMSG_ERROR) {
         int nl_error = EINVAL;
         nl_msg_nlmsgerr(dump->buf, &nl_error, NULL);
