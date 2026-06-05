@@ -2273,21 +2273,21 @@ OvsCreateNlMsgFromCtLimit(POVS_MESSAGE msgIn,
             /* Echo back the limit and live count of each requested zone. */
             POVS_CT_ZONE_LIMIT zoneLimitAttr = (POVS_CT_ZONE_LIMIT) attr;
             for (UINT32 i = 0; i < numAttrs; i++) {
-                if (zoneLimitAttr) {
-                    if (zoneLimitAttr->zone_id == -1) {
-                        /* The default zone has no zoneInfo[] slot; never index
-                         * the array with the -1 sentinel. */
-                        zoneLimitAttr->limit = defaultCtLimit;
-                        zoneLimitAttr->count = 0;
-                    } else {
-                        UINT16 zone = (UINT16)zoneLimitAttr->zone_id;
-                        zoneLimitAttr->limit = zoneInfo[zone].limit;
-                        zoneLimitAttr->count = zoneInfo[zone].entries;
-                    }
-                    NlMsgPutTail(&nlBuffer, (const PCHAR)zoneLimitAttr,
-                                 sizeof(OVS_CT_ZONE_LIMIT));
+                OVS_CT_ZONE_LIMIT zoneLimit;
+                zoneLimit.zone_id = zoneLimitAttr->zone_id;
+                zoneLimit.count = 0;
+                if (zoneLimitAttr->zone_id == -1) {
+                    /* The default zone has no zoneInfo[] slot; never index the
+                     * array with the -1 sentinel. */
+                    zoneLimit.limit = defaultCtLimit;
                 } else {
-                    status = STATUS_INVALID_PARAMETER;
+                    UINT16 zone = (UINT16)zoneLimitAttr->zone_id;
+                    zoneLimit.limit = zoneInfo[zone].limit;
+                    zoneLimit.count = zoneInfo[zone].entries;
+                }
+                if (!NlMsgPutTail(&nlBuffer, (const PCHAR)&zoneLimit,
+                                  sizeof zoneLimit)) {
+                    /* Reply buffer is full; return the zones that fit. */
                     break;
                 }
                 zoneLimitAttr = (POVS_CT_ZONE_LIMIT)((PCHAR) zoneLimitAttr +
@@ -2307,6 +2307,12 @@ OvsCreateNlMsgFromCtLimit(POVS_MESSAGE msgIn,
                 for (UINT32 zone = 0; zone < (UINT32)CT_MAX_ZONE; zone++) {
                     if (zoneInfo[zone].limit == defaultCtLimit) {
                         continue;
+                    }
+                    /* Keep the nested attribute's length within its u16 field
+                     * regardless of the reply-buffer cap. */
+                    if ((UINT32)(NlBufSize(&nlBuffer) - offset)
+                        + (UINT32)sizeof zoneLimit > 0xFFFFu) {
+                        break;
                     }
                     zoneLimit.zone_id = (int)zone;
                     zoneLimit.limit = zoneInfo[zone].limit;
@@ -2368,7 +2374,11 @@ OvsCtLimitHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
             /* Parse zone limit attributes. */
             if (zoneLimitAttr) {
                 if (genlMsgHdr->cmd == OVS_CT_LIMIT_CMD_DEL) {
-                    zoneLimitAttr->limit = CT_MAX_ENTRIES;
+                    /* Deleting a per-zone limit reverts the zone to the current
+                     * default; deleting the default zone itself resets it back
+                     * to the unbounded ceiling. */
+                    zoneLimitAttr->limit = (zoneLimitAttr->zone_id == -1)
+                                           ? CT_MAX_ENTRIES : defaultCtLimit;
                 }
                 OvsCtSetZoneLimit(zoneLimitAttr->zone_id, zoneLimitAttr->limit);
             } else {
