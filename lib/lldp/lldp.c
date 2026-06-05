@@ -373,7 +373,7 @@ lldp_decode(struct lldpd *cfg OVS_UNUSED, char *frame, int s,
     struct lldpd_aa_isid_vlan_maps_tlv *isid_vlan_map = NULL;
     u_int8_t msg_auth_digest[LLDP_TLV_AA_ISID_VLAN_DIGEST_LENGTH];
     struct lldpd_mgmt *mgmt;
-    u_int8_t addr_str_length, addr_str_buffer[32];
+    u_int8_t addr_str_length, addr_str_buffer[32] = { 0 };
     u_int8_t addr_family, addr_length, *addr_ptr, iface_subtype;
     u_int32_t iface_number, iface;
 
@@ -424,22 +424,25 @@ lldp_decode(struct lldpd *cfg OVS_UNUSED, char *frame, int s,
         switch (tlv_type) {
         case LLDP_TLV_CHASSIS_ID:
             if (tlv_count != 1) {
-                VLOG_WARN("first TLV should be a chassis ID on %s, not %d",
-                          hardware->h_ifname, tlv_type);
+                VLOG_WARN("Chassis ID TLV should be first on %s,"
+                          " but it is on position %d",
+                          hardware->h_ifname, tlv_count);
                 goto malformed;
             }
             break;
         case LLDP_TLV_PORT_ID:
             if (tlv_count != 2) {
-                VLOG_WARN("second TLV should be a port ID on %s, not %d",
-                          hardware->h_ifname, tlv_type);
+                VLOG_WARN("Port ID TLV should be second on %s,"
+                          " but it is on position %d",
+                          hardware->h_ifname, tlv_count);
                 goto malformed;
             }
             break;
         case LLDP_TLV_TTL:
             if (tlv_count != 3) {
-                VLOG_WARN("third TLV should be a TTL on %s, not %d",
-                          hardware->h_ifname, tlv_type);
+                VLOG_WARN("TTL TLV should be third on %s,"
+                          " but it is on position %d",
+                          hardware->h_ifname, tlv_count);
                 goto malformed;
             }
             break;
@@ -535,8 +538,9 @@ lldp_decode(struct lldpd *cfg OVS_UNUSED, char *frame, int s,
         case LLDP_TLV_MGMT_ADDR:
             CHECK_TLV_SIZE(1, "Management address");
             addr_str_length = PEEK_UINT8;
-            if (addr_str_length > sizeof(addr_str_buffer)) {
-                VLOG_WARN("too large management address on %s",
+            if (addr_str_length < 1
+                || addr_str_length > sizeof(addr_str_buffer)) {
+                VLOG_WARN("invalid management address length on %s",
                           hardware->h_ifname);
                 goto malformed;
             }
@@ -687,7 +691,7 @@ lldp_decode(struct lldpd *cfg OVS_UNUSED, char *frame, int s,
                       tlv_type,
                       hardware->h_ifname);
             hardware->h_rx_unrecognized_cnt++;
-            goto malformed;
+            break;
         }
         if (pos > tlv + tlv_size) {
             VLOG_WARN("BUG: already past TLV!");
