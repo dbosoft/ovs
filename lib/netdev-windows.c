@@ -412,11 +412,14 @@ netdev_windows_get_mtu(const struct netdev *netdev_, int *mtup)
     int error = 0;
 
     ovs_mutex_lock(&netdev_windows_list_mutex);
-    ovs_assert((netdev->cache_valid & VALID_MTU) != 0);
-    if (netdev->cache_valid & VALID_MTU) {
+    if ((netdev->cache_valid & VALID_MTU) && netdev->mtu) {
         *mtup = netdev->mtu;
     } else {
-        error = EINVAL;
+        /* A userspace-first ghost has no kernel MTU yet (the deferred construct
+         * zero-fills it); report it as unknown so callers fall back to a default
+         * rather than treating 0 as a valid MTU.  A real MTU arrives with the
+         * next refresh once the device is present. */
+        error = EOPNOTSUPP;
     }
     ovs_mutex_unlock(&netdev_windows_list_mutex);
     return error;
@@ -751,6 +754,7 @@ static void
 netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
 {
     struct netdev_windows_probe *probes;
+    struct shash by_name = SHASH_INITIALIZER(&by_name);
     struct netdev_windows *netdev;
     long long int now = time_msec();
     size_t n = 0, cap, i;
@@ -771,6 +775,8 @@ netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
         p->in_mac = netdev->mac;
         p->in_luid = netdev->if_luid;
         p->in_luid_valid = netdev->if_luid_valid;
+        /* netdev names are unique, so the name keys back to its probe in O(1). */
+        shash_add(&by_name, p->name, p);
     }
     ovs_mutex_unlock(&netdev_windows_list_mutex);
 
@@ -780,17 +786,16 @@ netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
 
     ovs_mutex_lock(&netdev_windows_list_mutex);
     LIST_FOR_EACH (netdev, list_node, &netdev_windows_list) {
-        for (i = 0; i < n; i++) {
-            if (!strcmp(probes[i].name, netdev_get_name(&netdev->up))) {
-                if (netdev_windows_probe_commit(netdev, &probes[i])) {
-                    netdev_change_seq_changed(&netdev->up);
-                }
-                break;
-            }
+        struct netdev_windows_probe *p =
+            shash_find_data(&by_name, netdev_get_name(&netdev->up));
+
+        if (p && netdev_windows_probe_commit(netdev, p)) {
+            netdev_change_seq_changed(&netdev->up);
         }
     }
     ovs_mutex_unlock(&netdev_windows_list_mutex);
 
+    shash_destroy(&by_name);
     for (i = 0; i < n; i++) {
         free(probes[i].name);
     }
