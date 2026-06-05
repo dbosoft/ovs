@@ -842,13 +842,15 @@ dpif_windows_enumerate(struct sset *all_dps,
     struct ofpbuf msg;
     int error;
 
-    /* Every datapath is reported with the conventional name "ovs-system" (as on
-     * Linux); the switch identity lives in the dpif type.  A per-switch alias
-     * class (type == a switch GUID) reports "ovs-system" iff its switch's
-     * datapath exists, so it shows as "<switch-guid>@ovs-system".  The base
-     * "system" class reports "ovs-system" for the default (lowest) datapath
-     * ("system@ovs-system").  Thus "ovs-dpctl show" lists each switch once plus
-     * the default. */
+    /* The kernel reports each datapath's OVS_DP_ATTR_NAME as its switch GUID
+     * (OvsDpFillInfo writes dpGuidName, falling back to "ovs-system" only when
+     * empty), and the per-switch alias resolution below matches on that GUID.
+     * enumerate() then advertises each datapath's dpif NAME as "ovs-system"
+     * (the conventional "<name>@ovs-system" display): a per-switch alias class
+     * (type == a switch GUID) is listed iff its datapath exists, plus the base
+     * "system" class for the default (lowest) datapath.  Do NOT "simplify" the
+     * matching to assume the kernel name is literally "ovs-system" -- it is the
+     * switch GUID, and datapath_type=<switch-guid> resolution depends on it. */
     bool specific = strcmp(dpif_class->type, OVS_WINDOWS_DEFAULT_DP_TYPE) != 0;
 
     error = ovsext_channel_open(&channel);
@@ -1250,7 +1252,10 @@ dpif_windows_port_add__(struct dpif_windows *dpif, const char *name,
     if (!error) {
         *port_nop = reply.port_no;
         ofpbuf_delete(buf);
-    } else if (error == EBUSY && *port_nop != ODPP_NONE) {
+    } else if ((error == EBUSY || error == EEXIST)
+               && *port_nop != ODPP_NONE) {
+        /* ovsext maps a port-number conflict to NL_ERROR_EXIST (EEXIST), not
+         * EBUSY as the Linux kernel does. */
         VLOG_INFO("%s: requested port %"PRIu32" is in use",
                   dpif_name(&dpif->dpif), *port_nop);
     }
@@ -1406,8 +1411,8 @@ dpif_windows_port_get_pid(const struct dpif *dpif_,
 }
 
 struct dpif_windows_port_state {
-    struct ovsext_dump dump;
-    struct ofpbuf buf;
+    struct ovsext_dump dump;    /* Owns the per-record buffer; each dumped port
+                                 * name is valid until the next dump_next. */
 };
 
 static int
@@ -1431,7 +1436,6 @@ dpif_windows_port_dump_start(const struct dpif *dpif_, void **statep)
     ovsext_dump_start(&state->dump, &dpif->channel, buf);
     ofpbuf_delete(buf);
 
-    ofpbuf_init(&state->buf, 4096);
     return 0;
 }
 
@@ -1467,7 +1471,6 @@ dpif_windows_port_dump_done(const struct dpif *dpif_ OVS_UNUSED, void *state_)
     struct dpif_windows_port_state *state = state_;
     int error = ovsext_dump_done(&state->dump);
 
-    ofpbuf_uninit(&state->buf);
     free(state);
     return error;
 }
@@ -1548,7 +1551,11 @@ static int
 dpif_windows_flow_dump_destroy(struct dpif_flow_dump *dump_)
 {
     struct dpif_windows_flow_dump *dump = dpif_windows_flow_dump_cast(dump_);
-    int status = ovsext_dump_done(&dump->dump);
+    /* A per-record decode failure was stashed in dump->status (the dump
+     * interface defers all error reporting to here); surface it, but still
+     * call ovsext_dump_done() to release the transport cursor/buffer. */
+    int done = ovsext_dump_done(&dump->dump);
+    int status = dump->status ? dump->status : done;
 
     free(dump);
     return status;
@@ -1557,7 +1564,9 @@ dpif_windows_flow_dump_destroy(struct dpif_flow_dump *dump_)
 struct dpif_windows_flow_dump_thread {
     struct dpif_flow_dump_thread up;
     struct dpif_windows_flow_dump *dump;
-    struct ofpbuf nl_flows;     /* Borrowed views of the dump buffer. */
+    struct ofpbuf nl_flows;     /* Holds this batch's records (each returned
+                                 * dpif_flow points into here, so all entries of
+                                 * a batch stay valid until the next call). */
 };
 
 static struct dpif_windows_flow_dump_thread *
@@ -1596,20 +1605,39 @@ dpif_windows_flow_dump_next(struct dpif_flow_dump_thread *thread_,
     struct dpif_windows_flow_dump_thread *thread
         = dpif_windows_flow_dump_thread_cast(thread_);
     struct dpif_windows_flow_dump *dump = thread->dump;
+    size_t offsets[FLOW_DUMP_MAX_BATCH];
+    size_t lengths[FLOW_DUMP_MAX_BATCH];
+    int n_records = 0;
     int n_flows = 0;
+    int i;
 
     max_flows = MIN(max_flows, FLOW_DUMP_MAX_BATCH);
 
-    while (n_flows < max_flows) {
-        struct dpif_windows_flow datapath_flow;
+    /* Pass 1: pull each record out of the transport (which reuses one buffer
+     * per read) and copy it into the per-thread accumulation buffer, recording
+     * its offset.  Decoding is deferred to pass 2 because appending here may
+     * reallocate 'nl_flows' and move earlier records. */
+    ofpbuf_clear(&thread->nl_flows);
+    while (n_records < max_flows) {
         struct ofpbuf nl_flow;
-        int error;
 
         if (!ovsext_dump_next(&dump->dump, &nl_flow)) {
             break;
         }
+        offsets[n_records] = thread->nl_flows.size;
+        lengths[n_records] = nl_flow.size;
+        ofpbuf_put(&thread->nl_flows, nl_flow.data, nl_flow.size);
+        n_records++;
+    }
 
-        error = dpif_windows_flow_from_ofpbuf(&datapath_flow, &nl_flow);
+    /* Pass 2: decode from the now-stable buffer.  Every returned dpif_flow
+     * points into 'nl_flows', so all entries stay valid until the next call. */
+    for (i = 0; i < n_records; i++) {
+        struct dpif_windows_flow datapath_flow;
+        struct ofpbuf nl_flow = ofpbuf_const_initializer(
+            (char *) thread->nl_flows.data + offsets[i], lengths[i]);
+        int error = dpif_windows_flow_from_ofpbuf(&datapath_flow, &nl_flow);
+
         if (error) {
             dump->status = error;
             break;
@@ -1693,10 +1721,13 @@ dpif_windows_operate__(struct dpif_windows *dpif, struct dpif_op **ops,
             if (!error && put->stats) {
                 struct dpif_windows_flow reply_flow;
 
-                if (reply
-                    && !dpif_windows_flow_from_ofpbuf(&reply_flow, reply)) {
+                error = reply ? dpif_windows_flow_from_ofpbuf(&reply_flow, reply)
+                              : EINVAL;
+                if (!error) {
                     dpif_windows_flow_get_stats(&reply_flow, put->stats);
                 } else {
+                    /* A stats-requested put must surface a bad/missing echo as
+                     * an error, not report success with zeroed stats. */
                     memset(put->stats, 0, sizeof *put->stats);
                 }
             }
@@ -1716,8 +1747,9 @@ dpif_windows_operate__(struct dpif_windows *dpif, struct dpif_op **ops,
             if (!error && del->stats) {
                 struct dpif_windows_flow reply_flow;
 
-                if (reply
-                    && !dpif_windows_flow_from_ofpbuf(&reply_flow, reply)) {
+                error = reply ? dpif_windows_flow_from_ofpbuf(&reply_flow, reply)
+                              : EINVAL;
+                if (!error) {
                     dpif_windows_flow_get_stats(&reply_flow, del->stats);
                 } else {
                     memset(del->stats, 0, sizeof *del->stats);
@@ -1737,36 +1769,50 @@ dpif_windows_operate__(struct dpif_windows *dpif, struct dpif_op **ops,
             if (!error) {
                 struct dpif_windows_flow reply_flow;
 
-                if (reply
-                    && !dpif_windows_flow_from_ofpbuf(&reply_flow, reply)) {
+                /* A genuine miss arrives as an in-band NLMSG_ERROR -> ENOENT
+                 * from the transact above; a non-NULL reply that fails to
+                 * decode is a protocol error (EINVAL), not a miss. */
+                error = reply ? dpif_windows_flow_from_ofpbuf(&reply_flow, reply)
+                              : EINVAL;
+                if (!error) {
                     dpif_windows_flow_to_dpif_flow(get->flow, &reply_flow);
-                    /* The decoded flow points into 'reply'; copy the actions
-                     * into the caller-provided buffer and leave 'reply'
-                     * attached below is not possible, so copy here. */
-                    if (get->buffer && reply_flow.key) {
+                    /* to_dpif_flow leaves get->flow pointing into 'reply',
+                     * which is freed below.  Copy key/mask/actions into the
+                     * caller's buffer.  Do every ofpbuf_put() FIRST (each may
+                     * grow/realloc and move the base) and only then capture the
+                     * pointers via ofpbuf_at(), so none dangle. */
+                    if (get->buffer) {
+                        size_t act_ofs, key_ofs, mask_ofs;
+
                         ofpbuf_clear(get->buffer);
+                        act_ofs = get->buffer->size;
                         if (reply_flow.actions_len) {
                             ofpbuf_put(get->buffer, reply_flow.actions,
                                        reply_flow.actions_len);
-                            get->flow->actions =
-                                ofpbuf_at(get->buffer, 0, 0);
-                            get->flow->actions_len = reply_flow.actions_len;
                         }
+                        key_ofs = get->buffer->size;
                         if (reply_flow.key_len) {
-                            get->flow->key =
-                                ofpbuf_put(get->buffer, reply_flow.key,
-                                           reply_flow.key_len);
-                            get->flow->key_len = reply_flow.key_len;
+                            ofpbuf_put(get->buffer, reply_flow.key,
+                                       reply_flow.key_len);
                         }
+                        mask_ofs = get->buffer->size;
                         if (reply_flow.mask_len) {
-                            get->flow->mask =
-                                ofpbuf_put(get->buffer, reply_flow.mask,
-                                           reply_flow.mask_len);
-                            get->flow->mask_len = reply_flow.mask_len;
+                            ofpbuf_put(get->buffer, reply_flow.mask,
+                                       reply_flow.mask_len);
                         }
+
+                        get->flow->actions = reply_flow.actions_len
+                            ? ofpbuf_at(get->buffer, act_ofs,
+                                        reply_flow.actions_len) : NULL;
+                        get->flow->actions_len = reply_flow.actions_len;
+                        get->flow->key = ofpbuf_at(get->buffer, key_ofs,
+                                                   reply_flow.key_len);
+                        get->flow->key_len = reply_flow.key_len;
+                        get->flow->mask = reply_flow.mask_len
+                            ? ofpbuf_at(get->buffer, mask_ofs,
+                                        reply_flow.mask_len) : NULL;
+                        get->flow->mask_len = reply_flow.mask_len;
                     }
-                } else {
-                    error = ENOENT;
                 }
             }
             break;
@@ -1804,20 +1850,14 @@ dpif_windows_operate__(struct dpif_windows *dpif, struct dpif_op **ops,
 }
 
 static void
-dpif_windows_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops,
-                     enum dpif_offload_type offload_type)
+dpif_windows_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops)
 {
     struct dpif_windows *dpif = dpif_windows_cast(dpif_);
 
-    /* Windows has no hardware-offload (netdev flow API) path; behave as the
-     * DPIF_OFFLOAD_NEVER branch of dpif-netlink. */
-    if (offload_type == DPIF_OFFLOAD_ALWAYS) {
-        for (size_t i = 0; i < n_ops; i++) {
-            ops[i]->error = EOPNOTSUPP;
-        }
-        return;
-    }
-
+    /* The dpif_class->operate contract (dpif-provider.h) takes no offload_type:
+     * dpif_operate() resolves DPIF_OFFLOAD_* before dispatching to the provider
+     * and never passes DPIF_OFFLOAD_ALWAYS down (Windows has no netdev flow-API
+     * offload).  The previous 4-arg signature read an indeterminate register. */
     while (n_ops > 0) {
         size_t chunk = dpif_windows_operate__(dpif, ops, n_ops);
 
@@ -1866,8 +1906,12 @@ parse_odp_packet(struct dpif_windows *dpif, struct ofpbuf *buf,
         return EINVAL;
     }
 
-    /* (Re)set ALL fields of '*upcall' on successful return. */
+    /* (Re)set ALL fields of '*upcall' on successful return.  The caller's
+     * dupcall is not zero-initialized, so 'pid' must be set explicitly even
+     * though the ovsext upcall carries no per-packet PID (matches
+     * dpif-netlink's parse_odp_packet). */
     upcall->type = type;
+    upcall->pid = 0;
     upcall->key = CONST_CAST(struct nlattr *,
                              nl_attr_get(a[OVS_PACKET_ATTR_KEY]));
     upcall->key_len = nl_attr_get_size(a[OVS_PACKET_ATTR_KEY]);

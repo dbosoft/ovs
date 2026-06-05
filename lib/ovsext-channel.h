@@ -59,7 +59,13 @@ struct ovsext_channel {
  * dev-op the driver routes e.g. OVS_VPORT_CMD_GET to the single-object getter,
  * which fails with EINVAL when no port is named. */
 struct ovsext_dump {
-    struct ovsext_channel *channel;
+    struct ovsext_channel *channel;   /* Points at 'own_channel'. */
+    struct ovsext_channel own_channel; /* Dedicated handle: the kernel dump
+                                        * cursor is per file handle, so a dump
+                                        * must not share a channel with
+                                        * concurrent transactions or with other
+                                        * dumps (parallel revalidators). */
+    bool own_channel_open;
     struct ofpbuf *buf;         /* Per-record read buffer, owned here. */
     int status;                 /* 0, or first error encountered. */
 };

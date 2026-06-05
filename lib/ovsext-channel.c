@@ -59,6 +59,18 @@ ovsext_dev_open(void)
                       NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
 }
 
+/* When 'last_err' is ERROR_NOT_FOUND the ovsext device handle is gone (driver
+ * reload / NDIS detach) and cannot even be closed; the only recovery is to
+ * crash so the service manager restarts us and re-opens the device.  Mirrors
+ * netlink-socket.c lost_communication(). */
+static void
+ovsext_check_lost_communication(DWORD last_err)
+{
+    if (last_err == ERROR_NOT_FOUND) {
+        ovs_abort(0, "lost communication with the ovsext kernel device");
+    }
+}
+
 /* Wraps DeviceIoControl so the mock can intercept it.  'in' is logically const
  * (the request); DeviceIoControl's prototype is non-const, hence the cast. */
 static BOOL
@@ -66,12 +78,22 @@ ovsext_dev_ioctl(struct ovsext_channel *ch, DWORD code,
                  const void *in, DWORD in_len,
                  void *out, DWORD out_len, DWORD *bytes)
 {
+    BOOL ok;
+
     if (ovsext_transport) {
         return ovsext_transport->ioctl(ovsext_transport->aux, ch->handle, code,
                                        in, in_len, out, out_len, bytes);
     }
-    return DeviceIoControl(ch->handle, code, CONST_CAST(void *, in), in_len,
-                           out, out_len, bytes, NULL);
+    ok = DeviceIoControl(ch->handle, code, CONST_CAST(void *, in), in_len,
+                         out, out_len, bytes, NULL);
+    if (!ok) {
+        /* A lost kernel handle (driver reload, NDIS detach-promote race)
+         * surfaces as ERROR_NOT_FOUND; there is no recovery and no reopen path
+         * in this provider, so abort instead of returning EINVAL forever (which
+         * would wedge vswitchd with a dead handle -- no flows, no upcalls). */
+        ovsext_check_lost_communication(GetLastError());
+    }
+    return ok;
 }
 
 static void
@@ -243,13 +265,29 @@ void
 ovsext_dump_start(struct ovsext_dump *dump, struct ovsext_channel *ch,
                   const struct ofpbuf *request)
 {
-    dump->channel = ch;
     dump->status = 0;
+    dump->buf = NULL;
+    dump->own_channel_open = false;
+
+    /* Open a dedicated channel for this dump.  The kernel dump cursor is per
+     * file handle (OvsSetupDumpStart), so sharing 'ch' (the dpif's main
+     * channel) with concurrent transactions or with other in-flight dumps
+     * would race the cursor.  This mirrors netlink's per-dump pooled socket
+     * (nl_pool_alloc).  'ch' supplies only the datapath the request is already
+     * addressed to; the dump uses its own pid/seq/handle. */
+    dump->status = ovsext_channel_open(&dump->own_channel);
+    if (dump->status) {
+        dump->channel = NULL;
+        return;
+    }
+    dump->own_channel_open = true;
+    dump->own_channel.dp_ifindex = ch->dp_ifindex;
+    dump->channel = &dump->own_channel;
     dump->buf = ofpbuf_new(OVSEXT_REPLY_MAX);
 
     /* OVS_IOCTL_WRITE (OVS_WRITE_DEV_OP) -> OvsSetupDumpStart in the driver.
      * ovsext_send() stamps the request's len/seq/pid, as nl_sock_send does. */
-    dump->status = ovsext_send(ch, request);
+    dump->status = ovsext_send(dump->channel, request);
 }
 
 bool
@@ -307,6 +345,11 @@ ovsext_dump_done(struct ovsext_dump *dump)
 {
     ofpbuf_delete(dump->buf);
     dump->buf = NULL;
+    if (dump->own_channel_open) {
+        ovsext_channel_close(&dump->own_channel);
+        dump->own_channel_open = false;
+    }
+    dump->channel = NULL;
     return dump->status;
 }
 
