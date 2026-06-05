@@ -111,9 +111,23 @@ FillBandIntoMeter(PNL_ATTR meterAttrs[], DpMeter *meter, PNL_MSG_HDR nlMsgHdr)
     PNL_ATTR bandAttrs[OVS_BAND_ATTR_MAX + 1];
     UINT16 nBands = 0;
 
+    /* OVS_METER_ATTR_BANDS is optional; NlAttrData/NlAttrGetSize would
+     * dereference a NULL attribute.  Treat an absent bands list as zero bands
+     * rather than faulting on a malformed request. */
+    if (!meterAttrs[OVS_METER_ATTR_BANDS]) {
+        meter->nBands = 0;
+        return NDIS_STATUS_SUCCESS;
+    }
+
     band = meter->bands;
     NL_ATTR_FOR_EACH(a, rem, NlAttrData(meterAttrs[OVS_METER_ATTR_BANDS]),
                      NlAttrGetSize(meterAttrs[OVS_METER_ATTR_BANDS])) {
+        /* The meter carries a fixed bands[OVS_MAX_BANDS]; reject a SET with
+         * more bands than that so 'band' never advances past the array. */
+        if (nBands >= OVS_MAX_BANDS) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
         RtlZeroMemory(bandAttrs, sizeof(bandAttrs));
         attrOffset = (UINT32)((PCHAR)NlAttrData(a) - (PCHAR)nlMsgHdr);
         if (!NlAttrParse(nlMsgHdr,
@@ -136,8 +150,21 @@ FillBandIntoMeter(PNL_ATTR meterAttrs[], DpMeter *meter, PNL_MSG_HDR nlMsgHdr)
             band->burst_size = NlAttrGetU32(bandAttrs[OVS_BAND_ATTR_BURST]);
         }
 
-        band->bucket = (band->burst_size + band->rate) * 1000;
-        bandMaxDelta = (UINT32)((band->bucket / band->rate)  / 10);
+        /* A zero rate is meaningless and would divide-by-zero below. */
+        if (band->rate == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        /* Widen the first operand so both the (burst_size + rate) addition and
+         * the * 1000 are done in 64-bit, before storing into the UINT64
+         * bucket. */
+        band->bucket = ((UINT64)band->burst_size + band->rate) * 1000;
+
+        /* Saturate to UINT32: with a large burst and a small rate the 64-bit
+         * (bucket / rate / 10) can exceed UINT32, and a truncating cast would
+         * wrap maxDelta to a wrong (small) value. */
+        UINT64 maxDelta = (band->bucket / band->rate) / 10;
+        bandMaxDelta = maxDelta > UINT32_MAX ? UINT32_MAX : (UINT32)maxDelta;
         if (bandMaxDelta > meter->maxDelta) {
             meter->maxDelta = bandMaxDelta;
         }
@@ -191,34 +218,49 @@ OvsNewMeterCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     }
 
     if (FillBandIntoMeter(meterAttrs, meter, nlMsgHdr) != NDIS_STATUS_SUCCESS) {
-        nlError = NL_ERROR_NOMSG;
+        /* FillBandIntoMeter rejects malformed bands (too many, rate == 0);
+         * report that as an invalid argument, not a malformed message. */
+        nlError = NL_ERROR_INVAL;
         OvsFreeMemoryWithTag(meter, OVS_METER_TAG);
         goto Done;
     }
 
-    NdisAcquireRWLockWrite(meterGlobalTableLock, &lockState, 0);
-    InsertHeadList(&meterGlobalTable[meter->id & (METER_HASH_BUCKET_MAX - 1)],
-                   &(meter->link));
-    NdisReleaseRWLock(meterGlobalTableLock, &lockState);
-
+    /* Serialize the reply from 'meter' BEFORE publishing it to the table: if
+     * the reply build fails the datapath state is left unchanged, and because
+     * the meter is not yet linked no concurrent DEL can free it mid-build. */
     NlBufInit(&nlBuf, usrParamsCtx->outputBuffer, usrParamsCtx->outputLength);
     nlMsgOutHdr = (PNL_MSG_HDR)(NlBufAt(&nlBuf, 0, 0));
     if (!NlFillOvsMsg(&nlBuf, nlMsgHdr->nlmsgType, 0,
-                     nlMsgHdr->nlmsgSeq, nlMsgHdr->nlmsgPid,
-                     genlMsgHdr->cmd, OVS_METER_CMD_GET,
-                     ovsHdr->dp_ifindex)) {
+                      nlMsgHdr->nlmsgSeq, nlMsgHdr->nlmsgPid,
+                      genlMsgHdr->cmd, OVS_METER_VERSION,
+                      ovsHdr->dp_ifindex)) {
         nlError = NL_ERROR_NOMSG;
+        OvsFreeMemoryWithTag(meter, OVS_METER_TAG);
         goto Done;
     }
-
     if (!buildOvsMeterReplyMsg(&nlBuf, meter)) {
         nlError = NL_ERROR_NOMEM;
+        OvsFreeMemoryWithTag(meter, OVS_METER_TAG);
         goto Done;
     }
-
     NlMsgSetSize(nlMsgOutHdr, NlBufSize(&nlBuf));
     NlMsgAlignSize(nlMsgOutHdr);
     *replyLen += NlMsgSize(nlMsgOutHdr);
+
+    /* Reply is built; now publish atomically.  A SET on an existing meter id
+     * replaces it: remove and free the current entry first, otherwise the old
+     * DpMeter is orphaned in the bucket and leaks into non-paged pool. */
+    NdisAcquireRWLockWrite(meterGlobalTableLock, &lockState, 0);
+    {
+        DpMeter *old = OvsMeterLookup(meter->id);
+        if (old) {
+            RemoveEntryList(&(old->link));
+            OvsFreeMemoryWithTag(old, OVS_METER_TAG);
+        }
+    }
+    InsertHeadList(&meterGlobalTable[meter->id & (METER_HASH_BUCKET_MAX - 1)],
+                   &(meter->link));
+    NdisReleaseRWLock(meterGlobalTableLock, &lockState);
 
 Done:
     if (nlError != NL_ERROR_SUCCESS) {
@@ -251,14 +293,14 @@ NDIS_STATUS OvsMeterFeatureProbe(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     nlMsgOutHdr = (PNL_MSG_HDR)(NlBufAt(&nlBuf, 0, 0));
     ok = NlFillOvsMsg(&nlBuf, nlMsgHdr->nlmsgType, 0,
                       nlMsgHdr->nlmsgSeq, nlMsgHdr->nlmsgPid,
-                      genlMsgHdr->cmd, OVS_METER_CMD_FEATURES,
+                      genlMsgHdr->cmd, OVS_METER_VERSION,
                       ovsHdr->dp_ifindex);
     if (!ok) {
         nlError = NL_ERROR_NOMSG;
         goto Done;
     }
 
-    if (!NlMsgPutTailU32(&nlBuf, OVS_METER_ATTR_MAX_METERS, UINT32_MAX)) {
+    if (!NlMsgPutTailU32(&nlBuf, OVS_METER_ATTR_MAX_METERS, OVS_MAX_METERS)) {
         nlError = NL_ERROR_NOMSG;
         goto Done;
     }
@@ -367,7 +409,7 @@ OvsMeterGet(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     nlMsgOutHdr = (PNL_MSG_HDR)(NlBufAt(&nlBuf, 0, 0));
     ok = NlFillOvsMsg(&nlBuf, nlMsgHdr->nlmsgType, 0,
                       nlMsgHdr->nlmsgSeq, nlMsgHdr->nlmsgPid,
-                      genlMsgHdr->cmd, OVS_METER_CMD_GET,
+                      genlMsgHdr->cmd, OVS_METER_VERSION,
                       ovsHdr->dp_ifindex);
     if (!ok) {
         nlError = NL_ERROR_NOMSG;
@@ -438,7 +480,7 @@ OvsMeterDestroy(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     nlMsgOutHdr = (PNL_MSG_HDR)(NlBufAt(&nlBuf, 0, 0));
     ok = NlFillOvsMsg(&nlBuf, nlMsgHdr->nlmsgType, 0,
                       nlMsgHdr->nlmsgSeq, nlMsgHdr->nlmsgPid,
-                      genlMsgHdr->cmd, OVS_METER_CMD_DEL,
+                      genlMsgHdr->cmd, OVS_METER_VERSION,
                       ovsHdr->dp_ifindex);
     if (!ok) {
         nlError = NL_ERROR_NOMEM;
@@ -535,8 +577,8 @@ OvsMeterExecute(OvsForwardingContext *fwdCtx, UINT32 meterId)
     cost = dpMeter->kbps ? OvsPacketLenNBL(fwdCtx->curNbl) * 8 : 1000;
     for (int index = 0; index < dpMeter->nBands; index++) {
         band = &(dpMeter->bands[index]);
-        maxBucketSize = (band->burst_size + band->rate) * 1000LL;
-        band->bucket += deltaMs * band->rate;
+        maxBucketSize = ((UINT64)band->burst_size + band->rate) * 1000LL;
+        band->bucket += (UINT64)deltaMs * band->rate;
         if (band->bucket > maxBucketSize) {
             band->bucket = maxBucketSize;
         }
