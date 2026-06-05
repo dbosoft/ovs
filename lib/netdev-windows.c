@@ -815,6 +815,7 @@ netdev_windows_wait(const struct netdev_class *netdev_class OVS_UNUSED)
     .wait               = netdev_windows_wait,                          \
     .get_etheraddr      = netdev_windows_get_etheraddr,                 \
     .set_etheraddr      = netdev_windows_set_etheraddr,                 \
+    .get_mtu            = netdev_windows_get_mtu,                       \
     .get_carrier        = netdev_windows_get_carrier,                   \
     .get_carrier_resets = netdev_windows_get_carrier_resets,            \
     .update_flags       = netdev_windows_update_flags,                  \
