@@ -65,6 +65,7 @@ typedef struct _OVS_ACTION_STATS {
     UINT32 failedChecksum;
     UINT32 deferredActionsQueueFull;
     UINT32 deferredActionsExecLimit;
+    UINT32 explicitDrop;
 } OVS_ACTION_STATS, *POVS_ACTION_STATS;
 
 OVS_ACTION_STATS ovsActionStats;
@@ -2427,6 +2428,16 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
             break;
         }
 
+        case OVS_ACTION_ATTR_CT_CLEAR:
+            /*
+             * Clears conntrack metadata (incl. OVS_CS_F_TRACKED) from the flow
+             * key only. It mutates no packet bytes and no forwarding context,
+             * so it needs no OvsOutputBeforeSetAction flush and is correct in
+             * any position relative to output actions.
+             */
+            OvsCtClearFlowKey(key);
+            break;
+
         case OVS_ACTION_ATTR_RECIRC:
         {
             if (ovsFwdCtx.destPortsSizeOut > 0 || ovsFwdCtx.tunnelTxNic != NULL
@@ -2530,6 +2541,20 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
             }
             break;
         }
+        case OVS_ACTION_ATTR_DROP:
+            /*
+             * Explicit, reason-carrying drop. The u32 xlate_error is not yet
+             * surfaced to userspace. OVN emits 'drop' as the sole action in a
+             * set, so abandoning the rest of the loop via dropit is correct;
+             * the assumption is that no OVS_ACTION_ATTR_OUTPUT precedes it in
+             * the same set (a preceding output's accumulated destination ports
+             * would be discarded by dropit without being flushed, as with every
+             * other mid-loop goto dropit).
+             */
+            ovsActionStats.explicitDrop++;
+            dropReason = L"OVS-explicit drop action";
+            goto dropit;
+
         default:
             status = NDIS_STATUS_NOT_SUPPORTED;
             break;
