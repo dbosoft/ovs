@@ -62,6 +62,9 @@ typedef struct _OVS_DATAPATH
    UINT64                  misses;          // Number of flow table misses.
    UINT64                  lost;            // Number of dropped misses.
 
+   /* OVS_DP_F_* feature mask negotiated with userspace. */
+   UINT32                  userFeatures;
+
    /* Used to protect the flows in the flowtable. */
    PNDIS_RW_LOCK_EX        lock;
 } OVS_DATAPATH, *POVS_DATAPATH;

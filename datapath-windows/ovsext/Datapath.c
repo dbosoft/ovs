@@ -1290,6 +1290,11 @@ OvsGetPidHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
  * userspace.
  * --------------------------------------------------------------------------
  */
+/* Datapath features ovsext honours in the OVS_DP_F_* handshake.  Windows has
+ * no TC offload and per-CPU upcall dispatch is not implemented, so only the
+ * unaligned-attribute and per-vport-PID features are supported. */
+#define OVSEXT_SUPPORTED_DP_FEATURES (OVS_DP_F_UNALIGNED | OVS_DP_F_VPORT_PIDS)
+
 static NTSTATUS
 OvsDpFillInfo(POVS_SWITCH_CONTEXT ovsSwitchContext,
               POVS_MESSAGE msgIn,
@@ -1329,6 +1334,25 @@ OvsDpFillInfo(POVS_SWITCH_CONTEXT ovsSwitchContext,
         dpStats.n_flows = datapath->nFlows;
         writeOk = NlMsgPutTailUnspec(nlBuf, OVS_DP_ATTR_STATS,
                                      (PCHAR)&dpStats, sizeof dpStats);
+    }
+    if (writeOk) {
+        /* ovsext keeps a linear flow table rather than a tuple-space
+         * classifier, so it has no real megaflow masks.  Report the table as a
+         * single implicit mask so that dpif_get_dp_stats() takes its populated
+         * branch instead of the UINT32_MAX "no megaflow stats" sentinel, giving
+         * ovs-dpctl a sensible masks line. */
+        struct ovs_dp_megaflow_stats dpMegaflowStats;
+
+        RtlZeroMemory(&dpMegaflowStats, sizeof dpMegaflowStats);
+        dpMegaflowStats.n_masks = 1;
+        dpMegaflowStats.n_mask_hit = datapath->hits;
+        writeOk = NlMsgPutTailUnspec(nlBuf, OVS_DP_ATTR_MEGAFLOW_STATS,
+                                     (PCHAR)&dpMegaflowStats,
+                                     sizeof dpMegaflowStats);
+    }
+    if (writeOk) {
+        writeOk = NlMsgPutTailU32(nlBuf, OVS_DP_ATTR_USER_FEATURES,
+                                  datapath->userFeatures);
     }
     nlMsg = (PNL_MSG_HDR)NlBufAt(nlBuf, 0, 0);
     nlMsg->nlmsgLen = NlBufSize(nlBuf);
@@ -1590,13 +1614,6 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                         dpAttrs, ARRAY_SIZE(dpAttrs))) {
             return STATUS_INVALID_PARAMETER;
         }
-
-        /*
-        * XXX: Not clear at this stage if there's any role for the
-        * OVS_DP_ATTR_UPCALL_PID and OVS_DP_ATTR_USER_FEATURES attributes passed
-        * from userspace.
-        */
-
     } else {
         RtlZeroMemory(dpAttrs, sizeof dpAttrs);
     }
@@ -1631,6 +1648,21 @@ HandleDpTransactionCommon(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if (usrParamsCtx->ovsMsg->genlMsg.cmd == OVS_DP_CMD_NEW) {
         nlError = NL_ERROR_EXIST;
         goto cleanup;
+    }
+
+    /* Honour the OVS_DP_F_* handshake: store the requested feature mask after
+     * rejecting any bit ovsext does not implement, mirroring the Linux
+     * "request bit must come back set" contract.  Only OVS_DP_CMD_SET carries a
+     * meaningful request; the value is echoed back by OvsDpFillInfo. */
+    if (usrParamsCtx->ovsMsg->genlMsg.cmd == OVS_DP_CMD_SET &&
+        dpAttrs[OVS_DP_ATTR_USER_FEATURES] != NULL) {
+        UINT32 userFeatures = NlAttrGetU32(dpAttrs[OVS_DP_ATTR_USER_FEATURES]);
+
+        if (userFeatures & ~OVSEXT_SUPPORTED_DP_FEATURES) {
+            nlError = NL_ERROR_NOTSUPP;
+            goto cleanup;
+        }
+        switchContext->datapath.userFeatures = userFeatures;
     }
 
     status = OvsDpFillInfo(switchContext, msgIn, &nlBuf);

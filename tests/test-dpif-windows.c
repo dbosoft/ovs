@@ -143,6 +143,13 @@ struct mock_kernel {
     uint32_t meter_band_type;
     uint32_t meter_band_rate;
     uint32_t meter_band_burst;
+
+    /* OVS_DP_F_* handshake.  A SET request stores its (validated) feature mask
+     * here; when 'dp_echo_features' is set the DP reply carries USER_FEATURES
+     * and MEGAFLOW_STATS back (modelling the feature-aware kernel), otherwise it
+     * omits them (modelling an older kernel that never negotiates). */
+    uint32_t dp_user_features;
+    bool     dp_echo_features;
 };
 
 /* ---- record builders ----------------------------------------------------- */
@@ -480,6 +487,74 @@ mock_meter(struct mock_kernel *m, const void *in, DWORD in_len,
     return TRUE;
 }
 
+/* The datapath features the mock kernel honours, matching the ovsext
+ * OVSEXT_SUPPORTED_DP_FEATURES set. */
+#define MOCK_SUPPORTED_DP_FEATURES (OVS_DP_F_UNALIGNED | OVS_DP_F_VPORT_PIDS)
+
+/* Answers an OVS_DP_CMD_GET/SET transaction as OvsDpFillInfo +
+ * HandleDpTransactionCommon do: a SET validates the requested USER_FEATURES
+ * against the supported mask (rejecting unknown bits with EOPNOTSUPP) and
+ * stores it; every reply carries NAME + STATS, plus MEGAFLOW_STATS and the
+ * echoed USER_FEATURES when 'dp_echo_features' is set. */
+static BOOL
+mock_dp_transact(struct mock_kernel *m, const void *in, DWORD in_len,
+                 void *out, DWORD out_len, DWORD *bytes)
+{
+    const struct genlmsghdr *genl = ALIGNED_CAST(const struct genlmsghdr *,
+                                        (const char *) in + NLMSG_HDRLEN);
+    static const struct nl_policy pol[] = {
+        [OVS_DP_ATTR_NAME] = { .type = NL_A_STRING, .optional = true },
+        [OVS_DP_ATTR_UPCALL_PID] = { .type = NL_A_U32, .optional = true },
+        [OVS_DP_ATTR_USER_FEATURES] = { .type = NL_A_U32, .optional = true },
+    };
+    struct nlattr *attr[ARRAY_SIZE(pol)];
+    struct ofpbuf b = ofpbuf_const_initializer(in, in_len);
+    bool parsed = ofpbuf_try_pull(&b, NLMSG_HDRLEN)
+        && ofpbuf_try_pull(&b, GENL_HDRLEN)
+        && ofpbuf_try_pull(&b, sizeof(struct ovs_header))
+        && nl_policy_parse(&b, 0, pol, attr, ARRAY_SIZE(pol));
+
+    if (genl->cmd == OVS_DP_CMD_SET && parsed
+        && attr[OVS_DP_ATTR_USER_FEATURES]) {
+        uint32_t req = nl_attr_get_u32(attr[OVS_DP_ATTR_USER_FEATURES]);
+
+        if (req & ~MOCK_SUPPORTED_DP_FEATURES) {
+            return reply_nlmsgerr(EOPNOTSUPP, out, out_len, bytes);
+        }
+        m->dp_user_features = req;
+    }
+
+    uint64_t stub[1024 / 8];
+    struct ofpbuf r;
+    struct ovs_header *ovs_header;
+    struct ovs_dp_stats stats;
+    DWORD n;
+
+    ofpbuf_use_stub(&r, stub, sizeof stub);
+    nl_msg_put_genlmsghdr(&r, 0, OVS_WIN_NL_DATAPATH_FAMILY_ID, 0,
+                          OVS_DP_CMD_GET, OVS_DATAPATH_VERSION);
+    ovs_header = ofpbuf_put_uninit(&r, sizeof *ovs_header);
+    ovs_header->dp_ifindex = MOCK_DP_IFINDEX;
+    nl_msg_put_string(&r, OVS_DP_ATTR_NAME, "ovs-system");
+    memset(&stats, 0, sizeof stats);
+    nl_msg_put_unspec(&r, OVS_DP_ATTR_STATS, &stats, sizeof stats);
+    if (m->dp_echo_features) {
+        struct ovs_dp_megaflow_stats mf;
+
+        memset(&mf, 0, sizeof mf);
+        mf.n_masks = 1;
+        nl_msg_put_unspec(&r, OVS_DP_ATTR_MEGAFLOW_STATS, &mf, sizeof mf);
+        nl_msg_put_u32(&r, OVS_DP_ATTR_USER_FEATURES, m->dp_user_features);
+    }
+    nl_msg_nlmsghdr(&r)->nlmsg_len = r.size;
+
+    n = r.size < out_len ? (DWORD) r.size : out_len;
+    memcpy(out, r.data, n);
+    *bytes = n;
+    ofpbuf_uninit(&r);
+    return TRUE;
+}
+
 static BOOL
 mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
               void *out, DWORD out_len, DWORD *bytes)
@@ -517,7 +592,7 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
         return mock_meter(m, in, in_len, out, out_len, bytes);
 
     case OVS_WIN_NL_DATAPATH_FAMILY_ID:
-        return record_copy(&m->dp[0], out, out_len, bytes);
+        return mock_dp_transact(m, in, in_len, out, out_len, bytes);
 
     case OVS_WIN_NL_FLOW_FAMILY_ID:
         switch (m->flow_reply) {
@@ -739,6 +814,11 @@ mock_reset_content(struct mock_kernel *m)
     m->validate_dp_failed = false;
     m->flow_dump_done = false;
     m->flow_reply = FR_ACK;
+    /* Default to the feature-aware kernel: echo USER_FEATURES/MEGAFLOW_STATS so
+     * dpif_open()'s feature negotiation succeeds.  A SET clears this back to the
+     * negotiated value; tests that exercise the old-kernel path clear it. */
+    m->dp_echo_features = true;
+    m->dp_user_features = 0;
     /* Keep one datapath so dpif_open()'s resolve dump always succeeds. */
     m->n_dp = 1;
     build_dp_record(&m->dp[0]);
@@ -1508,6 +1588,43 @@ test_ct_limits(struct dpif *dpif, struct mock_kernel *m)
     CHECK(feat == 0);
 }
 
+/* Datapath feature negotiation: the open requested OVS_DP_F_UNALIGNED |
+ * OVS_DP_F_VPORT_PIDS, the kernel stored and echoed them, and
+ * get_features/get_stats reflect the negotiated mask.  An unsupported bit is
+ * rejected with EOPNOTSUPP, and a kernel that does not echo features falls back
+ * to the "no megaflow stats" sentinel. */
+static void
+test_feature_negotiation(struct dpif *dpif, struct mock_kernel *m)
+{
+    uint32_t want = OVS_DP_F_UNALIGNED | OVS_DP_F_VPORT_PIDS;
+    struct dpif_dp_stats stats;
+
+    mock_reset_content(m);
+
+    /* The request carries USER_FEATURES (proven by the kernel storing exactly
+     * the requested mask), the reply echoes it, and get_features returns the
+     * cached value. */
+    CHECK(dpif_set_features(dpif, want) == 0);
+    CHECK(m->dp_user_features == want);
+    CHECK(dpif_get_features(dpif) == want);
+
+    /* MEGAFLOW_STATS present -> get_stats reports the single implicit mask, not
+     * the UINT32_MAX "no megaflow stats" sentinel. */
+    CHECK(dpif_get_dp_stats(dpif, &stats) == 0);
+    CHECK(stats.n_masks == 1);
+
+    /* An unsupported bit is rejected and leaves the negotiated mask intact. */
+    CHECK(dpif_set_features(dpif, OVS_DP_F_TC_RECIRC_SHARING) == EOPNOTSUPP);
+    CHECK(dpif_get_features(dpif) == want);
+
+    /* Kernel without feature echo: set_features sees the bit never come back
+     * (EOPNOTSUPP) and get_stats falls back to the sentinel. */
+    m->dp_echo_features = false;
+    CHECK(dpif_set_features(dpif, want) == EOPNOTSUPP);
+    CHECK(dpif_get_dp_stats(dpif, &stats) == 0);
+    CHECK(stats.n_masks == UINT32_MAX);
+}
+
 /* OpenFlow meters round-trip through the OVS_METER genl family: features
  * advertises the kernel's limits, a single-band DROP meter is set (and the
  * request marshals id/rate/burst correctly), and get/del read back stats. */
@@ -1616,6 +1733,7 @@ main(int argc, char *argv[])
     test_port_poll(dpif, &mock);
     test_ct_limits(dpif, &mock);
     test_meters(dpif, &mock);
+    test_feature_negotiation(dpif, &mock);
 
     dpif_close(dpif);
     ovsext_set_transport(NULL);
