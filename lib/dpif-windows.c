@@ -1238,7 +1238,7 @@ dpif_windows_get_stats(const struct dpif *dpif_, struct dpif_dp_stats *stats)
 
 /* Requests 'new_features' from the kernel via OVS_DP_CMD_SET, mirroring
  * dpif_netlink_set_features().  The kernel echoes back the mask it accepted
- * (rejecting any unsupported bit), which is cached in 'dpif->user_features';
+ * returns EOPNOTSUPP if none of the requested bits came back set. */
  * returns EOPNOTSUPP if a requested bit did not come back set. */
 static int
 dpif_windows_set_features(struct dpif *dpif_, uint32_t new_features)
