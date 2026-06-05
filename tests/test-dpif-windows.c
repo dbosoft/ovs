@@ -108,10 +108,17 @@ struct mock_kernel {
     /* Queued packet upcalls, delivered one per OVS_IOCTL_READ_PACKET. */
     struct mock_record pkt[MOCK_MAX_RECORDS];   int pkt_head, pkt_len;
 
+    /* Queued vport-change events, delivered one per OVS_IOCTL_READ_EVENT. */
+    struct mock_record evt[MOCK_MAX_RECORDS];   int evt_head, evt_len;
+
     /* OVS_IOCTL_TRANSACT scripting for the FLOW family. */
     enum flow_reply flow_reply;
     struct mock_record flow_echo;
     struct mock_record flow_bad;
+
+    /* Set when a validateDpIndex control command (subscribe/pend) arrives with a
+     * dp_ifindex that is not the mock datapath -- the kernel rejects these. */
+    bool validate_dp_failed;
 };
 
 /* ---- record builders ----------------------------------------------------- */
@@ -305,7 +312,8 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
 }
 
 static BOOL
-mock_write(struct mock_handle *h, const void *in, DWORD in_len, DWORD *bytes)
+mock_write(struct mock_kernel *m, struct mock_handle *h,
+           const void *in, DWORD in_len, DWORD *bytes)
 {
     const struct nlmsghdr *nlh = in;
 
@@ -325,7 +333,29 @@ mock_write(struct mock_handle *h, const void *in, DWORD in_len, DWORD *bytes)
         default:                            h->dump = DUMP_NONE;  break;
         }
     }
-    /* Other writes (subscribe/pend) just succeed. */
+
+    /* The kernel validates these control commands (validateDpIndex) against a
+     * live datapath and rejects an ovs_header whose dp_ifindex is not one.  Model
+     * that so a hardcoded-0 subscribe or pend (the default datapath is not always
+     * slot 0) is caught instead of silently targeting the wrong datapath. */
+    if (nlh->nlmsg_type == OVS_WIN_NL_CTRL_FAMILY_ID
+        && in_len >= NLMSG_HDRLEN + GENL_HDRLEN + sizeof(struct ovs_header)) {
+        const struct genlmsghdr *genl = ALIGNED_CAST(const struct genlmsghdr *,
+                                            (const char *) in + NLMSG_HDRLEN);
+        if (genl->cmd == OVS_CTRL_CMD_MC_SUBSCRIBE_REQ
+            || genl->cmd == OVS_CTRL_CMD_PACKET_SUBSCRIBE_REQ
+            || genl->cmd == OVS_CTRL_CMD_WIN_PEND_REQ
+            || genl->cmd == OVS_CTRL_CMD_WIN_PEND_PACKET_REQ) {
+            const struct ovs_header *oh = ALIGNED_CAST(const struct ovs_header *,
+                                 (const char *) in + NLMSG_HDRLEN + GENL_HDRLEN);
+            if (oh->dp_ifindex != MOCK_DP_IFINDEX) {
+                m->validate_dp_failed = true;
+                SetLastError(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            }
+        }
+    }
+    /* Other writes just succeed. */
     return TRUE;
 }
 
@@ -366,6 +396,20 @@ mock_read_packet(struct mock_kernel *m, void *out, DWORD out_len, DWORD *bytes)
     return TRUE;
 }
 
+/* OVS_IOCTL_READ_EVENT: dequeue one queued vport event, truncated to out_len. */
+static BOOL
+mock_read_event(struct mock_kernel *m, void *out, DWORD out_len, DWORD *bytes)
+{
+    *bytes = 0;
+    if (m->evt_len == 0) {
+        return TRUE;                /* nothing queued: 0 bytes = EAGAIN */
+    }
+    record_copy(&m->evt[m->evt_head], out, out_len, bytes);
+    m->evt_head = (m->evt_head + 1) % MOCK_MAX_RECORDS;
+    m->evt_len--;
+    return TRUE;
+}
+
 static BOOL
 mock_ioctl(void *aux, HANDLE handle, DWORD code,
            const void *in, DWORD in_len, void *out, DWORD out_len, DWORD *bytes)
@@ -392,14 +436,13 @@ mock_ioctl(void *aux, HANDLE handle, DWORD code,
     case OVS_IOCTL_TRANSACT:
         return mock_transact(m, in, in_len, out, out_len, bytes);
     case OVS_IOCTL_WRITE:
-        return mock_write(h, in, in_len, bytes);
+        return mock_write(m, h, in, in_len, bytes);
     case OVS_IOCTL_READ:
         return mock_read_dump(m, h, out, out_len, bytes);
     case OVS_IOCTL_READ_PACKET:
         return mock_read_packet(m, out, out_len, bytes);
     case OVS_IOCTL_READ_EVENT:
-        *bytes = 0;
-        return TRUE;
+        return mock_read_event(m, out, out_len, bytes);
     default:
         SetLastError(ERROR_INVALID_FUNCTION);
         return FALSE;
@@ -450,7 +493,10 @@ mock_reset_content(struct mock_kernel *m)
     m->n_flow = 0;
     m->pkt_head = 0;
     m->pkt_len = 0;
+    m->evt_head = 0;
+    m->evt_len = 0;
     m->fail_open = false;
+    m->validate_dp_failed = false;
     m->flow_reply = FR_ACK;
     /* Keep one datapath so dpif_open()'s resolve dump always succeeds. */
     m->n_dp = 1;
@@ -465,6 +511,34 @@ mock_queue_packet(struct mock_kernel *m, const struct mock_record *r)
     ovs_assert(m->pkt_len < MOCK_MAX_RECORDS);
     m->pkt[tail] = *r;
     m->pkt_len++;
+}
+
+/* Queues a vport-change event message (OVS_VPORT_CMD_NEW/DEL), as the kernel's
+ * OvsReadEventCmdHandler/OvsPortFillInfo emit it: a genl vport message with the
+ * standard nlmsg/genl/ovs_header + PORT_NO/TYPE/UPCALL_PID/NAME attributes. */
+static void
+mock_queue_vport_event(struct mock_kernel *m, int dp_ifindex, uint8_t cmd,
+                       uint32_t port_no, const char *name)
+{
+    uint64_t stub[1024 / 8];
+    struct ofpbuf b;
+    struct ovs_header *ovs_header;
+    uint32_t pid = MOCK_PID;
+    int tail = (m->evt_head + m->evt_len) % MOCK_MAX_RECORDS;
+
+    ovs_assert(m->evt_len < MOCK_MAX_RECORDS);
+
+    ofpbuf_use_stub(&b, stub, sizeof stub);
+    nl_msg_put_genlmsghdr(&b, 0, OVS_WIN_NL_VPORT_FAMILY_ID, 0, cmd,
+                          OVS_VPORT_VERSION);
+    ovs_header = ofpbuf_put_uninit(&b, sizeof *ovs_header);
+    ovs_header->dp_ifindex = dp_ifindex;
+    nl_msg_put_u32(&b, OVS_VPORT_ATTR_PORT_NO, port_no);
+    nl_msg_put_u32(&b, OVS_VPORT_ATTR_TYPE, OVS_VPORT_TYPE_NETDEV);
+    nl_msg_put_unspec(&b, OVS_VPORT_ATTR_UPCALL_PID, &pid, sizeof pid);
+    nl_msg_put_string(&b, OVS_VPORT_ATTR_NAME, name);
+    finish_record(&m->evt[tail], &b);
+    m->evt_len++;
 }
 
 /* ---- tests --------------------------------------------------------------- */
@@ -1022,6 +1096,54 @@ test_operate_batch(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&key);
 }
 
+/* port_poll lazily subscribes to the vport event channel (returning ENOBUFS so
+ * ofproto re-dumps), then surfaces each queued OVS_VPORT_CMD_NEW/DEL for this
+ * datapath as a port name; events for another datapath are filtered out. */
+static void
+test_port_poll(struct dpif *dpif, struct mock_kernel *m)
+{
+    char *devname;
+    int error;
+
+    printf("test_port_poll:\n");
+    mock_reset_content(m);
+
+    /* First call subscribes and asks ofproto to reconcile the full port set. */
+    devname = NULL;
+    error = dpif_port_poll(dpif, &devname);
+    CHECK(error == ENOBUFS);
+
+    /* A matching NEW event surfaces its port name. */
+    mock_queue_vport_event(m, MOCK_DP_IFINDEX, OVS_VPORT_CMD_NEW, 7, "vport7");
+    devname = NULL;
+    error = dpif_port_poll(dpif, &devname);
+    CHECK(error == 0);
+    CHECK(devname != NULL && !strcmp(devname, "vport7"));
+    free(devname);
+
+    /* A DEL for this datapath also surfaces. */
+    mock_queue_vport_event(m, MOCK_DP_IFINDEX, OVS_VPORT_CMD_DEL, 7, "vport7");
+    devname = NULL;
+    CHECK(dpif_port_poll(dpif, &devname) == 0);
+    CHECK(devname != NULL && !strcmp(devname, "vport7"));
+    free(devname);
+
+    /* An event for another datapath is drained and not reported. */
+    mock_queue_vport_event(m, MOCK_DP_IFINDEX + 9, OVS_VPORT_CMD_NEW, 3, "other");
+    devname = NULL;
+    CHECK(dpif_port_poll(dpif, &devname) == EAGAIN);
+
+    /* Drained queue: no change. */
+    devname = NULL;
+    CHECK(dpif_port_poll(dpif, &devname) == EAGAIN);
+
+    /* port_poll_wait arms the event pend on the notifier channel; the kernel
+     * validates that command's dp_ifindex too, so it must carry the resolved
+     * index (the mock flags a 0/foreign-dp pend). */
+    dpif_port_poll_wait(dpif);
+    CHECK(!m->validate_dp_failed);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1061,6 +1183,7 @@ main(int argc, char *argv[])
     test_flow_put_stats(dpif, &mock);
     test_flow_del_stats(dpif, &mock);
     test_operate_batch(dpif, &mock);
+    test_port_poll(dpif, &mock);
 
     dpif_close(dpif);
     ovsext_set_transport(NULL);

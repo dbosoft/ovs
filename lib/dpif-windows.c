@@ -48,6 +48,7 @@
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/match.h"
 #include "openvswitch/ofpbuf.h"
+#include "openvswitch/poll-loop.h"
 #include "openvswitch/vlog.h"
 #include "packets.h"
 #include "sset.h"
@@ -103,6 +104,13 @@ struct dpif_windows {
     char *dp_name;              /* Kernel-reported datapath name. */
     uint32_t user_features;
     bool upcalls_enabled;       /* recv_set() state. */
+
+    /* Vport-change notifier: a dedicated channel joined to the kernel vport
+     * multicast group, opened lazily on the first port_poll().  A handle parked
+     * on a pending event cannot also serve transactions, so it is kept separate
+     * from 'channel'. */
+    struct ovsext_channel port_notifier;
+    bool port_notifier_subscribed;
 };
 
 /* 'dpif_windows_class' is declared in dpif-provider.h and defined at the
@@ -1156,6 +1164,9 @@ dpif_windows_close(struct dpif *dpif_)
      * resources and the containing struct (mirrors dpif_netlink_close).
      * Calling dpif_uninit() here double-frees base_name. */
     ovsext_channel_close(&dpif->channel);
+    if (dpif->port_notifier_subscribed) {
+        ovsext_channel_close(&dpif->port_notifier);
+    }
     free(dpif->dp_name);
     free(dpif);
 }
@@ -1475,21 +1486,85 @@ dpif_windows_port_dump_done(const struct dpif *dpif_ OVS_UNUSED, void *state_)
     return error;
 }
 
+/* Reports the next kernel-initiated vport change (add/remove/link transition)
+ * as '*devnamep', mirroring dpif_netlink_port_poll().  The kernel posts these on
+ * the vport multicast group (OVS_WIN_NL_VPORT_MCGRP_ID), read via
+ * OVS_IOCTL_READ_EVENT; it emits OVS_VPORT_CMD_NEW/DEL today, and (like
+ * dpif-netlink) OVS_VPORT_CMD_SET is also accepted as "this port changed".
+ *
+ * The notifier channel is opened and joined lazily on the first call, which
+ * returns ENOBUFS so ofproto re-dumps the whole port set ("state unknown").
+ * Thereafter each call returns 0 + a port name, EAGAIN when no event is queued,
+ * or ENOBUFS on any parse/transport hiccup so the caller reconciles by re-dump
+ * rather than missing a change. */
 static int
-dpif_windows_port_poll(const struct dpif *dpif_ OVS_UNUSED,
-                       char **devnamep OVS_UNUSED)
+dpif_windows_port_poll(const struct dpif *dpif_, char **devnamep)
 {
-    /* Report "no change": this provider does not subscribe to the ovsext
-     * vport-change event channel (OVS_WIN_NL_VPORT_MCGRP_ID, delivered via
-     * OVS_IOCTL_READ_EVENT), so kernel-initiated vport changes -- a Hyper-V NIC
-     * teardown, live-migration churn, a port renumber -- are not reported here.
-     * Explicit userspace add/del_port still reconcile odp_to_ofport directly. */
-    return EAGAIN;
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+
+    if (!dpif->port_notifier_subscribed) {
+        int error = ovsext_channel_open(&dpif->port_notifier);
+        if (error) {
+            return error;
+        }
+        dpif->port_notifier.dp_ifindex = dpif->dp_ifindex;
+        error = ovsext_subscribe_vport_events(&dpif->port_notifier, true);
+        if (error) {
+            ovsext_channel_close(&dpif->port_notifier);
+            return error;
+        }
+        dpif->port_notifier_subscribed = true;
+        return ENOBUFS;
+    }
+
+    for (;;) {
+        uint64_t buf_stub[4096 / 8];
+        struct ofpbuf buf;
+        struct dpif_windows_vport vport;
+        int error;
+
+        ofpbuf_use_stub(&buf, buf_stub, sizeof buf_stub);
+        error = ovsext_recv(&dpif->port_notifier, &buf);
+        if (error) {
+            ofpbuf_uninit(&buf);
+            if (error == EAGAIN) {
+                return EAGAIN;
+            }
+            /* A transport error loses event-stream position; force a re-dump. */
+            return ENOBUFS;
+        }
+
+        error = dpif_windows_vport_from_ofpbuf(&vport, &buf);
+        if (!error
+            && vport.dp_ifindex == dpif->dp_ifindex
+            && (vport.cmd == OVS_VPORT_CMD_NEW
+                || vport.cmd == OVS_VPORT_CMD_DEL
+                || vport.cmd == OVS_VPORT_CMD_SET)) {
+            *devnamep = xstrdup(vport.name);
+            ofpbuf_uninit(&buf);
+            return 0;
+        }
+        ofpbuf_uninit(&buf);
+        if (error) {
+            /* A garbled event record: reconcile by re-dump rather than guess. */
+            return ENOBUFS;
+        }
+        /* Event for another datapath; keep draining. */
+    }
 }
 
 static void
-dpif_windows_port_poll_wait(const struct dpif *dpif_ OVS_UNUSED)
+dpif_windows_port_poll_wait(const struct dpif *dpif_)
 {
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+
+    if (dpif->port_notifier_subscribed) {
+        ovsext_recv_wait(&dpif->port_notifier);
+    } else {
+        /* Not yet subscribed: wake immediately so the first port_poll() runs and
+         * joins the multicast group. */
+        poll_immediate_wake();
+    }
 }
 
 /* ====================================================================

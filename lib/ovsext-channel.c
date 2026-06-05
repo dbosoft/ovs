@@ -411,6 +411,82 @@ ovsext_subscribe_packets(struct ovsext_channel *ch, bool enable)
     return 0;
 }
 
+/* Declares this channel's kernel open-instance protocol via
+ * OVS_CTRL_CMD_SOCK_PROP.  The kernel selects an event mask from the instance
+ * protocol (a channel left at protocol 0 receives no multicast events), so a
+ * channel that joins a multicast group must declare NETLINK_GENERIC first.
+ * Mirrors set_sock_property() in lib/netlink-socket.c, but writes the values in
+ * host byte order to match the kernel's NlAttrGetU32 reader (a raw cast, no
+ * byte swap). */
+static int
+ovsext_set_socket_protocol(struct ovsext_channel *ch, uint32_t protocol)
+{
+    struct ofpbuf request;
+    uint64_t request_stub[128];
+    struct ovs_header *ovs_header;
+    struct ofpbuf *reply = NULL;
+    int error;
+
+    ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+    nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          OVS_CTRL_CMD_SOCK_PROP, OVS_WIN_CONTROL_VERSION);
+    ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+    nl_msg_put_u32(&request, OVS_NL_ATTR_SOCK_PROTO, protocol);
+    nl_msg_put_u32(&request, OVS_NL_ATTR_SOCK_PID, ch->pid);
+
+    error = ovsext_transact(ch, &request, &reply);
+    ofpbuf_uninit(&request);
+    ofpbuf_delete(reply);
+    return error;
+}
+
+int
+ovsext_subscribe_vport_events(struct ovsext_channel *ch, bool enable)
+{
+    struct ofpbuf request;
+    uint64_t request_stub[128];
+    struct ovs_header *ovs_header;
+    int error;
+
+    if (enable == (ch->read_ioctl == OVS_IOCTL_READ_EVENT)) {
+        return 0;               /* already in the requested state */
+    }
+
+    if (enable) {
+        /* Without NETLINK_GENERIC the kernel computes an empty event mask and
+         * delivers nothing (OvsSubscribeEventCmdHandler). */
+        error = ovsext_set_socket_protocol(ch, NETLINK_GENERIC);
+        if (error) {
+            VLOG_WARN("could not set event channel protocol (%s)",
+                      ovs_strerror(error));
+            return error;
+        }
+    }
+
+    ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+    nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          OVS_CTRL_CMD_MC_SUBSCRIBE_REQ, OVS_WIN_CONTROL_VERSION);
+    ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
+    /* The kernel validates this command against a live datapath, so it must
+     * carry the resolved dp_ifindex (the default datapath is not always slot 0
+     * -- it is promoted on detach), not a hardcoded 0. */
+    ovs_header->dp_ifindex = ch->dp_ifindex;
+    nl_msg_put_u32(&request, OVS_NL_ATTR_MCAST_GRP, OVS_WIN_NL_VPORT_MCGRP_ID);
+    nl_msg_put_u8(&request, OVS_NL_ATTR_MCAST_JOIN, enable ? 1 : 0);
+
+    error = ovsext_send(ch, &request);
+    ofpbuf_uninit(&request);
+    if (error) {
+        VLOG_WARN("could not %ssubscribe vport events (%s)",
+                  enable ? "" : "un", ovs_strerror(error));
+        return error;
+    }
+
+    ch->read_ioctl = enable ? OVS_IOCTL_READ_EVENT : OVS_IOCTL_READ;
+    return 0;
+}
+
 int
 ovsext_recv(struct ovsext_channel *ch, struct ofpbuf *buf)
 {
@@ -442,35 +518,58 @@ ovsext_recv(struct ovsext_channel *ch, struct ofpbuf *buf)
     return 0;
 }
 
+/* Builds this channel's overlapped-pend request.  The kernel command depends on
+ * the channel mode -- a packet channel pends OVS_CTRL_CMD_WIN_PEND_PACKET_REQ,
+ * an event channel pends OVS_CTRL_CMD_WIN_PEND_REQ.  Both are validated against a
+ * live datapath by the kernel, so the request carries the resolved dp_ifindex. */
+static void
+ovsext_build_pend_request(struct ovsext_channel *ch, struct ofpbuf *request)
+{
+    struct ovs_header *ovs_header;
+    uint16_t cmd = ch->read_ioctl == OVS_IOCTL_READ_EVENT
+                   ? OVS_CTRL_CMD_WIN_PEND_REQ
+                   : OVS_CTRL_CMD_WIN_PEND_PACKET_REQ;
+
+    nl_msg_put_genlmsghdr(request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          cmd, OVS_WIN_CONTROL_VERSION);
+    ovs_header = ofpbuf_put_uninit(request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = ch->dp_ifindex;
+    ovsext_stamp_request(ch, request);
+}
+
 void
 ovsext_recv_wait(struct ovsext_channel *ch)
 {
     /* A mock transport is synchronous: there is no real overlapped device to
      * pend on (ch->handle is a token, not a Win32 handle), and any queued
-     * message is already available to ovsext_recv.  Wake the poll loop so the
-     * caller retries the recv immediately. */
+     * message is already available to ovsext_recv.  Still route the pend request
+     * through the seam so its dp_ifindex is validated as the kernel would, then
+     * wake the poll loop so the caller retries the recv. */
     if (ovsext_transport) {
+        struct ofpbuf request;
+        uint64_t request_stub[128];
+        DWORD bytes = 0;
+
+        ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+        ovsext_build_pend_request(ch, &request);
+        ovsext_dev_ioctl(ch, OVS_IOCTL_WRITE, request.data, request.size,
+                         NULL, 0, &bytes);
+        ofpbuf_uninit(&request);
         poll_immediate_wake();
         return;
     }
 
     /* Mirror nl_sock_wait()/pend_io_request(): if no overlapped read is
-     * pending, arm one with OVS_CTRL_CMD_WIN_PEND_PACKET_REQ so the driver
-     * signals 'rx_event' when a packet is ready; then park on the event. */
+     * pending, arm one so the driver signals 'rx_event' when a message is ready,
+     * then park on the event. */
     if (ch->overlapped.Internal != STATUS_PENDING) {
         struct ofpbuf request;
         uint64_t request_stub[128];
-        struct ovs_header *ovs_header;
         DWORD bytes = 0;
         BOOL ok;
 
         ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
-        nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
-                              OVS_CTRL_CMD_WIN_PEND_PACKET_REQ,
-                              OVS_WIN_CONTROL_VERSION);
-        ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
-        ovs_header->dp_ifindex = ch->dp_ifindex;
-        ovsext_stamp_request(ch, &request);
+        ovsext_build_pend_request(ch, &request);
 
         ok = DeviceIoControl(ch->handle, OVS_IOCTL_WRITE,
                              request.data, request.size,
