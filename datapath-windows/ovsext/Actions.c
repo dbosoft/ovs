@@ -2175,13 +2175,170 @@ OvsExecuteSampleAction(OvsForwardingContext *ovsFwdCtx,
         return STATUS_SUCCESS;
     }
 
-    if (!OvsAddDeferredActions(newNbl, key, &(ovsFwdCtx->layers), a)) {
+    /*
+     * Defer the whole actions-list container (not the first sub-action) so
+     * OvsProcessDeferredActions runs every action in the list. The single
+     * userspace action is already handled by the fast path above.
+     */
+    if (!OvsAddDeferredActions(newNbl, key, &(ovsFwdCtx->layers), actionsList)) {
         OVS_LOG_INFO(
             "Deferred actions limit reached, dropping sample action.");
         OvsCompleteNBL(ovsFwdCtx->switchContext, newNbl, TRUE);
     }
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * OvsExecuteClone --
+ *     Runs the nested CLONE action list on an independent copy of the packet
+ *     so the sub-actions cannot affect the packet the outer pipeline keeps.
+ *     The copy is handed to the deferred-action queue, like sample/recirc, so
+ *     the sub-list executes with bounded recursion depth.
+ * --------------------------------------------------------------------------
+ */
+static __inline NDIS_STATUS
+OvsExecuteClone(OvsForwardingContext *ovsFwdCtx,
+                OvsFlowKey *key,
+                const PNL_ATTR attr)
+{
+    PNET_BUFFER_LIST newNbl;
+
+    newNbl = OvsPartialCopyNBL(ovsFwdCtx->switchContext, ovsFwdCtx->curNbl,
+                               0, 0, TRUE /*copy NBL info*/);
+    if (newNbl == NULL) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_SUCCESS;
+    }
+
+    if (!OvsAddDeferredActions(newNbl, key, &(ovsFwdCtx->layers), attr)) {
+        OVS_LOG_INFO("Deferred actions limit reached, dropping clone action.");
+        OvsCompleteNBL(ovsFwdCtx->switchContext, newNbl, TRUE);
+    }
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * OvsExecuteCheckPktLen --
+ *     Selects one of two nested action lists by comparing the on-the-wire
+ *     (L2) packet length against OVS_CHECK_PKT_LEN_ATTR_PKT_LEN and executes
+ *     the selected list on a copy via the deferred-action queue.
+ * --------------------------------------------------------------------------
+ */
+static __inline NDIS_STATUS
+OvsExecuteCheckPktLen(OvsForwardingContext *ovsFwdCtx,
+                      OvsFlowKey *key,
+                      const PNL_ATTR attr)
+{
+    PNL_ATTR a = NULL;
+    INT rem = 0;
+    UINT16 pktLen = 0;
+    PNL_ATTR actionsIfGreater = NULL;
+    PNL_ATTR actionsIfLessEqual = NULL;
+    PNL_ATTR selected = NULL;
+    UINT32 len;
+    PNET_BUFFER_LIST newNbl;
+
+    NL_ATTR_FOR_EACH_UNSAFE(a, rem, NlAttrData(attr), NlAttrGetSize(attr)) {
+        switch (NlAttrType(a)) {
+        case OVS_CHECK_PKT_LEN_ATTR_PKT_LEN:
+            pktLen = NlAttrGetU16(a);
+            break;
+        case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER:
+            actionsIfGreater = a;
+            break;
+        case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_LESS_EQUAL:
+            actionsIfLessEqual = a;
+            break;
+        }
+    }
+
+    len = NET_BUFFER_DATA_LENGTH(NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl));
+    selected = (len > pktLen) ? actionsIfGreater : actionsIfLessEqual;
+
+    if (selected == NULL || NlAttrGetSize(selected) == 0) {
+        /* The selected branch is empty: nothing to execute. */
+        return NDIS_STATUS_SUCCESS;
+    }
+
+    newNbl = OvsPartialCopyNBL(ovsFwdCtx->switchContext, ovsFwdCtx->curNbl,
+                               0, 0, TRUE /*copy NBL info*/);
+    if (newNbl == NULL) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_SUCCESS;
+    }
+
+    if (!OvsAddDeferredActions(newNbl, key, &(ovsFwdCtx->layers), selected)) {
+        OVS_LOG_INFO(
+            "Deferred actions limit reached, dropping check_pkt_len action.");
+        OvsCompleteNBL(ovsFwdCtx->switchContext, newNbl, TRUE);
+    }
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * OvsExecuteDecTtl --
+ *     Decrements the IPv4 TTL / IPv6 hop-limit by one with an incremental
+ *     checksum fixup (IPv4 only; IPv6 has no L3 checksum). When the value is
+ *     already <= 1 the packet must not be forwarded: '*exception' is set TRUE
+ *     so the caller runs the embedded OVS_DEC_TTL_ATTR_ACTION list and drops
+ *     the packet. A non-IP packet is left unchanged.
+ * --------------------------------------------------------------------------
+ */
+static __inline NDIS_STATUS
+OvsExecuteDecTtl(OvsForwardingContext *ovsFwdCtx,
+                 OvsFlowKey *key,
+                 BOOLEAN *exception)
+{
+    PUINT8 bufferStart;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+
+    *exception = FALSE;
+
+    if (key->l2.dlType == htons(ETH_TYPE_IPV4)) {
+        IPHdr *ipHdr;
+        UINT16 oldTtl, newTtl;
+
+        bufferStart = OvsGetHeaderBySize(ovsFwdCtx,
+                                         layers->l3Offset + sizeof(IPHdr));
+        if (bufferStart == NULL) {
+            return NDIS_STATUS_RESOURCES;
+        }
+        ipHdr = (IPHdr *)(bufferStart + layers->l3Offset);
+        if (ipHdr->ttl <= 1) {
+            *exception = TRUE;
+            return NDIS_STATUS_SUCCESS;
+        }
+        oldTtl = (ipHdr->ttl) & 0xff;
+        ipHdr->ttl--;
+        newTtl = (ipHdr->ttl) & 0xff;
+        if (ipHdr->check != 0) {
+            ipHdr->check = ChecksumUpdate16(ipHdr->check, oldTtl, newTtl);
+        }
+        key->ipKey.nwTtl = ipHdr->ttl;
+    } else if (key->l2.dlType == htons(ETH_TYPE_IPV6)) {
+        IPv6Hdr *ipv6Hdr;
+
+        bufferStart = OvsGetHeaderBySize(ovsFwdCtx,
+                                         layers->l3Offset + sizeof(IPv6Hdr));
+        if (bufferStart == NULL) {
+            return NDIS_STATUS_RESOURCES;
+        }
+        ipv6Hdr = (IPv6Hdr *)(bufferStart + layers->l3Offset);
+        if (ipv6Hdr->hop_limit <= 1) {
+            *exception = TRUE;
+            return NDIS_STATUS_SUCCESS;
+        }
+        ipv6Hdr->hop_limit--;
+        key->ipv6Key.nwTtl = ipv6Hdr->hop_limit;
+    }
+
+    return NDIS_STATUS_SUCCESS;
 }
 
 /*
@@ -2541,6 +2698,106 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
             }
             break;
         }
+        case OVS_ACTION_ATTR_ADD_MPLS:
+        {
+            const struct ovs_action_add_mpls *addMpls =
+                (const struct ovs_action_add_mpls *)NlAttrGet((const PNL_ATTR)a);
+            struct ovs_action_push_mpls pushMpls;
+
+            if (addMpls->tun_flags & OVS_MPLS_L3_TUNNEL_FLAG_MASK) {
+                /*
+                 * The L3 (mac_len == 0) tunnel facet inserts the LSE at the
+                 * start of the L3 header with no Ethernet header in front; it
+                 * needs L3-port / packet_type support not present here.
+                 */
+                status = NDIS_STATUS_NOT_SUPPORTED;
+                break;
+            }
+
+            if (ovsFwdCtx.destPortsSizeOut > 0 || ovsFwdCtx.tunnelTxNic != NULL
+                || ovsFwdCtx.tunnelRxNic != NULL) {
+                status = OvsOutputBeforeSetAction(&ovsFwdCtx);
+                if (status != NDIS_STATUS_SUCCESS) {
+                    dropReason = L"OVS-adding destination failed";
+                    goto dropit;
+                }
+            }
+
+            /*
+             * The over-Ethernet facet is identical to push_mpls: insert one LSE
+             * in front of the L3 header. ovs_action_add_mpls carries the same
+             * mpls_lse/mpls_ethertype (the L3 tun_flags facet is handled above).
+             */
+            pushMpls.mpls_lse = addMpls->mpls_lse;
+            pushMpls.mpls_ethertype = addMpls->mpls_ethertype;
+            status = OvsActionMplsPush(&ovsFwdCtx, &pushMpls);
+            if (status != NDIS_STATUS_SUCCESS) {
+                dropReason = L"OVS-add MPLS action failed";
+                goto dropit;
+            }
+            layers->l3Offset += MPLS_HLEN;
+            layers->l4Offset += MPLS_HLEN;
+            break;
+        }
+
+        case OVS_ACTION_ATTR_CHECK_PKT_LEN:
+            status = OvsExecuteCheckPktLen(&ovsFwdCtx, key, (const PNL_ATTR)a);
+            if (status != NDIS_STATUS_SUCCESS) {
+                dropReason = L"OVS-check_pkt_len action failed";
+                goto dropit;
+            }
+            break;
+
+        case OVS_ACTION_ATTR_CLONE:
+            status = OvsExecuteClone(&ovsFwdCtx, key, (const PNL_ATTR)a);
+            if (status != NDIS_STATUS_SUCCESS) {
+                dropReason = L"OVS-clone action failed";
+                goto dropit;
+            }
+            break;
+
+        case OVS_ACTION_ATTR_DEC_TTL:
+        {
+            BOOLEAN exception = FALSE;
+
+            if (ovsFwdCtx.destPortsSizeOut > 0 || ovsFwdCtx.tunnelTxNic != NULL
+                || ovsFwdCtx.tunnelRxNic != NULL) {
+                status = OvsOutputBeforeSetAction(&ovsFwdCtx);
+                if (status != NDIS_STATUS_SUCCESS) {
+                    dropReason = L"OVS-adding destination failed";
+                    goto dropit;
+                }
+            }
+
+            status = OvsExecuteDecTtl(&ovsFwdCtx, key, &exception);
+            if (status != NDIS_STATUS_SUCCESS) {
+                dropReason = L"OVS-dec_ttl action failed";
+                goto dropit;
+            }
+            if (exception) {
+                /*
+                 * TTL/hop-limit expired (<= 1): the packet is not forwarded.
+                 * Run the embedded OVS_DEC_TTL_ATTR_ACTION list -- for OVN a
+                 * single userspace/controller action -- on the current packet,
+                 * then drop the original via dropit.
+                 */
+                PNL_ATTR exList = NlAttrFindNested((const PNL_ATTR)a,
+                                                   OVS_DEC_TTL_ATTR_ACTION);
+                if (exList) {
+                    PNL_ATTR first = (PNL_ATTR)NlAttrData(exList);
+                    INT exRem = NlAttrGetSize(exList);
+                    if (exRem &&
+                        NlAttrType(first) == OVS_ACTION_ATTR_USERSPACE &&
+                        NlAttrIsLast(first, exRem)) {
+                        OvsOutputUserspaceAction(&ovsFwdCtx, key, first);
+                    }
+                }
+                dropReason = L"OVS-dec_ttl ttl expired";
+                goto dropit;
+            }
+            break;
+        }
+
         case OVS_ACTION_ATTR_DROP:
             /*
              * Explicit, reason-carrying drop. The u32 xlate_error is not yet
