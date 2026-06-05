@@ -1479,9 +1479,15 @@ static int
 dpif_windows_port_poll(const struct dpif *dpif_ OVS_UNUSED,
                        char **devnamep OVS_UNUSED)
 {
-    /* The ovsext driver has no vport-change multicast notification channel;
-     * dpif-netlink relies on OVS_VPORT_MCGROUP which the Windows driver does
-     * not expose.  Report "no change". */
+    /* Report "no change".  The ovsext driver DOES expose a vport-change channel
+     * (OVS_WIN_NL_VPORT_MCGRP_ID, posted by OvsPostVportEvent and read via
+     * OVS_IOCTL_READ_EVENT), and the old dpif-netlink _WIN32 path consumed it by
+     * joining the mcgroup; this provider has not yet wired an event notifier
+     * through ovsext-channel, so kernel-initiated vport changes (Hyper-V NIC
+     * teardown, live-migration churn, renumber) go unobserved here.  Explicit
+     * userspace add/del_port still reconcile odp_to_ofport on the normal path.
+     * Restoring the notifier (mirroring the packet-subscribe path) is tracked as
+     * a follow-up and pairs with the RFC-0029 live-migration work. */
     return EAGAIN;
 }
 
@@ -1805,13 +1811,25 @@ dpif_windows_operate__(struct dpif_windows *dpif, struct dpif_op **ops,
                             ? ofpbuf_at(get->buffer, act_ofs,
                                         reply_flow.actions_len) : NULL;
                         get->flow->actions_len = reply_flow.actions_len;
-                        get->flow->key = ofpbuf_at(get->buffer, key_ofs,
-                                                   reply_flow.key_len);
+                        get->flow->key = reply_flow.key_len
+                            ? ofpbuf_at(get->buffer, key_ofs,
+                                        reply_flow.key_len) : NULL;
                         get->flow->key_len = reply_flow.key_len;
                         get->flow->mask = reply_flow.mask_len
                             ? ofpbuf_at(get->buffer, mask_ofs,
                                         reply_flow.mask_len) : NULL;
                         get->flow->mask_len = reply_flow.mask_len;
+                    } else {
+                        /* No caller storage: to_dpif_flow left key/mask/actions
+                         * pointing into 'reply', which is freed below.  Drop
+                         * them rather than hand back dangling pointers; the ufid
+                         * and stats (value-copied) stay valid. */
+                        get->flow->key = NULL;
+                        get->flow->key_len = 0;
+                        get->flow->mask = NULL;
+                        get->flow->mask_len = 0;
+                        get->flow->actions = NULL;
+                        get->flow->actions_len = 0;
                     }
                 }
             }
@@ -1963,11 +1981,13 @@ parse_odp_packet(struct dpif_windows *dpif, struct ofpbuf *buf,
  * dpif_netlink_refresh_handlers_vport_dispatch, which Linux runs from
  * recv_set() for the same reason.
  *
- * The ovsext channel has a single stateful dump cursor, so the port numbers are
- * collected first and the SETs issued only after the dump completes; a transact
- * issued mid-dump would re-arm and destroy the cursor.  recv_set() runs on the
- * main thread before the upcall handler threads are started, so the channel is
- * not used concurrently here.
+ * The dump runs on its own dedicated channel/handle (ovsext_dump_start), so it
+ * no longer shares a cursor with this dpif's main channel; the SETs below could
+ * be interleaved with the dump safely.  The port numbers are still collected
+ * first and the SETs issued afterwards because it keeps the dump a single tight
+ * loop and avoids holding two operations in flight.  recv_set() runs on the main
+ * thread before the upcall handler threads start, so the channel is not used
+ * concurrently here.
  */
 static void
 dpif_windows_refresh_port_upcall_pids(struct dpif_windows *dpif)

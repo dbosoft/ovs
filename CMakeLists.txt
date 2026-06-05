@@ -216,8 +216,15 @@ set(OVS_DEFS HAVE_CONFIG_H _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS
              _WINSOCK_DEPRECATED_NO_WARNINGS)
 # -DOVS_ASAN=ON instruments every OVS target with AddressSanitizer (MSVC
 # /fsanitize=address), so the unit tests catch heap overruns / use-after-free in
-# the userspace marshalling.  Off by default; use a dedicated build directory.
+# the userspace marshalling.  Off by default; use a dedicated build directory and
+# a Release/RelWithDebInfo config (build --config Release).  MSVC's ASAN is
+# incompatible with the runtime checks (/RTC1) the Debug config injects, so strip
+# them here to keep a Debug+ASAN build from failing to link.
 option(OVS_ASAN "Build with AddressSanitizer instrumentation" OFF)
+if(OVS_ASAN)
+  string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+  string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+endif()
 
 function(ovs_setup t)
   target_include_directories(${t} PRIVATE ${OVS_INCLUDES})

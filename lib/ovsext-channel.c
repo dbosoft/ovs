@@ -445,6 +445,15 @@ ovsext_recv(struct ovsext_channel *ch, struct ofpbuf *buf)
 void
 ovsext_recv_wait(struct ovsext_channel *ch)
 {
+    /* A mock transport is synchronous: there is no real overlapped device to
+     * pend on (ch->handle is a token, not a Win32 handle), and any queued
+     * message is already available to ovsext_recv.  Wake the poll loop so the
+     * caller retries the recv immediately. */
+    if (ovsext_transport) {
+        poll_immediate_wake();
+        return;
+    }
+
     /* Mirror nl_sock_wait()/pend_io_request(): if no overlapped read is
      * pending, arm one with OVS_CTRL_CMD_WIN_PEND_PACKET_REQ so the driver
      * signals 'rx_event' when a packet is ready; then park on the event. */

@@ -100,6 +100,7 @@ struct mock_kernel {
     struct mock_handle handles[MOCK_MAX_HANDLES];
     int n_open;                 /* Currently open handles. */
     int peak_open;              /* High-water mark of n_open. */
+    bool fail_open;             /* Force the next device open to fail (ENODEV). */
 
     /* Programmable dump content. */
     struct mock_record dp[MOCK_MAX_RECORDS];    int n_dp;
@@ -205,11 +206,12 @@ build_flow_bad(struct mock_record *r)
     finish_record(r, &b);
 }
 
-/* Builds an OVS_PACKET_CMD_ACTION upcall whose total size exceeds 'frame_len'.
- * The PACKET attribute is written LAST (as the kernel's OvsCreateQueueNlPacket
- * does), so a truncating read drops it and the policy parse fails. */
+/* Builds an OVS_PACKET_CMD_ACTION upcall on datapath 'dp_ifindex' whose total
+ * size exceeds 'frame_len'.  The PACKET attribute is written LAST (as the
+ * kernel's OvsCreateQueueNlPacket does), so a truncating read drops it and the
+ * policy parse fails. */
 static void
-build_packet_upcall(struct mock_record *r, size_t frame_len)
+build_packet_upcall(struct mock_record *r, int dp_ifindex, size_t frame_len)
 {
     uint64_t stub[MOCK_RECORD_CAP / 8];
     struct ofpbuf b;
@@ -221,7 +223,7 @@ build_packet_upcall(struct mock_record *r, size_t frame_len)
     nl_msg_put_genlmsghdr(&b, 0, OVS_WIN_NL_PACKET_FAMILY_ID, 0,
                           OVS_PACKET_CMD_ACTION, OVS_PACKET_VERSION);
     ovs_header = ofpbuf_put_uninit(&b, sizeof *ovs_header);
-    ovs_header->dp_ifindex = MOCK_DP_IFINDEX;
+    ovs_header->dp_ifindex = dp_ifindex;
 
     key_ofs = nl_msg_start_nested(&b, OVS_PACKET_ATTR_KEY);
     nl_msg_put_u32(&b, OVS_KEY_ATTR_IN_PORT, 7);
@@ -412,6 +414,9 @@ mock_open(void *aux)
     struct mock_kernel *m = aux;
     int i;
 
+    if (m->fail_open) {
+        return INVALID_HANDLE_VALUE;    /* model a device-open failure */
+    }
     for (i = 0; i < MOCK_MAX_HANDLES; i++) {
         if (!m->handles[i].in_use) {
             m->handles[i].in_use = true;
@@ -447,6 +452,7 @@ mock_reset_content(struct mock_kernel *m)
     m->n_flow = 0;
     m->pkt_head = 0;
     m->pkt_len = 0;
+    m->fail_open = false;
     m->flow_reply = FR_ACK;
     /* Keep one datapath so dpif_open()'s resolve dump always succeeds. */
     m->n_dp = 1;
@@ -526,7 +532,7 @@ test_recv_large_upcall(struct dpif *dpif, struct mock_kernel *m)
 
     printf("test_recv_large_upcall:\n");
     mock_reset_content(m);
-    build_packet_upcall(&rec, frame_len);
+    build_packet_upcall(&rec, MOCK_DP_IFINDEX, frame_len);
     mock_queue_packet(m, &rec);
 
     ofpbuf_use_stub(&buf, stub, sizeof stub);
@@ -542,6 +548,36 @@ test_recv_large_upcall(struct dpif *dpif, struct mock_kernel *m)
     CHECK(upcall.pid == 0);
 
     /* Queue is now drained. */
+    ofpbuf_clear(&buf);
+    CHECK(dpif_recv(dpif, 0, &upcall, &buf) == EAGAIN);
+    ofpbuf_uninit(&buf);
+}
+
+/* dpif_windows_recv drains upcalls destined for another datapath and returns
+ * only the one matching this dpif's dp_ifindex.  Queue a foreign-datapath
+ * upcall ahead of a matching one and check the foreign one is skipped. */
+static void
+test_recv_multi_dp_filter(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct mock_record other, mine;
+    struct dpif_upcall upcall;
+    uint64_t stub[2048 / 8];
+    struct ofpbuf buf;
+    int error;
+
+    printf("test_recv_multi_dp_filter:\n");
+    mock_reset_content(m);
+    build_packet_upcall(&other, MOCK_DP_IFINDEX + 7, 256);   /* foreign dp */
+    build_packet_upcall(&mine, MOCK_DP_IFINDEX, 256);        /* this dp */
+    mock_queue_packet(m, &other);
+    mock_queue_packet(m, &mine);
+
+    ofpbuf_use_stub(&buf, stub, sizeof stub);
+    memset(&upcall, 0, sizeof upcall);
+    error = dpif_recv(dpif, 0, &upcall, &buf);
+    CHECK(error == 0);                       /* the foreign one was drained */
+    CHECK(upcall.type == DPIF_UC_ACTION);
+
     ofpbuf_clear(&buf);
     CHECK(dpif_recv(dpif, 0, &upcall, &buf) == EAGAIN);
     ofpbuf_uninit(&buf);
@@ -657,6 +693,36 @@ test_flow_dump_deferred_error(struct dpif *dpif, struct mock_kernel *m)
     CHECK(dpif_flow_dump_destroy(dump) == EINVAL);
 }
 
+/* A dump opens its own channel; if that device open fails, the error must
+ * propagate: flow_dump_next yields nothing and flow_dump_destroy returns it. */
+static void
+test_flow_dump_open_failure(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct dpif_flow_dump_types types = { .ovs_flows = true };
+    struct dpif_flow_dump *dump;
+    struct dpif_flow_dump_thread *thread;
+    struct dpif_flow batch[8];
+    int n_flows = 0;
+
+    printf("test_flow_dump_open_failure:\n");
+    mock_reset_content(m);
+    m->n_flow = 1;
+    build_flow_record(&m->flow[0], 55, false);
+
+    m->fail_open = true;        /* the dump's dedicated channel open fails */
+    dump = dpif_flow_dump_create(dpif, false, &types);
+    thread = dpif_flow_dump_thread_create(dump);
+    while (dpif_flow_dump_next(thread, batch, ARRAY_SIZE(batch)) > 0) {
+        n_flows++;
+    }
+    dpif_flow_dump_thread_destroy(thread);
+    CHECK(n_flows == 0);
+    CHECK(dpif_flow_dump_destroy(dump) == ENODEV);
+    m->fail_open = false;
+    /* The main channel is still healthy. */
+    CHECK(dpif_flow_flush(dpif) == 0);
+}
+
 /* Regression (audit #7/#10): FLOW_GET copies the reply's key/mask/actions into
  * the caller's buffer.  All ofpbuf_put()s must happen before the pointers are
  * captured (a later put can realloc and move the base) and the copy must be
@@ -727,6 +793,49 @@ test_flow_get_hit(struct dpif *dpif, struct mock_kernel *m)
     CHECK(result.stats.n_packets == 5 && result.stats.n_bytes == 500);
 
     ofpbuf_uninit(&buffer);
+    ofpbuf_uninit(&reqkey);
+}
+
+/* FLOW_GET with no caller storage (get->buffer == NULL): the provider must not
+ * hand back key/mask/actions pointers into the freed reply.  They are returned
+ * as NULL while stats stay valid.  Without the guard these dangle (ASAN). */
+static void
+test_flow_get_null_buffer(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct dpif_flow_get get;
+    struct dpif_flow result;
+    struct dpif_op op;
+    struct dpif_op *ops[1];
+    uint64_t reqkey_stub[64 / 8];
+    struct ofpbuf reqkey;
+
+    printf("test_flow_get_null_buffer:\n");
+    mock_reset_content(m);
+    m->flow_reply = FR_ECHO;
+    build_flow_record(&m->flow_echo, 42, true);
+
+    ofpbuf_use_stub(&reqkey, reqkey_stub, sizeof reqkey_stub);
+    nl_msg_put_u32(&reqkey, OVS_KEY_ATTR_IN_PORT, 42);
+
+    memset(&result, 0, sizeof result);
+    memset(&get, 0, sizeof get);
+    get.key = reqkey.data;
+    get.key_len = reqkey.size;
+    get.buffer = NULL;
+    get.flow = &result;
+
+    memset(&op, 0, sizeof op);
+    op.type = DPIF_OP_FLOW_GET;
+    op.flow_get = get;
+    ops[0] = &op;
+    dpif_operate(dpif, ops, 1, DPIF_OFFLOAD_NEVER);
+
+    CHECK(op.error == 0);
+    CHECK(result.key == NULL && result.key_len == 0);
+    CHECK(result.mask == NULL && result.mask_len == 0);
+    CHECK(result.actions == NULL && result.actions_len == 0);
+    CHECK(result.stats.n_packets == 5 && result.stats.n_bytes == 500);
+
     ofpbuf_uninit(&reqkey);
 }
 
@@ -830,6 +939,59 @@ test_flow_put_stats(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&key);
 }
 
+/* Regression (audit #8): the FLOW_DEL stats path is identical to FLOW_PUT and
+ * was fixed in the same commit -- a bad/missing echo must surface as an error,
+ * and a good echo must populate the stats. */
+static void
+test_flow_del_stats(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct dpif_flow_stats stats;
+    struct dpif_flow_del del;
+    struct dpif_op op;
+    struct dpif_op *ops[1];
+    uint64_t keybuf[64 / 8];
+    struct ofpbuf key;
+
+    printf("test_flow_del_stats:\n");
+
+    ofpbuf_use_stub(&key, keybuf, sizeof keybuf);
+    nl_msg_put_u32(&key, OVS_KEY_ATTR_IN_PORT, 1);
+
+    /* Missing echo -> error. */
+    mock_reset_content(m);
+    m->flow_reply = FR_EMPTYECHO;
+    memset(&stats, 0xab, sizeof stats);
+    memset(&del, 0, sizeof del);
+    del.key = key.data;
+    del.key_len = key.size;
+    del.stats = &stats;
+    memset(&op, 0, sizeof op);
+    op.type = DPIF_OP_FLOW_DEL;
+    op.flow_del = del;
+    ops[0] = &op;
+    dpif_operate(dpif, ops, 1, DPIF_OFFLOAD_NEVER);
+    CHECK(op.error == EINVAL);
+
+    /* Good echo -> stats populated. */
+    mock_reset_content(m);
+    m->flow_reply = FR_ECHO;
+    build_flow_record(&m->flow_echo, 1, true);
+    memset(&stats, 0, sizeof stats);
+    memset(&del, 0, sizeof del);
+    del.key = key.data;
+    del.key_len = key.size;
+    del.stats = &stats;
+    memset(&op, 0, sizeof op);
+    op.type = DPIF_OP_FLOW_DEL;
+    op.flow_del = del;
+    ops[0] = &op;
+    dpif_operate(dpif, ops, 1, DPIF_OFFLOAD_NEVER);
+    CHECK(op.error == 0);
+    CHECK(stats.n_packets == 5 && stats.n_bytes == 500);
+
+    ofpbuf_uninit(&key);
+}
+
 /* Regression (audit, operate signature): the class 'operate' is the 3-arg
  * contract; dpif_operate resolves offload before dispatch.  Drive a multi-op
  * batch through the public path to exercise it end to end. */
@@ -894,12 +1056,16 @@ main(int argc, char *argv[])
 
     test_bringup(dpif);
     test_recv_large_upcall(dpif, &mock);
+    test_recv_multi_dp_filter(dpif, &mock);
     test_flow_dump_multi_record(dpif, &mock);
     test_per_dump_channel(dpif, &mock);
     test_flow_dump_deferred_error(dpif, &mock);
+    test_flow_dump_open_failure(dpif, &mock);
     test_flow_get_hit(dpif, &mock);
+    test_flow_get_null_buffer(dpif, &mock);
     test_flow_get_miss_vs_malformed(dpif, &mock);
     test_flow_put_stats(dpif, &mock);
+    test_flow_del_stats(dpif, &mock);
     test_operate_batch(dpif, &mock);
 
     dpif_close(dpif);
