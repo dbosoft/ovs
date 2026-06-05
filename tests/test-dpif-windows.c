@@ -13,7 +13,7 @@
  * no VM are involved, so the provider's userspace marshalling can be exercised
  * (and ASAN-checked: configure with -DOVS_ASAN=ON) on a dev box.
  *
- * The mock reproduces the kernel quirks that hid real bugs:
+ * The mock reproduces the kernel quirks that the marshalling must cope with:
  *   - READ copies the dequeued message TRUNCATED to the caller's output length
  *     (so an undersized recv buffer drops the trailing attribute);
  *   - the dump cursor is PER FILE HANDLE (so a dump must use its own handle);
@@ -21,9 +21,7 @@
  *     READ, ended by a zero-length read (no NLMSG_DONE).
  *
  * Each test programs the mock's dump/packet/transact content, drives the
- * provider through the public dpif API, and asserts the contract.  The tests
- * regression-guard the divergences fixed in commits f18d4e34 (recv truncation)
- * and b7d08a2f (the dpif-netlink contract audit). */
+ * provider through the public dpif API, and asserts the contract. */
 
 #include <config.h>
 
@@ -515,11 +513,10 @@ test_bringup(struct dpif *dpif)
     CHECK(dpif_recv_set(dpif, true) == 0);
 }
 
-/* Regression (commit f18d4e34): a full-frame upcall larger than the caller's
- * recv stub must arrive whole.  The provider reads into its own 64 kB buffer
- * and grows the caller's ofpbuf; reading straight into the small stub would let
- * the mock's truncate-to-output-length drop the trailing PACKET attribute and
- * fail the parse, exactly as it dropped DHCP/controller upcalls on eryph. */
+/* A full-frame upcall larger than the caller's recv stub must arrive whole: the
+ * provider reads into its own 64 kB buffer and grows the caller's ofpbuf.
+ * Reading straight into the small stub lets the kernel's truncate-to-output-
+ * length drop the trailing PACKET attribute and fail the parse. */
 static void
 test_recv_large_upcall(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -543,8 +540,8 @@ test_recv_large_upcall(struct dpif *dpif, struct mock_kernel *m)
     CHECK(upcall.type == DPIF_UC_ACTION);
     CHECK(dp_packet_size(&upcall.packet) == frame_len);
 
-    /* Regression (audit #11): pid must be explicitly cleared even though the
-     * caller's upcall was not zero-initialized. */
+    /* pid must be explicitly cleared even though the caller's upcall is not
+     * zero-initialized. */
     CHECK(upcall.pid == 0);
 
     /* Queue is now drained. */
@@ -583,10 +580,10 @@ test_recv_multi_dp_filter(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&buf);
 }
 
-/* Regression (audit, flow_dump_next aliasing): a batch of N dumped flows must
- * each stay valid and distinct.  The transport reuses one buffer per record, so
- * a naive loop that kept decoded pointers would return N aliases of the last
- * record.  Program three flows with distinct keys and check they differ. */
+/* A batch of N dumped flows must each stay valid and distinct.  The transport
+ * reuses one buffer per record, so a loop that kept decoded pointers would
+ * return N aliases of the last record.  Program three flows with distinct keys
+ * and check they differ. */
 static void
 test_flow_dump_multi_record(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -634,11 +631,10 @@ test_flow_dump_multi_record(struct dpif *dpif, struct mock_kernel *m)
     }
 }
 
-/* Regression (audit #3): each dump must run on its own kernel handle, because
- * the dump cursor is per handle.  Sharing the dpif's channel would race
- * concurrent transactions and parallel revalidator dumps.  Observe that a flow
- * dump opens a second handle (peak concurrency rises above the lone main
- * channel). */
+/* Each dump must run on its own kernel handle, because the dump cursor is per
+ * handle.  Sharing the dpif's channel would race concurrent transactions and
+ * parallel revalidator dumps.  Observe that a flow dump opens a second handle
+ * (peak concurrency rises above the lone main channel). */
 static void
 test_per_dump_channel(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -668,8 +664,8 @@ test_per_dump_channel(struct dpif *dpif, struct mock_kernel *m)
     CHECK(dpif_flow_dump_destroy(dump) == 0);
 }
 
-/* Regression (audit #6): a malformed record encountered mid-dump is reported by
- * flow_dump_destroy (the dump interface defers all error reporting to it). */
+/* A malformed record encountered mid-dump is reported by flow_dump_destroy (the
+ * dump interface defers all error reporting to it). */
 static void
 test_flow_dump_deferred_error(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -723,11 +719,11 @@ test_flow_dump_open_failure(struct dpif *dpif, struct mock_kernel *m)
     CHECK(dpif_flow_flush(dpif) == 0);
 }
 
-/* Regression (audit #7/#10): FLOW_GET copies the reply's key/mask/actions into
- * the caller's buffer.  All ofpbuf_put()s must happen before the pointers are
- * captured (a later put can realloc and move the base) and the copy must be
- * unconditional.  A rich flow plus a tiny output buffer forces a realloc; ASAN
- * catches a dangling read, and the field checks catch a wrong/missing copy. */
+/* FLOW_GET copies the reply's key/mask/actions into the caller's buffer.  All
+ * ofpbuf_put()s must happen before the pointers are captured (a later put can
+ * realloc and move the base) and the copy must be unconditional.  A rich flow
+ * plus a tiny output buffer forces a realloc; ASAN catches a dangling read, and
+ * the field checks catch a wrong/missing copy. */
 static void
 test_flow_get_hit(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -839,9 +835,9 @@ test_flow_get_null_buffer(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&reqkey);
 }
 
-/* Regression (audit #9): a genuine miss is the in-band NLMSG_ERROR -> ENOENT; a
- * non-NULL reply that fails to decode is a protocol error (EINVAL), not a miss
- * reported as ENOENT. */
+/* A genuine miss is the in-band NLMSG_ERROR -> ENOENT; a non-NULL reply that
+ * fails to decode is a protocol error (EINVAL), not a miss reported as
+ * ENOENT. */
 static void
 test_flow_get_miss_vs_malformed(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -884,9 +880,8 @@ test_flow_get_miss_vs_malformed(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&reqkey);
 }
 
-/* Regression (audit #8): a stats-requested FLOW_PUT must surface a bad/missing
- * echo as an error, not report success with zeroed stats.  A good echo must
- * populate the stats. */
+/* A stats-requested FLOW_PUT must surface a bad/missing echo as an error, not
+ * report success with zeroed stats.  A good echo must populate the stats. */
 static void
 test_flow_put_stats(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -939,9 +934,8 @@ test_flow_put_stats(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&key);
 }
 
-/* Regression (audit #8): the FLOW_DEL stats path is identical to FLOW_PUT and
- * was fixed in the same commit -- a bad/missing echo must surface as an error,
- * and a good echo must populate the stats. */
+/* The FLOW_DEL stats path mirrors FLOW_PUT: a bad/missing echo must surface as
+ * an error, and a good echo must populate the stats. */
 static void
 test_flow_del_stats(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -992,9 +986,9 @@ test_flow_del_stats(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&key);
 }
 
-/* Regression (audit, operate signature): the class 'operate' is the 3-arg
- * contract; dpif_operate resolves offload before dispatch.  Drive a multi-op
- * batch through the public path to exercise it end to end. */
+/* The class 'operate' is the 3-arg contract; dpif_operate resolves offload
+ * before dispatch.  Drive a multi-op batch through the public path to exercise
+ * it end to end. */
 static void
 test_operate_batch(struct dpif *dpif, struct mock_kernel *m)
 {

@@ -1479,15 +1479,11 @@ static int
 dpif_windows_port_poll(const struct dpif *dpif_ OVS_UNUSED,
                        char **devnamep OVS_UNUSED)
 {
-    /* Report "no change".  The ovsext driver DOES expose a vport-change channel
-     * (OVS_WIN_NL_VPORT_MCGRP_ID, posted by OvsPostVportEvent and read via
-     * OVS_IOCTL_READ_EVENT), and the old dpif-netlink _WIN32 path consumed it by
-     * joining the mcgroup; this provider has not yet wired an event notifier
-     * through ovsext-channel, so kernel-initiated vport changes (Hyper-V NIC
-     * teardown, live-migration churn, renumber) go unobserved here.  Explicit
-     * userspace add/del_port still reconcile odp_to_ofport on the normal path.
-     * Restoring the notifier (mirroring the packet-subscribe path) is tracked as
-     * a follow-up and pairs with the RFC-0029 live-migration work. */
+    /* Report "no change": this provider does not subscribe to the ovsext
+     * vport-change event channel (OVS_WIN_NL_VPORT_MCGRP_ID, delivered via
+     * OVS_IOCTL_READ_EVENT), so kernel-initiated vport changes -- a Hyper-V NIC
+     * teardown, live-migration churn, a port renumber -- are not reported here.
+     * Explicit userspace add/del_port still reconcile odp_to_ofport directly. */
     return EAGAIN;
 }
 
@@ -1875,7 +1871,7 @@ dpif_windows_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops)
     /* The dpif_class->operate contract (dpif-provider.h) takes no offload_type:
      * dpif_operate() resolves DPIF_OFFLOAD_* before dispatching to the provider
      * and never passes DPIF_OFFLOAD_ALWAYS down (Windows has no netdev flow-API
-     * offload).  The previous 4-arg signature read an indeterminate register. */
+     * offload). */
     while (n_ops > 0) {
         size_t chunk = dpif_windows_operate__(dpif, ops, n_ops);
 
@@ -1982,12 +1978,11 @@ parse_odp_packet(struct dpif_windows *dpif, struct ofpbuf *buf,
  * recv_set() for the same reason.
  *
  * The dump runs on its own dedicated channel/handle (ovsext_dump_start), so it
- * no longer shares a cursor with this dpif's main channel; the SETs below could
- * be interleaved with the dump safely.  The port numbers are still collected
- * first and the SETs issued afterwards because it keeps the dump a single tight
- * loop and avoids holding two operations in flight.  recv_set() runs on the main
- * thread before the upcall handler threads start, so the channel is not used
- * concurrently here.
+ * does not share a cursor with this dpif's main channel and the SETs below could
+ * safely interleave with it; they are issued only after the dump completes
+ * anyway, to keep the dump a single tight loop without two operations in flight.
+ * recv_set() runs on the main thread before the upcall handler threads start, so
+ * the channel is not used concurrently here.
  */
 static void
 dpif_windows_refresh_port_upcall_pids(struct dpif_windows *dpif)
