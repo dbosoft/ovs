@@ -119,6 +119,12 @@ int  ovsext_dump_done(struct ovsext_dump *);
  * OVS_CTRL_CMD_PACKET_SUBSCRIBE_REQ and flipping the read IOCTL. */
 int  ovsext_subscribe_packets(struct ovsext_channel *, bool enable);
 
+/* Join (or leave) the kernel vport-change multicast group and switch the
+ * channel into event-read mode.  The channel must be dedicated to events: a
+ * handle parked on a pending event cannot also serve transactions or dumps.
+ * Drain delivered events with ovsext_recv()/ovsext_recv_wait(). */
+int  ovsext_subscribe_vport_events(struct ovsext_channel *, bool enable);
+
 /* Non-blocking receive of one queued message using the current read_ioctl.
  * Returns 0 on success (message appended to 'buf'), EAGAIN if nothing is
  * queued, or a positive errno on error. */
