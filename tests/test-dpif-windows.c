@@ -30,7 +30,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_MSC_VER) && defined(_DEBUG)
 #include <crtdbg.h>
+#endif
 #include <windows.h>
 
 #include "dpif.h"
@@ -1303,13 +1305,17 @@ main(int argc, char *argv[])
     struct dpif *dpif;
     int error;
 
+#if defined(_MSC_VER) && defined(_DEBUG)
     /* Route the Debug CRT's assert / runtime-check (/RTC1) reports to stderr
      * instead of a modal dialog, so the test runs unattended under CTest/CI
-     * rather than blocking on an invisible message box. */
+     * rather than blocking on an invisible message box.  These APIs exist only
+     * in the MSVC Debug CRT; other toolchains/Release builds emit no such
+     * dialog. */
     for (int rt = 0; rt <= _CRT_ASSERT; rt++) {
         _CrtSetReportMode(rt, _CRTDBG_MODE_FILE);
         _CrtSetReportFile(rt, _CRTDBG_FILE_STDERR);
     }
+#endif
 
     set_program_name(argv[0]);
     vlog_set_levels(NULL, VLF_ANY_DESTINATION, VLL_WARN);

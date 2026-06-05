@@ -23,12 +23,16 @@
  * runtime-resolved Linux genl families.
  *
  * Conntrack zone-limit management (ct_set/get/del_limits, ct_get_features) is
- * wired against the kernel's OVS_CT_LIMIT genl family.  The conntrack
- * dump/flush members ride the ctnetlink (NETLINK_NETFILTER) transport in
- * lib/netlink-conntrack.c, which is not built on Windows, so they stay absent
- * along with the meter, bond and timeout-policy management members; the
- * corresponding class members default to NULL.  Upcalls use a single handler,
- * as Windows always has.
+ * wired against the kernel's OVS_CT_LIMIT genl family over the ordinary
+ * transaction channel.  Conntrack dump/flush are not provided here: their
+ * userspace helpers (nl_ct_*) live in lib/netlink-conntrack.c, the
+ * NETLINK_NETFILTER ctnetlink transport, which is not built on Windows -- a
+ * userspace gap, not a kernel one (the ovsext kernel does serve the ctnetlink
+ * dump/delete path).  Meter, bond and timeout-policy management are likewise
+ * absent, but only because they are not wired yet; meters in particular ride
+ * their own OVS_WIN_NL_METER_FAMILY_ID genl family the same way these CT-limit
+ * members do, independent of netlink-conntrack.c.  All those class members
+ * default to NULL.  Upcalls use a single handler, as Windows always has.
  *
  * See datapath-windows/NATIVE-DPIF-EXPERIMENT.md for the full spec. */
 
