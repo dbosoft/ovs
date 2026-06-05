@@ -315,16 +315,16 @@ ct_parse_first_zone(const void *in, DWORD in_len, struct ovs_zone_limit *zlp)
     return true;
 }
 
-/* Answers an OVS_CT_LIMIT_CMD_GET: echoes one zone limit (the requested zone,
- * or the default zone) carrying the mock's ct_limit/ct_count, exactly as the
- * kernel's OvsCreateNlMsgFromCtLimit lays it out. */
+/* Answers an OVS_CT_LIMIT_CMD_GET, laid out as the kernel's
+ * OvsCreateNlMsgFromCtLimit does: a request naming a zone echoes that one zone;
+ * a bare request (no zone) enumerates the default zone plus a configured zone
+ * (zone 7), exercising the multi-record parse the kernel's enumeration emits. */
 static BOOL
 mock_ct_limit_get(struct mock_kernel *m, const void *in, DWORD in_len,
                   void *out, DWORD out_len, DWORD *bytes)
 {
     struct ovs_zone_limit req;
-    int32_t zone = ct_parse_first_zone(in, in_len, &req)
-                   ? req.zone_id : OVS_ZONE_LIMIT_DEFAULT_ZONE;
+    bool have_zone = ct_parse_first_zone(in, in_len, &req);
     uint64_t stub[256 / 8];
     struct ofpbuf r;
     struct ovs_header *oh;
@@ -337,9 +337,20 @@ mock_ct_limit_get(struct mock_kernel *m, const void *in, DWORD in_len,
     oh = ofpbuf_put_uninit(&r, sizeof *oh);
     oh->dp_ifindex = 0;
     nest = nl_msg_start_nested(&r, OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
-    struct ovs_zone_limit zl = { .zone_id = zone, .limit = m->ct_limit,
-                                 .count = m->ct_count };
-    nl_msg_put(&r, &zl, sizeof zl);
+    if (have_zone) {
+        struct ovs_zone_limit zl = { .zone_id = req.zone_id,
+                                     .limit = m->ct_limit,
+                                     .count = m->ct_count };
+        nl_msg_put(&r, &zl, sizeof zl);
+    } else {
+        struct ovs_zone_limit def = {
+            .zone_id = OVS_ZONE_LIMIT_DEFAULT_ZONE, .limit = m->ct_limit,
+            .count = 0 };
+        struct ovs_zone_limit z7 = { .zone_id = 7, .limit = 77,
+                                     .count = m->ct_count };
+        nl_msg_put(&r, &def, sizeof def);
+        nl_msg_put(&r, &z7, sizeof z7);
+    }
     nl_msg_end_nested(&r, nest);
     nl_msg_nlmsghdr(&r)->nlmsg_len = r.size;
 
@@ -1284,12 +1295,27 @@ test_ct_limits(struct dpif *dpif, struct mock_kernel *m)
     CHECK(m->ct_zone == 5);
     ct_dpif_free_zone_limits(&req);
 
-    /* An empty GET request carries no zone, so it targets the default zone. */
+    /* An empty GET request lists all zones: the kernel enumerates the default
+     * zone plus each configured zone, so the reply carries several records.
+     * Exercise the multi-record parse (default first, then zone 7). */
     ovs_list_init(&reply);
     CHECK(ct_dpif_get_limits(dpif, &req, &reply) == 0);
     CHECK(!ovs_list_is_empty(&reply));
-    zl = CONTAINER_OF(ovs_list_front(&reply), struct ct_dpif_zone_limit, node);
-    CHECK(zl->zone == OVS_ZONE_LIMIT_DEFAULT_ZONE);
+    int n_zones = 0;
+    bool saw_default = false, saw_zone7 = false;
+    LIST_FOR_EACH (zl, node, &reply) {
+        n_zones++;
+        if (zl->zone == OVS_ZONE_LIMIT_DEFAULT_ZONE) {
+            saw_default = true;
+        } else if (zl->zone == 7) {
+            saw_zone7 = true;
+            CHECK(zl->limit == 77);
+            CHECK(zl->count == 7);
+        }
+    }
+    CHECK(n_zones == 2);
+    CHECK(saw_default);
+    CHECK(saw_zone7);
     ct_dpif_free_zone_limits(&reply);
 
     /* Windows advertises no extra conntrack features. */
