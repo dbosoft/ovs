@@ -1,6 +1,8 @@
 # Open vSwitch for Windows (dbosoft)
 
-[![Build and Test (Windows)](https://github.com/dbosoft/ovs/workflows/Build%20and%20Test%20(Windows)/badge.svg)](https://github.com/dbosoft/ovs/actions)
+[![Build for Windows (CMake)](https://github.com/dbosoft/ovs/actions/workflows/build-and-test-windows.yml/badge.svg)](https://github.com/dbosoft/ovs/actions/workflows/build-and-test-windows.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![Upstream](https://img.shields.io/badge/upstream-openvswitch%2Fovs-lightgrey)](https://github.com/openvswitch/ovs)
 
 ## What is this fork?
 
@@ -76,7 +78,7 @@ Open vSwitch also provides some tools:
 
 The Windows build uses CMake with Visual Studio 2022 (no MSYS/autotools). The
 ovsext driver is built with the Windows Driver Kit (WDK). The
-**Build and Test (Windows)** GitHub Actions workflow shows the canonical build
+**Build for Windows (CMake)** GitHub Actions workflow shows the canonical build
 and test steps.
 
 For background on Open vSwitch concepts, the upstream documentation under
