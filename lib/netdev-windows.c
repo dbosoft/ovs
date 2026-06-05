@@ -374,28 +374,37 @@ netdev_windows_get_etheraddr(const struct netdev *netdev_,
                              struct eth_addr *mac)
 {
     struct netdev_windows *netdev = netdev_windows_cast(netdev_);
+    int error = 0;
 
+    /* netdev_windows_run() re-syncs 'mac'/'cache_valid' from the kernel under
+     * this mutex; read them under the same lock since netdev APIs may be called
+     * from other threads. */
+    ovs_mutex_lock(&netdev_windows_list_mutex);
     ovs_assert((netdev->cache_valid & VALID_ETHERADDR) != 0);
     if (netdev->cache_valid & VALID_ETHERADDR) {
         *mac = netdev->mac;
     } else {
-        return EINVAL;
+        error = EINVAL;
     }
-    return 0;
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
+    return error;
 }
 
 static int
 netdev_windows_get_mtu(const struct netdev *netdev_, int *mtup)
 {
     struct netdev_windows *netdev = netdev_windows_cast(netdev_);
+    int error = 0;
 
+    ovs_mutex_lock(&netdev_windows_list_mutex);
     ovs_assert((netdev->cache_valid & VALID_MTU) != 0);
     if (netdev->cache_valid & VALID_MTU) {
         *mtup = netdev->mtu;
     } else {
-        return EINVAL;
+        error = EINVAL;
     }
-    return 0;
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
+    return error;
 }
 
 /* This functionality is not really required by the datapath.
@@ -416,15 +425,18 @@ netdev_windows_update_flags(struct netdev *netdev_,
                             enum netdev_flags *old_flagsp)
 {
     struct netdev_windows *netdev = netdev_windows_cast(netdev_);
+    int error = 0;
 
+    ovs_mutex_lock(&netdev_windows_list_mutex);
     ovs_assert((netdev->cache_valid & VALID_IFFLAG) != 0);
     if (netdev->cache_valid & VALID_IFFLAG) {
         *old_flagsp = netdev->ifi_flags;
         /* Setting the interface flags is not supported. */
     } else {
-        return EINVAL;
+        error = EINVAL;
     }
-    return 0;
+    ovs_mutex_unlock(&netdev_windows_list_mutex);
+    return error;
 }
 
 /* Looks up in the ARP table entry for a given 'ip'. If it is found, the

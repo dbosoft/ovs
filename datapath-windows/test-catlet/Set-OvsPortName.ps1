@@ -60,7 +60,9 @@ function Resolve-SwitchName($hostResource) {
     return $null
 }
 
-$vm = Get-CimInstance -Namespace $ns -ClassName Msvm_ComputerSystem -Filter "ElementName='$VMName'"
+# Escape single quotes for the WQL filter (WQL doubles a literal quote).
+$vmFilter = "ElementName='" + ($VMName -replace "'", "''") + "'"
+$vm = Get-CimInstance -Namespace $ns -ClassName Msvm_ComputerSystem -Filter $vmFilter
 if (-not $vm) { throw "VM '$VMName' not found." }
 $vssd = Get-CimAssociatedInstance -InputObject $vm -ResultClassName Msvm_VirtualSystemSettingData |
         Where-Object { $_.VirtualSystemType -eq 'Microsoft:Hyper-V:System:Realized' } | Select-Object -First 1
