@@ -1898,7 +1898,11 @@ CreateNetlinkMesgForNetdev(POVS_VPORT_EXT_INFO info,
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
-    if (info->status != OVS_EVENT_CONNECT) {
+    /* 'status' is a bitmask: NIC_CREATED and CONNECTED both carry
+     * OVS_EVENT_CONNECT, DISCONNECT does not.  Bit-test it so a ghost or a
+     * connected port is admin-up and a disconnected one is admin-down,
+     * regardless of which link bit (if any) accompanies the connect bit. */
+    if (info->status & OVS_EVENT_CONNECT) {
         netdevFlags = OVS_WIN_NETDEV_IFF_UP;
     }
     /*
