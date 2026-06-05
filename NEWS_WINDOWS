@@ -1,0 +1,63 @@
+Open vSwitch for Windows - dbosoft fork
+=======================================
+
+This file records the changes that are specific to dbosoft's Windows-focused
+fork of Open vSwitch. It complements, and does not replace, the upstream
+changelog in the NEWS file: NEWS continues to track the upstream Open vSwitch
+baseline this fork is built on, while the entries below cover the Windows
+support and Windows-only fixes that dbosoft maintains on top of that baseline.
+
+Upstream removed Windows support from Open vSwitch on the main branch (after
+v3.7.0); see the "Windows" entry under "Post-v3.7.0" in NEWS. This fork
+re-establishes Windows support on top of that Windows-removed upstream main and
+continues to develop it independently.
+
+Each release section lists, in order:
+  - the upstream Open vSwitch baseline the fork is synced to, and
+  - the dbosoft Windows-specific changes layered on top.
+
+
+Unreleased (dbosoft-main)
+-------------------------
+   - Upstream baseline:
+     * Synced with upstream Open vSwitch main (post-v3.7.0, Windows removed),
+       including the DPDK 25.11.2 update, the dpif-offload UDP tunnel entropy
+       support, the ofproto-dpif STP/RSTP bundle floodable fix, the lldp
+       decode hardening fixes, and the dummy simulated hardware offload.
+   - Windows platform:
+     * Re-established Windows support on top of upstream main after Windows was
+       removed upstream: native dpif-windows datapath talking to the ovsext
+       NDIS extension over the ovsext-channel dump/transact protocol (the
+       netlink transport is no longer used on Windows), an MSYS-free CMake +
+       CTest build, and the "Build and Test (Windows)" CI workflow.
+     * VS2022 build fixes (OVS_TYPEOF via __typeof__, Winsock-to-errno
+       translation, ovsext.inf), plus dbosoft driver branding and unique
+       hardware IDs.
+     * Windows runtime fixes: process_start via CreateProcess, ovsdb-server
+       --run/--monitor, vlog log-file reopen, ovs-vsctl exit code, an ovs-pki
+       ACL shim, child exit-code propagation, and ovsdb already-open detection.
+     * Removed the per-translation-unit "Windows support is deprecated" build
+       message: the Windows port is now maintained by dbosoft.
+   - ovsext (Windows kernel datapath):
+     * Back multiple Hyper-V virtual switches from a single extension instance
+       (multi-datapath L2 forwarding).
+     * NDIS 6.60 / 6.85 dual-binary modernization so a single package targets
+       current Windows releases.
+     * Conntrack zone-limit management (OVS_CT_LIMIT family): set, get and
+       delete per-zone limits; enumerate all zone limits on a bare
+       ct-get-limits; delete reverts a zone to the default limit. Fixes an
+       out-of-bounds zoneInfo access on the enumeration path.
+   - netdev-windows:
+     * Detect member-link carrier state via the IP Helper API so bonding can
+       react to member up/down transitions.
+   - dpif-windows:
+     * Fix upcall truncation that caused full-frame controller upcalls (for
+       example DHCP) to be cut short, and resolve several divergences from the
+       dpif provider contract.
+     * Fix packet-subscribe EINVAL after a datapath detach/promote by carrying
+       the resolved dp_ifindex instead of assuming slot 0.
+     * Deliver vport-change events to userspace through port_poll by consuming
+       the ovsext vport multicast channel.
+     * Faithful mock-kernel unit-test harness (tests/test-dpif-windows.c) with
+       optional AddressSanitizer wiring, covering the recv-truncation and
+       dpif-contract fixes and multi-zone ct-get-limits enumeration.
