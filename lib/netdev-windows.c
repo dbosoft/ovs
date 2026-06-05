@@ -108,6 +108,13 @@ static int netdev_windows_init_(void);
  * OVS_WIN_NL_NETDEV_FAMILY_ID. */
 static struct ovsext_channel ovs_win_netdev_channel;
 
+/* Result of the one-time 'ovs_win_netdev_channel' open (0 on success), ENODEV
+ * until first attempted.  Lets the construct path tell an absent device (the
+ * channel is open, the kernel just has no such vport -> ENODEV) from a failed
+ * open (non-zero here), so the latter is not silently deferred into a
+ * placeholder, while preserving the real errno for callers and logs. */
+static int netdev_windows_channel_error = ENODEV;
+
 
 static bool
 is_netdev_windows_class(const struct netdev_class *netdev_class)
@@ -125,23 +132,26 @@ netdev_windows_cast(const struct netdev *netdev_)
 static int
 netdev_windows_init_(void)
 {
-    int error = 0;
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
 
     if (ovsthread_once_start(&once)) {
         /* XXX: The channel lives for the process lifetime; there is no
          * netdev-provider teardown hook to close it. */
-        error = ovsext_channel_open(&ovs_win_netdev_channel);
-        if (error) {
+        netdev_windows_channel_error =
+            ovsext_channel_open(&ovs_win_netdev_channel);
+        if (netdev_windows_channel_error) {
             VLOG_ERR("Failed to open the ovsext datapath device (%s). "
                      "The Open vSwitch kernel extension is probably not loaded.",
-                     ovs_strerror(error));
+                     ovs_strerror(netdev_windows_channel_error));
         }
 
         ovsthread_once_done(&once);
     }
 
-    return error;
+    /* The open result is assigned only inside the once-block, so a caller after
+     * the first attempt would otherwise see success; return the persisted errno
+     * so driver-not-loaded is distinguishable from other open failures. */
+    return netdev_windows_channel_error;
 }
 
 static struct netdev *
@@ -192,7 +202,12 @@ netdev_windows_system_construct(struct netdev *netdev_)
      * refresh in netdev_windows_run() once the device appears. */
     {
         const char *t = netdev_get_type(&netdev->up);
-        bool deferrable = !strcmp(t, "internal") || !strcmp(t, "system");
+        /* Only defer when the channel is open, so a real ENODEV (the kernel has
+         * no such vport) is deferred but a missing kernel extension (the channel
+         * never opened) still fails netdev_open() instead of producing a
+         * placeholder that hides the unavailable datapath. */
+        bool deferrable = (!strcmp(t, "internal") || !strcmp(t, "system"))
+                          && !netdev_windows_channel_error;
         if (ret && !(deferrable && ret == ENODEV)) {
             return ret;
         }
@@ -701,6 +716,8 @@ netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
     LIST_FOR_EACH (netdev, list_node, &netdev_windows_list) {
         bool carrier;
         uint32_t old_flags = netdev->ifi_flags;
+        struct eth_addr old_mac = netdev->mac;
+        int old_mtu = netdev->mtu;
         bool changed = false;
 
         if (netdev_windows_query_carrier(netdev, &carrier)
@@ -711,10 +728,14 @@ netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
             VLOG_DBG("%s: carrier %s", netdev_get_name(&netdev->up),
                      carrier ? "up" : "down");
         }
-        /* netdev_windows_query_carrier() re-syncs the cached admin flags from
-         * the kernel; a transition (notably a resurrected ghost coming up)
-         * must wake the status refresh that publishes admin_state/link_state. */
-        if (netdev->ifi_flags != old_flags) {
+        /* netdev_windows_query_carrier() re-syncs the cached admin flags, MAC
+         * and MTU from the kernel; any of these changing (notably a resurrected
+         * ghost coming up or gaining its real MAC without an IFF_UP transition)
+         * must bump change_seq so consumers re-read etheraddr/mtu and the status
+         * refresh re-publishes admin_state/link_state. */
+        if (netdev->ifi_flags != old_flags
+            || !eth_addr_equals(netdev->mac, old_mac)
+            || netdev->mtu != old_mtu) {
             changed = true;
         }
         if (changed) {
