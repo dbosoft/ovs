@@ -115,6 +115,10 @@ struct mock_kernel {
     enum flow_reply flow_reply;
     struct mock_record flow_echo;
     struct mock_record flow_bad;
+
+    /* Set when a validateDpIndex control command (subscribe/pend) arrives with a
+     * dp_ifindex that is not the mock datapath -- the kernel rejects these. */
+    bool validate_dp_failed;
 };
 
 /* ---- record builders ----------------------------------------------------- */
@@ -308,7 +312,8 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
 }
 
 static BOOL
-mock_write(struct mock_handle *h, const void *in, DWORD in_len, DWORD *bytes)
+mock_write(struct mock_kernel *m, struct mock_handle *h,
+           const void *in, DWORD in_len, DWORD *bytes)
 {
     const struct nlmsghdr *nlh = in;
 
@@ -329,25 +334,28 @@ mock_write(struct mock_handle *h, const void *in, DWORD in_len, DWORD *bytes)
         }
     }
 
-    /* The kernel rejects the subscribe commands (validateDpIndex) when their
-     * ovs_header carries a dp_ifindex that is not a live datapath.  Model that
-     * so a hardcoded-0 subscribe (the default datapath is not always slot 0) is
-     * caught instead of silently targeting the wrong datapath. */
+    /* The kernel validates these control commands (validateDpIndex) against a
+     * live datapath and rejects an ovs_header whose dp_ifindex is not one.  Model
+     * that so a hardcoded-0 subscribe or pend (the default datapath is not always
+     * slot 0) is caught instead of silently targeting the wrong datapath. */
     if (nlh->nlmsg_type == OVS_WIN_NL_CTRL_FAMILY_ID
         && in_len >= NLMSG_HDRLEN + GENL_HDRLEN + sizeof(struct ovs_header)) {
         const struct genlmsghdr *genl = ALIGNED_CAST(const struct genlmsghdr *,
                                             (const char *) in + NLMSG_HDRLEN);
         if (genl->cmd == OVS_CTRL_CMD_MC_SUBSCRIBE_REQ
-            || genl->cmd == OVS_CTRL_CMD_PACKET_SUBSCRIBE_REQ) {
+            || genl->cmd == OVS_CTRL_CMD_PACKET_SUBSCRIBE_REQ
+            || genl->cmd == OVS_CTRL_CMD_WIN_PEND_REQ
+            || genl->cmd == OVS_CTRL_CMD_WIN_PEND_PACKET_REQ) {
             const struct ovs_header *oh = ALIGNED_CAST(const struct ovs_header *,
                                  (const char *) in + NLMSG_HDRLEN + GENL_HDRLEN);
             if (oh->dp_ifindex != MOCK_DP_IFINDEX) {
+                m->validate_dp_failed = true;
                 SetLastError(ERROR_INVALID_PARAMETER);
                 return FALSE;
             }
         }
     }
-    /* Other writes (subscribe/pend) just succeed. */
+    /* Other writes just succeed. */
     return TRUE;
 }
 
@@ -428,7 +436,7 @@ mock_ioctl(void *aux, HANDLE handle, DWORD code,
     case OVS_IOCTL_TRANSACT:
         return mock_transact(m, in, in_len, out, out_len, bytes);
     case OVS_IOCTL_WRITE:
-        return mock_write(h, in, in_len, bytes);
+        return mock_write(m, h, in, in_len, bytes);
     case OVS_IOCTL_READ:
         return mock_read_dump(m, h, out, out_len, bytes);
     case OVS_IOCTL_READ_PACKET:
@@ -488,6 +496,7 @@ mock_reset_content(struct mock_kernel *m)
     m->evt_head = 0;
     m->evt_len = 0;
     m->fail_open = false;
+    m->validate_dp_failed = false;
     m->flow_reply = FR_ACK;
     /* Keep one datapath so dpif_open()'s resolve dump always succeeds. */
     m->n_dp = 1;
@@ -1127,6 +1136,12 @@ test_port_poll(struct dpif *dpif, struct mock_kernel *m)
     /* Drained queue: no change. */
     devname = NULL;
     CHECK(dpif_port_poll(dpif, &devname) == EAGAIN);
+
+    /* port_poll_wait arms the event pend on the notifier channel; the kernel
+     * validates that command's dp_ifindex too, so it must carry the resolved
+     * index (the mock flags a 0/foreign-dp pend). */
+    dpif_port_poll_wait(dpif);
+    CHECK(!m->validate_dp_failed);
 }
 
 int

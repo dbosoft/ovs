@@ -1488,8 +1488,9 @@ dpif_windows_port_dump_done(const struct dpif *dpif_ OVS_UNUSED, void *state_)
 
 /* Reports the next kernel-initiated vport change (add/remove/link transition)
  * as '*devnamep', mirroring dpif_netlink_port_poll().  The kernel posts these on
- * the vport multicast group (OVS_WIN_NL_VPORT_MCGRP_ID) as OVS_VPORT_CMD_NEW/DEL
- * messages read via OVS_IOCTL_READ_EVENT.
+ * the vport multicast group (OVS_WIN_NL_VPORT_MCGRP_ID), read via
+ * OVS_IOCTL_READ_EVENT; it emits OVS_VPORT_CMD_NEW/DEL today, and (like
+ * dpif-netlink) OVS_VPORT_CMD_SET is also accepted as "this port changed".
  *
  * The notifier channel is opened and joined lazily on the first call, which
  * returns ENOBUFS so ofproto re-dumps the whole port set ("state unknown").

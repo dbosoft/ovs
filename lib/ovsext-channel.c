@@ -518,39 +518,58 @@ ovsext_recv(struct ovsext_channel *ch, struct ofpbuf *buf)
     return 0;
 }
 
+/* Builds this channel's overlapped-pend request.  The kernel command depends on
+ * the channel mode -- a packet channel pends OVS_CTRL_CMD_WIN_PEND_PACKET_REQ,
+ * an event channel pends OVS_CTRL_CMD_WIN_PEND_REQ.  Both are validated against a
+ * live datapath by the kernel, so the request carries the resolved dp_ifindex. */
+static void
+ovsext_build_pend_request(struct ovsext_channel *ch, struct ofpbuf *request)
+{
+    struct ovs_header *ovs_header;
+    uint16_t cmd = ch->read_ioctl == OVS_IOCTL_READ_EVENT
+                   ? OVS_CTRL_CMD_WIN_PEND_REQ
+                   : OVS_CTRL_CMD_WIN_PEND_PACKET_REQ;
+
+    nl_msg_put_genlmsghdr(request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          cmd, OVS_WIN_CONTROL_VERSION);
+    ovs_header = ofpbuf_put_uninit(request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = ch->dp_ifindex;
+    ovsext_stamp_request(ch, request);
+}
+
 void
 ovsext_recv_wait(struct ovsext_channel *ch)
 {
     /* A mock transport is synchronous: there is no real overlapped device to
      * pend on (ch->handle is a token, not a Win32 handle), and any queued
-     * message is already available to ovsext_recv.  Wake the poll loop so the
-     * caller retries the recv immediately. */
+     * message is already available to ovsext_recv.  Still route the pend request
+     * through the seam so its dp_ifindex is validated as the kernel would, then
+     * wake the poll loop so the caller retries the recv. */
     if (ovsext_transport) {
+        struct ofpbuf request;
+        uint64_t request_stub[128];
+        DWORD bytes = 0;
+
+        ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+        ovsext_build_pend_request(ch, &request);
+        ovsext_dev_ioctl(ch, OVS_IOCTL_WRITE, request.data, request.size,
+                         NULL, 0, &bytes);
+        ofpbuf_uninit(&request);
         poll_immediate_wake();
         return;
     }
 
     /* Mirror nl_sock_wait()/pend_io_request(): if no overlapped read is
      * pending, arm one so the driver signals 'rx_event' when a message is ready,
-     * then park on the event.  The pend command depends on the channel mode --
-     * a packet channel pends OVS_CTRL_CMD_WIN_PEND_PACKET_REQ, an event channel
-     * pends OVS_CTRL_CMD_WIN_PEND_REQ. */
+     * then park on the event. */
     if (ch->overlapped.Internal != STATUS_PENDING) {
         struct ofpbuf request;
         uint64_t request_stub[128];
-        struct ovs_header *ovs_header;
         DWORD bytes = 0;
         BOOL ok;
-        uint16_t cmd = ch->read_ioctl == OVS_IOCTL_READ_EVENT
-                       ? OVS_CTRL_CMD_WIN_PEND_REQ
-                       : OVS_CTRL_CMD_WIN_PEND_PACKET_REQ;
 
         ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
-        nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
-                              cmd, OVS_WIN_CONTROL_VERSION);
-        ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
-        ovs_header->dp_ifindex = ch->dp_ifindex;
-        ovsext_stamp_request(ch, &request);
+        ovsext_build_pend_request(ch, &request);
 
         ok = DeviceIoControl(ch->handle, OVS_IOCTL_WRITE,
                              request.data, request.size,
