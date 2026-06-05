@@ -22,17 +22,16 @@
  * the fixed Windows genl family IDs (OVS_WIN_NL_*_FAMILY_ID) in place of the
  * runtime-resolved Linux genl families.
  *
- * Conntrack zone-limit management (ct_set/get/del_limits, ct_get_features) is
- * wired against the kernel's OVS_CT_LIMIT genl family over the ordinary
+ * Conntrack zone-limit management (ct_set/get/del_limits, ct_get_features) and
+ * OpenFlow meters (meter_get_features/set/get/del) are wired against the
+ * kernel's OVS_CT_LIMIT and OVS_METER genl families over the ordinary
  * transaction channel.  Conntrack dump/flush are not provided here: their
  * userspace helpers (nl_ct_*) live in lib/netlink-conntrack.c, the
  * NETLINK_NETFILTER ctnetlink transport, which is not built on Windows -- a
  * userspace gap, not a kernel one (the ovsext kernel does serve the ctnetlink
- * dump/delete path).  Meter, bond and timeout-policy management are likewise
- * absent, but only because they are not wired yet; meters in particular ride
- * their own OVS_WIN_NL_METER_FAMILY_ID genl family the same way these CT-limit
- * members do, independent of netlink-conntrack.c.  All those class members
- * default to NULL.  Upcalls use a single handler, as Windows always has.
+ * dump/delete path).  Bond and timeout-policy management remain absent (not
+ * wired yet); those class members default to NULL.  Upcalls use a single
+ * handler, as Windows always has.
  *
  * See datapath-windows/NATIVE-DPIF-EXPERIMENT.md for the full spec. */
 
@@ -56,8 +55,10 @@
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/match.h"
 #include "openvswitch/ofpbuf.h"
+#include "openvswitch/ofp-meter.h"
 #include "openvswitch/poll-loop.h"
 #include "openvswitch/vlog.h"
+#include "netlink.h"
 #include "packets.h"
 #include "sset.h"
 #include "unaligned.h"
@@ -2407,6 +2408,262 @@ dpif_windows_ct_get_features(struct dpif *dpif_ OVS_UNUSED,
 }
 
 /* ====================================================================
+ * OpenFlow meters (mirrors dpif-netlink's meter_* members).
+ *
+ * The ovsext kernel serves the OVS_METER genl family at the fixed id
+ * OVS_WIN_NL_METER_FAMILY_ID; unlike Linux there is no runtime family lookup
+ * and no "broken meters" probe -- the family is always present.
+ * ==================================================================== */
+
+/* Meter flags the datapath understands (mirrors dpif-netlink). */
+#define DP_SUPPORTED_METER_FLAGS_MASK \
+    (OFPMF13_STATS | OFPMF13_PKTPS | OFPMF13_KBPS | OFPMF13_BURST)
+
+static void
+dpif_windows_meter_init(struct dpif_windows *dpif, struct ofpbuf *buf,
+                        void *stub, size_t size, uint32_t command)
+{
+    struct ovs_header *ovs_header;
+
+    ofpbuf_use_stub(buf, stub, size);
+    nl_msg_put_genlmsghdr(buf, 0, OVS_WIN_NL_METER_FAMILY_ID,
+                          NLM_F_REQUEST | NLM_F_ECHO, command,
+                          OVS_METER_VERSION);
+    ovs_header = ofpbuf_put_uninit(buf, sizeof *ovs_header);
+    ovs_header->dp_ifindex = dpif->dp_ifindex;
+}
+
+/* Transacts 'request' against the meter family.  On success stores the reply
+ * in '*replyp' and parses it per 'reply_policy' into 'a' (whose entries point
+ * into '*replyp'); the caller frees '*replyp'. */
+static int
+dpif_windows_meter_transact(struct dpif_windows *dpif, struct ofpbuf *request,
+                            struct ofpbuf **replyp,
+                            const struct nl_policy *reply_policy,
+                            struct nlattr **a, size_t size_a)
+{
+    int error = ovsext_transact(&dpif->channel, request, replyp);
+    ofpbuf_uninit(request);
+    if (error) {
+        return error;
+    }
+
+    struct nlmsghdr *nlmsg = ofpbuf_try_pull(*replyp, sizeof *nlmsg);
+    struct genlmsghdr *genl = ofpbuf_try_pull(*replyp, sizeof *genl);
+    struct ovs_header *ovs_header = ofpbuf_try_pull(*replyp,
+                                                    sizeof *ovs_header);
+    if (!nlmsg || !genl || !ovs_header
+        || nlmsg->nlmsg_type != OVS_WIN_NL_METER_FAMILY_ID
+        || !nl_policy_parse(*replyp, 0, reply_policy, a, size_a)) {
+        ofpbuf_delete(*replyp);
+        return EINVAL;
+    }
+    return 0;
+}
+
+static void
+dpif_windows_meter_get_features(const struct dpif *dpif_,
+                                struct ofputil_meter_features *features)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(CONST_CAST(struct dpif *,
+                                                             dpif_));
+    struct ofpbuf buf, *msg;
+    uint64_t stub[1024 / 8];
+
+    static const struct nl_policy ovs_meter_features_policy[] = {
+        [OVS_METER_ATTR_MAX_METERS] = { .type = NL_A_U32 },
+        [OVS_METER_ATTR_MAX_BANDS] = { .type = NL_A_U32 },
+        [OVS_METER_ATTR_BANDS] = { .type = NL_A_NESTED, .optional = true },
+    };
+    struct nlattr *a[ARRAY_SIZE(ovs_meter_features_policy)];
+
+    dpif_windows_meter_init(dpif, &buf, stub, sizeof stub,
+                            OVS_METER_CMD_FEATURES);
+    if (dpif_windows_meter_transact(dpif, &buf, &msg, ovs_meter_features_policy,
+                                    a, ARRAY_SIZE(ovs_meter_features_policy))) {
+        VLOG_INFO("meter OVS_METER_CMD_FEATURES failed");
+        return;
+    }
+
+    features->max_meters = nl_attr_get_u32(a[OVS_METER_ATTR_MAX_METERS]);
+    features->max_bands = nl_attr_get_u32(a[OVS_METER_ATTR_MAX_BANDS]);
+
+    /* Bands is a nested attribute of zero or more nested band attributes. */
+    if (a[OVS_METER_ATTR_BANDS]) {
+        const struct nlattr *nla;
+        size_t left;
+
+        NL_NESTED_FOR_EACH (nla, left, a[OVS_METER_ATTR_BANDS]) {
+            const struct nlattr *band_nla;
+            size_t band_left;
+
+            NL_NESTED_FOR_EACH (band_nla, band_left, nla) {
+                if (nl_attr_type(band_nla) == OVS_BAND_ATTR_TYPE
+                    && nl_attr_get_size(band_nla) == sizeof(uint32_t)
+                    && nl_attr_get_u32(band_nla) == OVS_METER_BAND_TYPE_DROP) {
+                    features->band_types |= 1 << OFPMBT13_DROP;
+                }
+            }
+        }
+    }
+    features->capabilities = DP_SUPPORTED_METER_FLAGS_MASK;
+
+    ofpbuf_delete(msg);
+}
+
+static int
+dpif_windows_meter_set(struct dpif *dpif_, ofproto_meter_id meter_id,
+                       struct ofputil_meter_config *config)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+    struct ofpbuf buf, *msg;
+    uint64_t stub[1024 / 8];
+
+    static const struct nl_policy ovs_meter_set_response_policy[] = {
+        [OVS_METER_ATTR_ID] = { .type = NL_A_U32 },
+    };
+    struct nlattr *a[ARRAY_SIZE(ovs_meter_set_response_policy)];
+
+    if (config->flags & ~DP_SUPPORTED_METER_FLAGS_MASK) {
+        return EBADF;       /* Unsupported flags set. */
+    }
+
+    for (size_t i = 0; i < config->n_bands; i++) {
+        if (config->bands[i].type != OFPMBT13_DROP) {
+            return ENODEV;  /* Unsupported band type. */
+        }
+    }
+
+    dpif_windows_meter_init(dpif, &buf, stub, sizeof stub, OVS_METER_CMD_SET);
+
+    nl_msg_put_u32(&buf, OVS_METER_ATTR_ID, meter_id.uint32);
+    if (config->flags & OFPMF13_KBPS) {
+        nl_msg_put_flag(&buf, OVS_METER_ATTR_KBPS);
+    }
+
+    size_t bands_offset = nl_msg_start_nested(&buf, OVS_METER_ATTR_BANDS);
+    for (size_t i = 0; i < config->n_bands; i++) {
+        struct ofputil_meter_band *band = &config->bands[i];
+        size_t band_offset = nl_msg_start_nested(&buf, OVS_BAND_ATTR_UNSPEC);
+
+        nl_msg_put_u32(&buf, OVS_BAND_ATTR_TYPE, OVS_METER_BAND_TYPE_DROP);
+        nl_msg_put_u32(&buf, OVS_BAND_ATTR_RATE, band->rate);
+        nl_msg_put_u32(&buf, OVS_BAND_ATTR_BURST,
+                       config->flags & OFPMF13_BURST
+                       ? band->burst_size : band->rate);
+        nl_msg_end_nested(&buf, band_offset);
+    }
+    nl_msg_end_nested(&buf, bands_offset);
+
+    int error = dpif_windows_meter_transact(dpif, &buf, &msg,
+                                    ovs_meter_set_response_policy, a,
+                                    ARRAY_SIZE(ovs_meter_set_response_policy));
+    if (error) {
+        VLOG_INFO("meter OVS_METER_CMD_SET failed");
+        return error;
+    }
+
+    if (nl_attr_get_u32(a[OVS_METER_ATTR_ID]) != meter_id.uint32) {
+        VLOG_INFO("kernel returned a different meter id than requested");
+    }
+    ofpbuf_delete(msg);
+    return 0;
+}
+
+/* Retrieves statistics for, and optionally deletes, meter 'meter_id', per
+ * 'command' (OVS_METER_CMD_GET or OVS_METER_CMD_DEL). */
+static int
+dpif_windows_meter_get_stats(const struct dpif *dpif_,
+                             ofproto_meter_id meter_id,
+                             struct ofputil_meter_stats *stats,
+                             uint16_t max_bands, enum ovs_meter_cmd command)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(CONST_CAST(struct dpif *,
+                                                             dpif_));
+    struct ofpbuf buf, *msg;
+    uint64_t stub[1024 / 8];
+
+    static const struct nl_policy ovs_meter_stats_policy[] = {
+        [OVS_METER_ATTR_ID] = { .type = NL_A_U32, .optional = true },
+        [OVS_METER_ATTR_STATS] = { NL_POLICY_FOR(struct ovs_flow_stats),
+                                   .optional = true },
+        [OVS_METER_ATTR_BANDS] = { .type = NL_A_NESTED, .optional = true },
+    };
+    struct nlattr *a[ARRAY_SIZE(ovs_meter_stats_policy)];
+
+    dpif_windows_meter_init(dpif, &buf, stub, sizeof stub, command);
+    nl_msg_put_u32(&buf, OVS_METER_ATTR_ID, meter_id.uint32);
+
+    int error = dpif_windows_meter_transact(dpif, &buf, &msg,
+                                            ovs_meter_stats_policy, a,
+                                            ARRAY_SIZE(ovs_meter_stats_policy));
+    if (error) {
+        return error;
+    }
+
+    if (a[OVS_METER_ATTR_ID]
+        && nl_attr_get_u32(a[OVS_METER_ATTR_ID]) != meter_id.uint32) {
+        VLOG_INFO("kernel returned a different meter id than requested");
+        ofpbuf_delete(msg);
+        return EINVAL;
+    }
+
+    if (stats && a[OVS_METER_ATTR_STATS]) {
+        const struct ovs_flow_stats *stat = nl_attr_get(a[OVS_METER_ATTR_STATS]);
+        stats->packet_in_count = get_32aligned_u64(&stat->n_packets);
+        stats->byte_in_count = get_32aligned_u64(&stat->n_bytes);
+
+        if (a[OVS_METER_ATTR_BANDS]) {
+            const struct nlattr *nla;
+            size_t left, n_bands = 0;
+
+            NL_NESTED_FOR_EACH (nla, left, a[OVS_METER_ATTR_BANDS]) {
+                const struct nlattr *band_nla;
+
+                band_nla = nl_attr_find_nested(nla, OVS_BAND_ATTR_STATS);
+                if (n_bands >= max_bands) {
+                    break;
+                }
+                if (band_nla && nl_attr_get_size(band_nla)
+                                == sizeof(struct ovs_flow_stats)) {
+                    stat = nl_attr_get(band_nla);
+                    stats->bands[n_bands].packet_count
+                        = get_32aligned_u64(&stat->n_packets);
+                    stats->bands[n_bands].byte_count
+                        = get_32aligned_u64(&stat->n_bytes);
+                } else {
+                    stats->bands[n_bands].packet_count = 0;
+                    stats->bands[n_bands].byte_count = 0;
+                }
+                n_bands++;
+            }
+            stats->n_bands = n_bands;
+        } else {
+            stats->n_bands = 0;
+        }
+    }
+
+    ofpbuf_delete(msg);
+    return 0;
+}
+
+static int
+dpif_windows_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
+                       struct ofputil_meter_stats *stats, uint16_t max_bands)
+{
+    return dpif_windows_meter_get_stats(dpif, meter_id, stats, max_bands,
+                                        OVS_METER_CMD_GET);
+}
+
+static int
+dpif_windows_meter_del(struct dpif *dpif, ofproto_meter_id meter_id,
+                       struct ofputil_meter_stats *stats, uint16_t max_bands)
+{
+    return dpif_windows_meter_get_stats(dpif, meter_id, stats, max_bands,
+                                        OVS_METER_CMD_DEL);
+}
+
+/* ====================================================================
  * Class.
  * ==================================================================== */
 
@@ -2447,6 +2704,10 @@ const struct dpif_class dpif_windows_class = {
     .ct_get_limits = dpif_windows_ct_get_limits,
     .ct_del_limits = dpif_windows_ct_del_limits,
     .ct_get_features = dpif_windows_ct_get_features,
+    .meter_get_features = dpif_windows_meter_get_features,
+    .meter_set = dpif_windows_meter_set,
+    .meter_get = dpif_windows_meter_get,
+    .meter_del = dpif_windows_meter_del,
 };
 
 #endif /* _WIN32 */

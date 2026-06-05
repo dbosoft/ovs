@@ -37,6 +37,7 @@
 
 #include "dpif.h"
 #include "ct-dpif.h"
+#include "openvswitch/ofp-meter.h"
 #include "ovsext-channel.h"
 #include "dp-packet.h"
 #include "flow.h"
@@ -131,6 +132,15 @@ struct mock_kernel {
     int32_t  ct_zone;
     uint32_t ct_limit;
     uint32_t ct_count;
+
+    /* OVS_METER family state.  SET records the meter id and its first band;
+     * GET/DEL echo back fixed meter and band stats. */
+    int      meter_last_cmd;
+    uint32_t meter_id;
+    uint32_t meter_n_bands;
+    uint32_t meter_band_type;
+    uint32_t meter_band_rate;
+    uint32_t meter_band_burst;
 };
 
 /* ---- record builders ----------------------------------------------------- */
@@ -361,6 +371,113 @@ mock_ct_limit_get(struct mock_kernel *m, const void *in, DWORD in_len,
     return TRUE;
 }
 
+/* Records the meter id and first band of an OVS_METER_CMD_SET request. */
+static void
+mock_meter_parse_set(struct mock_kernel *m, const void *in, DWORD in_len)
+{
+    struct ofpbuf b = ofpbuf_const_initializer(in, in_len);
+    static const struct nl_policy pol[] = {
+        [OVS_METER_ATTR_ID] = { .type = NL_A_U32, .optional = true },
+        [OVS_METER_ATTR_BANDS] = { .type = NL_A_NESTED, .optional = true },
+    };
+    struct nlattr *attr[ARRAY_SIZE(pol)];
+
+    m->meter_id = 0;
+    m->meter_n_bands = 0;
+    m->meter_band_type = 0;
+    m->meter_band_rate = 0;
+    m->meter_band_burst = 0;
+
+    if (!ofpbuf_try_pull(&b, NLMSG_HDRLEN)
+        || !ofpbuf_try_pull(&b, GENL_HDRLEN)
+        || !ofpbuf_try_pull(&b, sizeof(struct ovs_header))
+        || !nl_policy_parse(&b, 0, pol, attr, ARRAY_SIZE(pol))) {
+        return;
+    }
+    if (attr[OVS_METER_ATTR_ID]) {
+        m->meter_id = nl_attr_get_u32(attr[OVS_METER_ATTR_ID]);
+    }
+    if (attr[OVS_METER_ATTR_BANDS]) {
+        const struct nlattr *nla;
+        size_t left;
+
+        NL_NESTED_FOR_EACH (nla, left, attr[OVS_METER_ATTR_BANDS]) {
+            const struct nlattr *t, *rate, *burst;
+
+            m->meter_n_bands++;
+            if (m->meter_n_bands > 1) {
+                continue;       /* Record only the first band. */
+            }
+            t     = nl_attr_find_nested(nla, OVS_BAND_ATTR_TYPE);
+            rate  = nl_attr_find_nested(nla, OVS_BAND_ATTR_RATE);
+            burst = nl_attr_find_nested(nla, OVS_BAND_ATTR_BURST);
+            if (t)     { m->meter_band_type  = nl_attr_get_u32(t); }
+            if (rate)  { m->meter_band_rate  = nl_attr_get_u32(rate); }
+            if (burst) { m->meter_band_burst = nl_attr_get_u32(burst); }
+        }
+    }
+}
+
+/* Answers an OVS_METER_CMD_*: FEATURES advertises one DROP band; SET echoes the
+ * meter id; GET/DEL return fixed meter and per-band stats. */
+static BOOL
+mock_meter(struct mock_kernel *m, const void *in, DWORD in_len,
+           void *out, DWORD out_len, DWORD *bytes)
+{
+    const struct genlmsghdr *genl = ALIGNED_CAST(const struct genlmsghdr *,
+                                        (const char *) in + NLMSG_HDRLEN);
+    uint64_t stub[512 / 8];
+    struct ofpbuf r;
+    struct ovs_header *oh;
+    DWORD n;
+
+    m->meter_last_cmd = genl->cmd;
+
+    ofpbuf_use_stub(&r, stub, sizeof stub);
+    nl_msg_put_genlmsghdr(&r, 0, OVS_WIN_NL_METER_FAMILY_ID, 0,
+                          genl->cmd, OVS_METER_VERSION);
+    oh = ofpbuf_put_uninit(&r, sizeof *oh);
+    oh->dp_ifindex = 0;
+
+    if (genl->cmd == OVS_METER_CMD_FEATURES) {
+        size_t bands, band;
+
+        nl_msg_put_u32(&r, OVS_METER_ATTR_MAX_METERS, 32);
+        nl_msg_put_u32(&r, OVS_METER_ATTR_MAX_BANDS, 1);
+        bands = nl_msg_start_nested(&r, OVS_METER_ATTR_BANDS);
+        band = nl_msg_start_nested(&r, OVS_BAND_ATTR_UNSPEC);
+        nl_msg_put_u32(&r, OVS_BAND_ATTR_TYPE, OVS_METER_BAND_TYPE_DROP);
+        nl_msg_end_nested(&r, band);
+        nl_msg_end_nested(&r, bands);
+    } else if (genl->cmd == OVS_METER_CMD_SET) {
+        mock_meter_parse_set(m, in, in_len);
+        nl_msg_put_u32(&r, OVS_METER_ATTR_ID, m->meter_id);
+    } else {                    /* GET or DEL: return stats. */
+        struct ovs_flow_stats mstats, bstats;
+        size_t bands, band;
+
+        put_32aligned_u64(&mstats.n_packets, 10);
+        put_32aligned_u64(&mstats.n_bytes, 1000);
+        put_32aligned_u64(&bstats.n_packets, 3);
+        put_32aligned_u64(&bstats.n_bytes, 300);
+
+        nl_msg_put_u32(&r, OVS_METER_ATTR_ID, m->meter_id);
+        nl_msg_put_unspec(&r, OVS_METER_ATTR_STATS, &mstats, sizeof mstats);
+        bands = nl_msg_start_nested(&r, OVS_METER_ATTR_BANDS);
+        band = nl_msg_start_nested(&r, OVS_BAND_ATTR_UNSPEC);
+        nl_msg_put_unspec(&r, OVS_BAND_ATTR_STATS, &bstats, sizeof bstats);
+        nl_msg_end_nested(&r, band);
+        nl_msg_end_nested(&r, bands);
+    }
+    nl_msg_nlmsghdr(&r)->nlmsg_len = r.size;
+
+    n = r.size < out_len ? (DWORD) r.size : out_len;
+    memcpy(out, r.data, n);
+    *bytes = n;
+    ofpbuf_uninit(&r);
+    return TRUE;
+}
+
 static BOOL
 mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
               void *out, DWORD out_len, DWORD *bytes)
@@ -393,6 +510,9 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
         }
         return TRUE;                   /* ack, empty reply */
     }
+
+    case OVS_WIN_NL_METER_FAMILY_ID:
+        return mock_meter(m, in, in_len, out, out_len, bytes);
 
     case OVS_WIN_NL_DATAPATH_FAMILY_ID:
         return record_copy(&m->dp[0], out, out_len, bytes);
@@ -1323,6 +1443,59 @@ test_ct_limits(struct dpif *dpif, struct mock_kernel *m)
     CHECK(feat == 0);
 }
 
+/* OpenFlow meters round-trip through the OVS_METER genl family: features
+ * advertises the kernel's limits, a single-band DROP meter is set (and the
+ * request marshals id/rate/burst correctly), and get/del read back stats. */
+static void
+test_meters(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct ofputil_meter_features features;
+    struct ofputil_meter_band band = { .type = OFPMBT13_DROP, .rate = 1000,
+                                       .burst_size = 100 };
+    struct ofputil_meter_config config = {
+        .flags = OFPMF13_KBPS | OFPMF13_BURST, .n_bands = 1, .bands = &band };
+    struct ofputil_meter_band_stats band_stats[2];
+    struct ofputil_meter_stats stats = { .bands = band_stats };
+    ofproto_meter_id mid = { .uint32 = 7 };
+
+    printf("test_meters:\n");
+    m->meter_last_cmd = -1;
+
+    /* FEATURES advertises the kernel's truthful limits and the DROP band. */
+    memset(&features, 0, sizeof features);
+    dpif_meter_get_features(dpif, &features);
+    CHECK(m->meter_last_cmd == OVS_METER_CMD_FEATURES);
+    CHECK(features.max_meters == 32);
+    CHECK(features.max_bands == 1);
+    CHECK((features.band_types & (1 << OFPMBT13_DROP)) != 0);
+    CHECK(features.capabilities != 0);
+
+    /* SET a single-band DROP meter; the request must carry id/rate/burst. */
+    CHECK(dpif_meter_set(dpif, mid, &config) == 0);
+    CHECK(m->meter_last_cmd == OVS_METER_CMD_SET);
+    CHECK(m->meter_id == 7);
+    CHECK(m->meter_n_bands == 1);
+    CHECK(m->meter_band_type == OVS_METER_BAND_TYPE_DROP);
+    CHECK(m->meter_band_rate == 1000);
+    CHECK(m->meter_band_burst == 100);
+
+    /* GET reads back meter and per-band stats. */
+    memset(band_stats, 0, sizeof band_stats);
+    CHECK(dpif_meter_get(dpif, mid, &stats, 2) == 0);
+    CHECK(m->meter_last_cmd == OVS_METER_CMD_GET);
+    CHECK(stats.packet_in_count == 10);
+    CHECK(stats.byte_in_count == 1000);
+    CHECK(stats.n_bands == 1);
+    CHECK(stats.bands[0].packet_count == 3);
+    CHECK(stats.bands[0].byte_count == 300);
+
+    /* DEL reaches the kernel as CMD_DEL and still returns stats. */
+    memset(band_stats, 0, sizeof band_stats);
+    CHECK(dpif_meter_del(dpif, mid, &stats, 2) == 0);
+    CHECK(m->meter_last_cmd == OVS_METER_CMD_DEL);
+    CHECK(stats.n_bands == 1);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1376,6 +1549,7 @@ main(int argc, char *argv[])
     test_operate_batch(dpif, &mock);
     test_port_poll(dpif, &mock);
     test_ct_limits(dpif, &mock);
+    test_meters(dpif, &mock);
 
     dpif_close(dpif);
     ovsext_set_transport(NULL);
