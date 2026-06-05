@@ -328,6 +328,25 @@ mock_write(struct mock_handle *h, const void *in, DWORD in_len, DWORD *bytes)
         default:                            h->dump = DUMP_NONE;  break;
         }
     }
+
+    /* The kernel rejects the subscribe commands (validateDpIndex) when their
+     * ovs_header carries a dp_ifindex that is not a live datapath.  Model that
+     * so a hardcoded-0 subscribe (the default datapath is not always slot 0) is
+     * caught instead of silently targeting the wrong datapath. */
+    if (nlh->nlmsg_type == OVS_WIN_NL_CTRL_FAMILY_ID
+        && in_len >= NLMSG_HDRLEN + GENL_HDRLEN + sizeof(struct ovs_header)) {
+        const struct genlmsghdr *genl = ALIGNED_CAST(const struct genlmsghdr *,
+                                            (const char *) in + NLMSG_HDRLEN);
+        if (genl->cmd == OVS_CTRL_CMD_MC_SUBSCRIBE_REQ
+            || genl->cmd == OVS_CTRL_CMD_PACKET_SUBSCRIBE_REQ) {
+            const struct ovs_header *oh = ALIGNED_CAST(const struct ovs_header *,
+                                 (const char *) in + NLMSG_HDRLEN + GENL_HDRLEN);
+            if (oh->dp_ifindex != MOCK_DP_IFINDEX) {
+                SetLastError(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            }
+        }
+    }
     /* Other writes (subscribe/pend) just succeed. */
     return TRUE;
 }
