@@ -1088,6 +1088,9 @@ dpif_windows_register_all_switch_types(void)
     }
 }
 
+static int dpif_windows_set_features(struct dpif *dpif_,
+                                     uint32_t new_features);
+
 static int
 dpif_windows_open(const struct dpif_class *class, const char *name,
                   bool create, struct dpif **dpifp)
@@ -1159,6 +1162,14 @@ dpif_windows_open(const struct dpif_class *class, const char *name,
     dpif->channel.dp_ifindex = dp.dp_ifindex;
     ofpbuf_delete(buf);
 
+    /* The datapath is owned by the driver, so it is resolved with GET rather
+     * than created with NEW; the feature mask is therefore not carried on the
+     * open transaction.  Negotiate it now with an explicit SET.  Best-effort:
+     * an older kernel that does not echo the features leaves user_features 0,
+     * which is harmless (callers simply see the features as unsupported). */
+    dpif_windows_set_features(&dpif->dpif,
+                              OVS_DP_F_UNALIGNED | OVS_DP_F_VPORT_PIDS);
+
     *dpifp = &dpif->dpif;
     return 0;
 }
@@ -1223,6 +1234,43 @@ dpif_windows_get_stats(const struct dpif *dpif_, struct dpif_dp_stats *stats)
         ofpbuf_delete(buf);
     }
     return error;
+}
+
+/* Requests 'new_features' from the kernel via OVS_DP_CMD_SET, mirroring
+ * dpif_netlink_set_features().  The kernel echoes back the mask it accepted
+ * (rejecting any unsupported bit), which is cached in 'dpif->user_features';
+ * returns EOPNOTSUPP if a requested bit did not come back set. */
+static int
+dpif_windows_set_features(struct dpif *dpif_, uint32_t new_features)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+    struct dpif_windows_dp request, reply;
+    struct ofpbuf *buf;
+    int error;
+
+    dpif_windows_dp_init(&request);
+    request.cmd = OVS_DP_CMD_SET;
+    request.name = OVS_WINDOWS_KERNEL_DP_NAME;
+    request.dp_ifindex = dpif->dp_ifindex;
+    request.user_features = dpif->user_features | new_features;
+
+    error = dpif_windows_dp_transact(dpif, &request, &reply, &buf);
+    if (!error) {
+        dpif->user_features = reply.user_features;
+        ofpbuf_delete(buf);
+        if (!(dpif->user_features & new_features)) {
+            return EOPNOTSUPP;
+        }
+    }
+    return error;
+}
+
+static uint32_t
+dpif_windows_get_features(struct dpif *dpif_)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+
+    return dpif->user_features;
 }
 
 static char *
@@ -2676,6 +2724,8 @@ const struct dpif_class dpif_windows_class = {
     .destroy = dpif_windows_destroy,
     .run = dpif_windows_run,
     .get_stats = dpif_windows_get_stats,
+    .set_features = dpif_windows_set_features,
+    .get_features = dpif_windows_get_features,
     .port_add = dpif_windows_port_add,
     .port_del = dpif_windows_port_del,
     .port_query_by_number = dpif_windows_port_query_by_number,
