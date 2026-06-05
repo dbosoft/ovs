@@ -70,7 +70,7 @@ AddService = DBO_OVSE,,Svc_Modern
 [Svc_Modern]
 DisplayName    = %DBO_OVSE_Desc%
 ServiceType    = 1 ;SERVICE_KERNEL_DRIVER
-StartType      = 1 ;SERVICE_SYSTEM_START
+StartType      = 3 ;SERVICE_DEMAND_START
 ErrorControl   = 1 ;SERVICE_ERROR_NORMAL
 ServiceBinary  = %13%\DBO_OVSE.sys
 LoadOrderGroup = NDIS
@@ -95,7 +95,7 @@ AddService = DBO_OVSE,,Svc_Floor13
 [Svc_Floor13]
 DisplayName    = %DBO_OVSE_Desc%
 ServiceType    = 1
-StartType      = 1
+StartType      = 3 ;SERVICE_DEMAND_START
 ErrorControl   = 1
 ServiceBinary  = %13%\DBO_OVSE60.sys
 LoadOrderGroup = NDIS
@@ -120,7 +120,7 @@ AddService = DBO_OVSE,,Svc_Floor12
 [Svc_Floor12]
 DisplayName    = %DBO_OVSE_Desc%
 ServiceType    = 1
-StartType      = 1
+StartType      = 3 ;SERVICE_DEMAND_START
 ErrorControl   = 1
 ServiceBinary  = %12%\DBO_OVSE60.sys
 LoadOrderGroup = NDIS
