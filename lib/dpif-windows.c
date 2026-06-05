@@ -1920,8 +1920,8 @@ parse_odp_packet(struct dpif_windows *dpif, struct ofpbuf *buf,
         return EINVAL;
     }
 
-    /* (Re)set ALL fields of '*upcall' on successful return.  The caller's
-     * dupcall is not zero-initialized, so 'pid' must be set explicitly even
+    /* (Re)set ALL fields of '*upcall' on successful return.  The caller does
+     * not zero-initialize the upcall, so 'pid' must be set explicitly even
      * though the ovsext upcall carries no per-packet PID (matches
      * dpif-netlink's parse_odp_packet). */
     upcall->type = type;
