@@ -468,7 +468,10 @@ ovsext_subscribe_vport_events(struct ovsext_channel *ch, bool enable)
     nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
                           OVS_CTRL_CMD_MC_SUBSCRIBE_REQ, OVS_WIN_CONTROL_VERSION);
     ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
-    ovs_header->dp_ifindex = 0;
+    /* The kernel validates this command against a live datapath, so it must
+     * carry the resolved dp_ifindex (the default datapath is not always slot 0
+     * -- it is promoted on detach), not a hardcoded 0. */
+    ovs_header->dp_ifindex = ch->dp_ifindex;
     nl_msg_put_u32(&request, OVS_NL_ATTR_MCAST_GRP, OVS_WIN_NL_VPORT_MCGRP_ID);
     nl_msg_put_u8(&request, OVS_NL_ATTR_MCAST_JOIN, enable ? 1 : 0);
 
