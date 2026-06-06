@@ -3350,13 +3350,15 @@ OvsActionIsSupported(UINT32 type)
 static BOOLEAN
 OvsProbeActionsSupported(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
 {
-    /* Bound the walk at the executor's deferred-action nesting limit so the
-     * probe cannot admit nesting deeper than the executor can run. */
+    /* Bound the walk at the executor's deferred-action nesting capacity so the
+     * probe cannot admit nesting deeper than the executor can run. Admit nesting
+     * up to and including that capacity (reject only strictly deeper), so a probe
+     * at the maximum supported depth is not falsely reported unsupported. */
     const UINT32 maxDepth = DEFERRED_ACTION_QUEUE_SIZE;
     PNL_ATTR a;
     INT rem;
 
-    if (depth >= maxDepth) {
+    if (depth > maxDepth) {
         return FALSE;
     }
 
