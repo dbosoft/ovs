@@ -1873,8 +1873,15 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
         key->ipKey.nwDst = ipAttr->ipv4_dst;
     }
     if (ipHdr->protocol != ipAttr->ipv4_proto) {
-        UINT16 oldProto = (ipHdr->protocol << 16) & 0xff00;
-        UINT16 newProto = (ipAttr->ipv4_proto << 16) & 0xff00;
+        /*
+         * ChecksumUpdate16() consumes the host-order read of the 16-bit word a
+         * field lives in. The protocol byte is the low byte of the network-order
+         * {TTL, protocol} word, i.e. the high byte once read into a host UINT16,
+         * so it must be shifted left by 8. The previous '<< 16' masked to zero,
+         * making this a no-op that left a stale checksum on any protocol change.
+         */
+        UINT16 oldProto = (ipHdr->protocol << 8) & 0xff00;
+        UINT16 newProto = (ipAttr->ipv4_proto << 8) & 0xff00;
         if (tcpHdr) {
             tcpHdr->check = ChecksumUpdate16(tcpHdr->check, oldProto, newProto);
         } else if (udpHdr && udpHdr->check) {
@@ -1900,7 +1907,15 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
         /* ECN + DSCP */
         UINT8 newTos = (ipHdr->tos & 0x3) | (ipAttr->ipv4_tos & 0xfc);
         if (ipHdr->check != 0) {
-            ipHdr->check = ChecksumUpdate16(ipHdr->check, ipHdr->tos, newTos);
+            /*
+             * ToS is the low byte of the network-order {version/IHL, ToS} word,
+             * i.e. the high byte of the host-order read ChecksumUpdate16() wants,
+             * so shift left by 8. Passing the bare byte updated the wrong word
+             * position and produced a bad IP checksum on every DSCP/ECN change.
+             */
+            ipHdr->check = ChecksumUpdate16(ipHdr->check,
+                                            (UINT16)(ipHdr->tos << 8),
+                                            (UINT16)(newTos << 8));
         }
         ipHdr->tos = newTos;
         key->ipKey.nwTos = newTos;
