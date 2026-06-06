@@ -412,7 +412,8 @@ netdev_windows_get_mtu(const struct netdev *netdev_, int *mtup)
     int error = 0;
 
     ovs_mutex_lock(&netdev_windows_list_mutex);
-    if ((netdev->cache_valid & VALID_MTU) && netdev->mtu) {
+    ovs_assert((netdev->cache_valid & VALID_MTU) != 0);
+    if (netdev->mtu) {
         *mtup = netdev->mtu;
     } else {
         /* A userspace-first ghost has no kernel MTU yet (the deferred construct
@@ -573,6 +574,9 @@ netdev_windows_internal_construct(struct netdev *netdev_)
  * needs, snapshotted under the lock. */
 struct netdev_windows_probe {
     char *name;                        /* owned; the netdev's unique identity. */
+    const struct netdev_windows *owner; /* identity guard (compared, not deref'd):
+                                         * rejects a same-named port deleted and
+                                         * re-created during the probe window. */
     struct eth_addr in_mac;            /* cached MAC, to reuse a resolved LUID. */
     NET_LUID in_luid;
     bool in_luid_valid;
@@ -580,7 +584,7 @@ struct netdev_windows_probe {
     bool kernel_valid;                 /* the OVS_WIN_NETDEV_CMD_GET succeeded. */
     uint32_t ifi_flags;
     struct eth_addr mac;
-    int mtu;
+    uint32_t mtu;                      /* matches the kernel u32 / cached field. */
     bool carrier_valid;                /* a link state was determined. */
     bool carrier;
     bool luid_valid;                   /* resolved host-interface LUID. */
@@ -772,6 +776,7 @@ netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
 
         memset(p, 0, sizeof *p);
         p->name = xstrdup(netdev_get_name(&netdev->up));
+        p->owner = netdev;
         p->in_mac = netdev->mac;
         p->in_luid = netdev->if_luid;
         p->in_luid_valid = netdev->if_luid_valid;
@@ -789,7 +794,11 @@ netdev_windows_run(const struct netdev_class *netdev_class OVS_UNUSED)
         struct netdev_windows_probe *p =
             shash_find_data(&by_name, netdev_get_name(&netdev->up));
 
-        if (p && netdev_windows_probe_commit(netdev, p)) {
+        /* Commit only if this is the very netdev the probe was taken from: a
+         * name match alone could hit a same-named replacement created during
+         * the probe window, which must not receive stale data. */
+        if (p && p->owner == netdev
+            && netdev_windows_probe_commit(netdev, p)) {
             netdev_change_seq_changed(&netdev->up);
         }
     }
