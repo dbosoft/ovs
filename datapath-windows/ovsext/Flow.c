@@ -314,8 +314,8 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         goto done;
     }
 
-    /* FLOW_DEL command w/o any key input is a flush case.
-       If we don't have any attr, we treat this as a flush command*/
+    /* A FLOW_DEL with no attributes at all is a flush. A DEL carrying only a
+       UFID (no key) is a targeted delete, handled further below. */
     if ((genlMsgHdr->cmd == OVS_FLOW_CMD_DEL) &&
         (!NlMsgAttrsLen(nlMsgHdr))) {
 
@@ -593,6 +593,17 @@ _FlowNlGetCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                      != TRUE) {
         OVS_LOG_ERROR("Attr Parsing failed for msg: %p",
                        nlMsgHdr);
+        rc = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+
+    /*
+     * OVS_FLOW_ATTR_KEY is optional in nlFlowPolicy (to admit UFID-only DEL),
+     * but GET is always key-based here (UFID-based GET is not implemented), so
+     * a keyless GET is rejected rather than dereferencing a NULL key below.
+     */
+    if (!nlAttrs[OVS_FLOW_ATTR_KEY]) {
+        OVS_LOG_ERROR("OVS_FLOW_ATTR_KEY missing for flow get");
         rc = STATUS_INVALID_PARAMETER;
         goto done;
     }
@@ -2973,6 +2984,8 @@ OvsLookupFlowByUfid(OVS_DATAPATH *datapath, const ovs_u128 *ufid)
     UINT32 hash = OvsJhashBytes(ufid, sizeof(*ufid), 0);
     PLIST_ENTRY head, link;
 
+    ASSERT(datapath->ufidTable != NULL);
+
     head = &datapath->ufidTable[HASH_BUCKET(hash)];
     link = head->Flink;
     while (link != head) {
@@ -3261,6 +3274,14 @@ HandleFlowPut(OvsFlowPut *put,
                 newFlow->byteCount = KernelFlow->byteCount;
                 newFlow->tcpFlags = KernelFlow->tcpFlags;
                 newFlow->used = KernelFlow->used;
+            }
+            /*
+             * Preserve the flow's UFID identity across a modify that does not
+             * repeat the UFID, so a later UFID-only delete still resolves it.
+             */
+            if (!newFlow->ufidValid && KernelFlow->ufidValid) {
+                newFlow->ufid = KernelFlow->ufid;
+                newFlow->ufidValid = TRUE;
             }
             RemoveFlow(datapath, &KernelFlow);
             status = AddFlow(datapath, newFlow);
@@ -3592,10 +3613,29 @@ OvsProbeSupportedFeature(POVS_MESSAGE msgIn,
     NTSTATUS status = STATUS_SUCCESS;
     PNL_MSG_HDR nlMsgHdr = &(msgIn->nlMsg);
 
-    UINT32 keyAttrOffset = (UINT32)((PCHAR)keyAttr - (PCHAR)nlMsgHdr);
+    UINT32 keyAttrOffset;
     UINT32 encapOffset = 0;
     PNL_ATTR keyAttrs[__OVS_KEY_ATTR_MAX] = { NULL };
     PNL_ATTR encapAttrs[__OVS_KEY_ATTR_MAX] = { NULL };
+
+    /*
+     * OVS_FLOW_ATTR_KEY is optional in nlFlowPolicy, so a probe may arrive
+     * without one. Such a probe carries its feature in the actions (or is
+     * malformed); validate the actions and never dereference a NULL key.
+     */
+    if (!keyAttr) {
+        if (actionAttr) {
+            if (!OvsProbeActionsSupported(NlAttrData(actionAttr),
+                                          NlAttrGetSize(actionAttr), 0)) {
+                status = STATUS_NOT_SUPPORTED;
+            }
+        } else {
+            status = STATUS_INVALID_PARAMETER;
+        }
+        goto done;
+    }
+
+    keyAttrOffset = (UINT32)((PCHAR)keyAttr - (PCHAR)nlMsgHdr);
 
     /* Get flow keys attributes */
     if ((NlAttrParseNested(nlMsgHdr, keyAttrOffset, NlAttrLen(keyAttr),

@@ -1549,6 +1549,36 @@ test_flow_del_ufid_terse(struct dpif *dpif, struct mock_kernel *m)
     CHECK(op.error == EINVAL);
 }
 
+/* The fixed kernel resolves a terse (UFID-only) delete via its UFID index and
+ * acks it. With the mock NOT requiring a key (flow_require_key = false), the
+ * same UFID-only delete the provider emits must succeed. */
+static void
+test_flow_del_ufid_terse_supported(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct dpif_flow_del del;
+    struct dpif_op op;
+    struct dpif_op *ops[1];
+    ovs_u128 ufid = { .u32 = { 5, 6, 7, 8 } };
+
+    printf("test_flow_del_ufid_terse_supported:\n");
+
+    mock_reset_content(m);
+    m->flow_require_key = false;         /* UFID-capable kernel */
+    m->flow_reply = FR_ACK;
+    memset(&del, 0, sizeof del);
+    del.ufid = &ufid;
+    del.terse = true;
+    memset(&op, 0, sizeof op);
+    op.type = DPIF_OP_FLOW_DEL;
+    op.flow_del = del;
+    ops[0] = &op;
+    dpif_operate(dpif, ops, 1, DPIF_OFFLOAD_NEVER);
+
+    CHECK(m->flow_req_had_ufid);
+    CHECK(!m->flow_req_had_key);
+    CHECK(op.error == 0);
+}
+
 /* The class 'operate' is the 3-arg contract; dpif_operate resolves offload
  * before dispatch.  Drive a multi-op batch through the public path to exercise
  * it end to end. */
@@ -2005,6 +2035,7 @@ main(int argc, char *argv[])
     test_flow_put_stats(dpif, &mock);
     test_flow_del_stats(dpif, &mock);
     test_flow_del_ufid_terse(dpif, &mock);
+    test_flow_del_ufid_terse_supported(dpif, &mock);
     test_operate_batch(dpif, &mock);
     test_port_poll(dpif, &mock);
     test_ct_limits(dpif, &mock);
