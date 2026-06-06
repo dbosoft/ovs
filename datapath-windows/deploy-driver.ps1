@@ -69,6 +69,11 @@ $swap = @"
 `$nested = $stopList
 if (`$nested.Count) { Get-VM `$nested -EA SilentlyContinue | Stop-VM -Force -TurnOff -EA SilentlyContinue }
 Disable-VMSwitchExtension -VMSwitchName `$sw -Name `$ext -EA Continue | Out-Null
+# OVS userspace holds the driver's netlink device open; the I/O Manager will not
+# unload a driver while any handle to its device object exists, so Stop-Service
+# parks in STOP_PENDING forever if ovs-vswitchd/ovsdb-server are still running.
+# Release the handle first.
+Stop-Process -Name ovs-vswitchd,ovsdb-server -Force -EA SilentlyContinue
 Stop-Service DBO_OVSE -Force -EA Continue
 Start-Sleep 2
 `$bound = ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\DBO_OVSE').ImagePath) -replace '^\\SystemRoot','C:\Windows'
