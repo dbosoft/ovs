@@ -161,13 +161,21 @@ HvCreatePort(POVS_SWITCH_CONTEXT switchContext,
          * given that the port Id and the name are the same and also provided
          * that the other properties that we cache have not changed.
          */
-        if (vport->portType != portParam->PortType) {
+        /*
+         * A userspace-first ghost (hvAttachPending) was created before its
+         * Hyper-V port existed, so it carries no NDIS PortType yet; adopt the
+         * type Hyper-V now supplies (OvsInitVportWithPortParam() sets it below)
+         * rather than rejecting on the uninitialized value.
+         */
+        if (!vport->hvAttachPending &&
+            vport->portType != portParam->PortType) {
             OVS_LOG_INFO("Port add failed due to PortType change, port Id: %u"
                          " old: %u, new: %u", portParam->PortId,
                          vport->portType, portParam->PortType);
             status = STATUS_DATA_NOT_ACCEPTED;
             goto create_port_done;
         }
+        vport->hvAttachPending = FALSE;
         vport->isAbsentOnHv = FALSE;
     } else {
         vport = (POVS_VPORT_ENTRY)OvsAllocateVport();
@@ -462,6 +470,23 @@ HvConnectNic(POVS_SWITCH_CONTEXT switchContext,
 
     if (nicParam->NicType == NdisSwitchNicTypeInternal) {
         OvsBindVportWithIpHelper(vport, switchContext);
+    }
+
+    /*
+     * Notify userspace that the NIC connected and link is up. This lets a
+     * pre-created port's activation be observed without polling. Only ports
+     * already known to OVS userspace (valid portNo) are reported.
+     */
+    if (vport->portNo != OVS_DPPORT_NUMBER_INVALID) {
+        OVS_VPORT_EVENT_ENTRY event;
+        RtlZeroMemory(&event, sizeof event);
+        event.portNo = vport->portNo;
+        event.ovsType = vport->ovsType;
+        event.upcallPid = vport->upcallPid;
+        RtlCopyMemory(&event.ovsName, &vport->ovsName, sizeof event.ovsName);
+        event.type = OVS_EVENT_LINK_UP | OVS_EVENT_CONNECT;
+        event.dpNo = switchContext->dpNo;
+        OvsPostVportEvent(&event);
     }
 
     NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
@@ -1873,8 +1898,21 @@ CreateNetlinkMesgForNetdev(POVS_VPORT_EXT_INFO info,
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
-    if (info->status != OVS_EVENT_CONNECT) {
+    /* 'status' is a bitmask: NIC_CREATED and CONNECTED both carry
+     * OVS_EVENT_CONNECT, DISCONNECT does not.  Bit-test it so a ghost or a
+     * connected port is admin-up and a disconnected one is admin-down,
+     * regardless of which link bit (if any) accompanies the connect bit. */
+    if (info->status & OVS_EVENT_CONNECT) {
         netdevFlags = OVS_WIN_NETDEV_IFF_UP;
+    }
+    /*
+     * IFF_UP is set for both NIC_CREATED and CONNECTED, so it cannot convey
+     * link state. Report IFF_RUNNING when the vport's NIC is connected
+     * (OVS_EVENT_LINK_UP) so userspace can derive carrier for ports that have
+     * no host interface to read media state from (e.g. VM vNICs / ghosts).
+     */
+    if (info->status & OVS_EVENT_LINK_UP) {
+        netdevFlags |= OVS_WIN_NETDEV_IFF_RUNNING;
     }
     ok = NlMsgPutTailU32(&nlBuffer, OVS_WIN_NETDEV_ATTR_IF_FLAGS,
                          netdevFlags);
@@ -2298,6 +2336,43 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         portType == OVS_VPORT_TYPE_INTERNAL) {
         /* External and internal ports can also be looked up like VIF ports. */
         vport = OvsFindVportByHvNameA(switchContext, portName);
+
+        if (vport == NULL) {
+            /*
+             * The Hyper-V port with this friendly name is not present yet.
+             * Pre-create a userspace-first vport that is absent on the Hyper-V
+             * switch and is resurrected by HvCreatePort() once a Hyper-V port
+             * with a matching friendly name appears. Until the NIC connects the
+             * port is reported link-down (OVS_STATE_NIC_CREATED) and the
+             * datapath output path, which requires OVS_STATE_CONNECTED, drops
+             * traffic destined to it.
+             */
+            SIZE_T friendlyNameLen = portNameLen - 1; /* exclude the NUL */
+            SIZE_T i;
+
+            if (friendlyNameLen > IF_MAX_STRING_SIZE) {
+                nlError = NL_ERROR_INVAL;
+                goto Cleanup;
+            }
+
+            vport = (POVS_VPORT_ENTRY)OvsAllocateVport();
+            if (vport == NULL) {
+                nlError = NL_ERROR_NOMEM;
+                goto Cleanup;
+            }
+            vportAllocated = TRUE;
+
+            vport->ovsType = portType;
+            vport->ovsState = OVS_STATE_NIC_CREATED;
+            vport->isAbsentOnHv = TRUE;
+            vport->hvAttachPending = TRUE;
+
+            for (i = 0; i < friendlyNameLen; i++) {
+                vport->portFriendlyName.String[i] = (WCHAR)portName[i];
+            }
+            vport->portFriendlyName.Length =
+                (USHORT)(friendlyNameLen * sizeof(WCHAR));
+        }
     } else {
         ASSERT(OvsIsTunnelVportType(portType));
 
@@ -2419,6 +2494,18 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     status = InitOvsVportCommon(switchContext, vport);
     ASSERT(status == STATUS_SUCCESS);
+
+    if (vport->hvAttachPending) {
+        /*
+         * Account a userspace-first NETDEV/INTERNAL ghost as a Hyper-V vport so
+         * the count balances OvsRemoveAndDeleteVport(), which decrements
+         * numHvVports for NETDEV/INTERNAL ports. A Hyper-V-created port is
+         * counted in UpdateSwitchCtxWithVport(); a ghost never traverses that
+         * path until it is resurrected (with newPort == FALSE), so it would
+         * otherwise be deleted without ever being counted.
+         */
+        switchContext->numHvVports++;
+    }
 
     status = OvsCreateMsgFromVport(vport, msgIn, usrParamsCtx->outputBuffer,
                                    usrParamsCtx->outputLength,

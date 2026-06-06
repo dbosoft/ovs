@@ -37,6 +37,8 @@
 
 #include "dpif.h"
 #include "ct-dpif.h"
+#include "netdev.h"
+#include "netdev-provider.h"
 #include "openvswitch/ofp-meter.h"
 #include "ovsext-channel.h"
 #include "dp-packet.h"
@@ -50,6 +52,9 @@
 #include "packets.h"
 #include "unaligned.h"
 #include "util.h"
+#include "ovs-atomic.h"
+#include "ovs-thread.h"
+#include "timeval.h"
 
 /* The ovsext ABI (IOCTL codes, fixed genl family ids, struct ovs_header). */
 #include "OvsDpInterfaceExt.h"
@@ -150,6 +155,16 @@ struct mock_kernel {
      * omits them (modelling an older kernel that never negotiates). */
     uint32_t dp_user_features;
     bool     dp_echo_features;
+
+    /* OVS_WIN_NETDEV family state.  The netdev provider's construct and its
+     * periodic netdev_windows_run() refresh query this; the latter commits it to
+     * the netdev's cached admin flags / MAC / MTU / carrier. */
+    bool     nd_present;       /* GET succeeds (the vport exists). */
+    uint32_t nd_type;
+    uint32_t nd_port_no;
+    struct eth_addr nd_mac;
+    uint32_t nd_mtu;
+    uint32_t nd_flags;         /* OVS_WIN_NETDEV_IFF_*. */
 };
 
 /* ---- record builders ----------------------------------------------------- */
@@ -555,6 +570,43 @@ mock_dp_transact(struct mock_kernel *m, const void *in, DWORD in_len,
     return TRUE;
 }
 
+/* Answers an OVS_WIN_NETDEV_CMD_GET as OvsCreateMsgFromVport does: NL_ERROR_NODEV
+ * when the vport is absent, else a reply carrying the programmed
+ * port_no/type/name/mac/mtu/if_flags. */
+static BOOL
+mock_netdev_get(struct mock_kernel *m, const void *in OVS_UNUSED,
+                DWORD in_len OVS_UNUSED, void *out, DWORD out_len, DWORD *bytes)
+{
+    uint64_t stub[512 / 8];
+    struct ofpbuf r;
+    struct ovs_header *ovs_header;
+    DWORD n;
+
+    if (!m->nd_present) {
+        return reply_nlmsgerr(ENODEV, out, out_len, bytes);
+    }
+
+    ofpbuf_use_stub(&r, stub, sizeof stub);
+    nl_msg_put_genlmsghdr(&r, 0, OVS_WIN_NL_NETDEV_FAMILY_ID, 0,
+                          OVS_WIN_NETDEV_CMD_GET, OVS_WIN_NETDEV_VERSION);
+    ovs_header = ofpbuf_put_uninit(&r, sizeof *ovs_header);
+    ovs_header->dp_ifindex = MOCK_DP_IFINDEX;
+    nl_msg_put_u32(&r, OVS_WIN_NETDEV_ATTR_PORT_NO, m->nd_port_no);
+    nl_msg_put_u32(&r, OVS_WIN_NETDEV_ATTR_TYPE, m->nd_type);
+    nl_msg_put_string(&r, OVS_WIN_NETDEV_ATTR_NAME, "nd-test");
+    nl_msg_put_unspec(&r, OVS_WIN_NETDEV_ATTR_MAC_ADDR, &m->nd_mac,
+                      sizeof m->nd_mac);
+    nl_msg_put_u32(&r, OVS_WIN_NETDEV_ATTR_MTU, m->nd_mtu);
+    nl_msg_put_u32(&r, OVS_WIN_NETDEV_ATTR_IF_FLAGS, m->nd_flags);
+    nl_msg_nlmsghdr(&r)->nlmsg_len = r.size;
+
+    n = r.size < out_len ? (DWORD) r.size : out_len;
+    memcpy(out, r.data, n);
+    *bytes = n;
+    ofpbuf_uninit(&r);
+    return TRUE;
+}
+
 static BOOL
 mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
               void *out, DWORD out_len, DWORD *bytes)
@@ -593,6 +645,9 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
 
     case OVS_WIN_NL_DATAPATH_FAMILY_ID:
         return mock_dp_transact(m, in, in_len, out, out_len, bytes);
+
+    case OVS_WIN_NL_NETDEV_FAMILY_ID:
+        return mock_netdev_get(m, in, in_len, out, out_len, bytes);
 
     case OVS_WIN_NL_FLOW_FAMILY_ID:
         switch (m->flow_reply) {
@@ -1678,6 +1733,160 @@ test_meters(struct dpif *dpif, struct mock_kernel *m)
     CHECK(stats.n_bands == 1);
 }
 
+/* The "system" netdev provider refreshes its cached admin flags / MAC / MTU /
+ * carrier from the kernel in netdev_windows_run().  Construct one against the
+ * mock, change the kernel-reported state, run one refresh tick, and confirm the
+ * new MAC/MTU are committed, carrier follows the link bit, and change_seq is
+ * bumped -- exercising the lock-free snapshot/gather/commit path. */
+static void
+test_netdev_refresh(struct mock_kernel *m)
+{
+    const struct eth_addr mac_a = { .ea = { 0x02, 0, 0, 0, 0, 0x0a } };
+    const struct eth_addr mac_b = { .ea = { 0x02, 0, 0, 0, 0, 0x0b } };
+    struct netdev *netdev;
+    struct eth_addr got;
+    uint64_t seq0;
+    int mtu;
+
+    printf("test_netdev_refresh:\n");
+    mock_reset_content(m);
+
+    /* Construct-time state: admin-up, link-up, MAC A, MTU 1400. */
+    m->nd_present = true;
+    m->nd_type = OVS_VPORT_TYPE_NETDEV;
+    m->nd_port_no = 7;
+    m->nd_mac = mac_a;
+    m->nd_mtu = 1400;
+    m->nd_flags = OVS_WIN_NETDEV_IFF_UP | OVS_WIN_NETDEV_IFF_RUNNING;
+
+    CHECK(netdev_open("nd-test", "system", &netdev) == 0);
+    CHECK(netdev_get_etheraddr(netdev, &got) == 0 && eth_addr_equals(got, mac_a));
+    seq0 = netdev_get_change_seq(netdev);
+
+    /* The kernel now reports a new MAC and MTU and the link going down (no
+     * RUNNING).  'nd-test' has no host interface matching its synthetic MAC, so
+     * carrier resolves purely from the kernel link state. */
+    m->nd_mac = mac_b;
+    m->nd_mtu = 1500;
+    m->nd_flags = OVS_WIN_NETDEV_IFF_UP;
+
+    /* Jump past the 1s refresh gate so this run() executes regardless of any
+     * earlier test having armed netdev_windows_next_refresh. */
+    timeval_warp(2000);
+    netdev_windows_class.run(&netdev_windows_class);
+
+    CHECK(netdev_get_etheraddr(netdev, &got) == 0 && eth_addr_equals(got, mac_b));
+    CHECK(netdev_get_mtu(netdev, &mtu) == 0 && mtu == 1500);
+    CHECK(!netdev_get_carrier(netdev));
+    CHECK(netdev_get_change_seq(netdev) != seq0);
+
+    netdev_close(netdev);
+
+    /* A userspace-first ghost (the device is absent at construct) has no kernel
+     * MTU yet; get_mtu must report it unknown rather than a bogus 0. */
+    m->nd_present = false;
+    CHECK(netdev_open("nd-ghost", "system", &netdev) == 0);
+    CHECK(netdev_get_mtu(netdev, &mtu) != 0);
+    netdev_close(netdev);
+}
+
+/* Concurrency for the refactored refresh: netdev_windows_run() now does its
+ * per-port I/O without holding netdev_windows_list_mutex and re-takes it only to
+ * commit, so a reader calling netdev APIs must coexist with it.  A reader thread
+ * hammers the cached fields while the main thread drives many refresh/commit
+ * cycles (time is warped past the 1s gate), each flipping the kernel-reported
+ * MAC.  The commit writes the 6-byte MAC under the lock, so the locked reader
+ * must only ever see a fully-written MAC (0xAA.. or 0xBB..); a torn value means
+ * the lock was dropped.  The test also wedges if the lock discipline can
+ * deadlock against a concurrent reader. */
+#define NDC_REFRESH_ITERS 2000
+
+static struct netdev *ndc_netdev;
+static const struct eth_addr ndc_mac_a = { .ea = { 0xaa, 0xaa, 0xaa, 0xaa,
+                                                   0xaa, 0xaa } };
+static const struct eth_addr ndc_mac_b = { .ea = { 0xbb, 0xbb, 0xbb, 0xbb,
+                                                   0xbb, 0xbb } };
+static atomic_bool ndc_stop;
+static atomic_bool ndc_torn;
+static atomic_bool ndc_saw_a;       /* reader observed MAC A while refreshing. */
+static atomic_bool ndc_saw_b;       /* reader observed MAC B while refreshing. */
+
+static void *
+ndc_reader(void *arg OVS_UNUSED)
+{
+    bool stop = false;
+
+    while (!stop) {
+        struct eth_addr got;
+        int mtu;
+
+        if (netdev_get_etheraddr(ndc_netdev, &got) == 0) {
+            if (eth_addr_equals(got, ndc_mac_a)) {
+                atomic_store_relaxed(&ndc_saw_a, true);
+            } else if (eth_addr_equals(got, ndc_mac_b)) {
+                atomic_store_relaxed(&ndc_saw_b, true);
+            } else {
+                atomic_store_relaxed(&ndc_torn, true);
+            }
+        }
+        netdev_get_mtu(ndc_netdev, &mtu);
+        netdev_get_carrier(ndc_netdev);
+        atomic_read_relaxed(&ndc_stop, &stop);
+    }
+    return NULL;
+}
+
+static void
+test_netdev_refresh_concurrent(struct mock_kernel *m)
+{
+    pthread_t reader;
+    bool torn, saw_a, saw_b;
+    int i;
+
+    printf("test_netdev_refresh_concurrent:\n");
+    mock_reset_content(m);
+    m->nd_present = true;
+    m->nd_type = OVS_VPORT_TYPE_NETDEV;
+    m->nd_port_no = 9;
+    m->nd_mac = ndc_mac_a;
+    m->nd_mtu = 1400;
+    m->nd_flags = OVS_WIN_NETDEV_IFF_UP | OVS_WIN_NETDEV_IFF_RUNNING;
+
+    CHECK(netdev_open("nd-conc", "system", &ndc_netdev) == 0);
+
+    atomic_init(&ndc_stop, false);
+    atomic_init(&ndc_torn, false);
+    atomic_init(&ndc_saw_a, false);
+    atomic_init(&ndc_saw_b, false);
+    reader = ovs_thread_create("nd-reader", ndc_reader, NULL);
+
+    for (i = 0; i < NDC_REFRESH_ITERS; i++) {
+        m->nd_mac = (i & 1) ? ndc_mac_b : ndc_mac_a;
+        netdev_windows_class.run(&netdev_windows_class);
+        /* Jump past the refresh gate so the next run() actually executes. */
+        timeval_warp(2000);
+    }
+
+    atomic_store_relaxed(&ndc_stop, true);
+    xpthread_join(reader, NULL);
+
+    atomic_read_relaxed(&ndc_torn, &torn);
+    atomic_read_relaxed(&ndc_saw_a, &saw_a);
+    atomic_read_relaxed(&ndc_saw_b, &saw_b);
+    CHECK(!torn);            /* the reader never saw a partially-written MAC. */
+    /* The reader observed BOTH alternating MACs, proving it actually overlapped
+     * the refresh/commit cycles (not merely ran before or after them). */
+    CHECK(saw_a && saw_b);
+
+    /* The last iteration set MAC B; if it committed, the gate was really
+     * defeated and run() executed every iteration (not skipped as a no-op). */
+    struct eth_addr final_mac;
+    CHECK(netdev_get_etheraddr(ndc_netdev, &final_mac) == 0
+          && eth_addr_equals(final_mac, ndc_mac_b));
+
+    netdev_close(ndc_netdev);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1734,6 +1943,11 @@ main(int argc, char *argv[])
     test_ct_limits(dpif, &mock);
     test_meters(dpif, &mock);
     test_feature_negotiation(dpif, &mock);
+
+    /* The "system" netdev provider shares the mock ovsext transport; it is
+     * registered by netdev_initialize() the first time a netdev is opened. */
+    test_netdev_refresh(&mock);
+    test_netdev_refresh_concurrent(&mock);
 
     dpif_close(dpif);
     ovsext_set_transport(NULL);
