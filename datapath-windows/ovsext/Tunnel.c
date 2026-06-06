@@ -45,7 +45,8 @@ extern POVS_SWITCH_CONTEXT gOvsSwitchContext;
 
 static NTSTATUS
 OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
-                              OVS_TUNNEL_PENDED_PACKET *packet);
+                              OVS_TUNNEL_PENDED_PACKET *packet,
+                              POVS_SWITCH_CONTEXT switchContext);
 
 NTSTATUS
 OvsTunnelNotify(FWPS_CALLOUT_NOTIFY_TYPE notifyType,
@@ -68,6 +69,7 @@ OvsTunnelAnalyzePacket(OVS_TUNNEL_PENDED_PACKET *packet)
     NET_BUFFER_LIST *copiedNBL = NULL;
     NET_BUFFER *netBuffer;
     NDIS_STATUS ndisStatus;
+    POVS_SWITCH_CONTEXT switchContext = NULL;
 
     /*
      * For inbound net buffer list, we can assume it contains only one
@@ -79,6 +81,18 @@ OvsTunnelAnalyzePacket(OVS_TUNNEL_PENDED_PACKET *packet)
     /* Drop the packet from the host stack */
     packet->classifyOut->actionType = FWP_ACTION_BLOCK;
     packet->classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
+
+    /*
+     * This datagram-data callout is host-global and has no Hyper-V switch
+     * association, so it binds to the default datapath. Take a reference on it
+     * (instead of reading gOvsSwitchContext bare) so the context and its NBL
+     * pool cannot be torn down underneath the decap/inject below; the teardown
+     * drain in OvsDeleteSwitch waits for this reference.
+     */
+    switchContext = OvsAcquireSwitchContext();
+    if (switchContext == NULL) {
+        return STATUS_SUCCESS;
+    }
 
     /* Adjust the net buffer list offset to the start of the IP header */
     ndisStatus = NdisRetreatNetBufferDataStart(netBuffer,
@@ -92,7 +106,7 @@ OvsTunnelAnalyzePacket(OVS_TUNNEL_PENDED_PACKET *packet)
 
     /* Note that the copy will inherit the original net buffer list's offset */
     packetLength = NET_BUFFER_DATA_LENGTH(netBuffer);
-    copiedNBL = OvsAllocateVariableSizeNBL(gOvsSwitchContext, packetLength,
+    copiedNBL = OvsAllocateVariableSizeNBL(switchContext, packetLength,
                                            OVS_DEFAULT_HEADROOM_SIZE);
 
     if (copiedNBL == NULL) {
@@ -107,17 +121,18 @@ OvsTunnelAnalyzePacket(OVS_TUNNEL_PENDED_PACKET *packet)
     }
 
     status = OvsInjectPacketThroughActions(copiedNBL,
-                                           packet);
+                                           packet, switchContext);
     goto analyzeDone;
 
     /* Undo the adjustment on the original net buffer list */
 analyzeFreeNBL:
-    OvsCompleteNBL(gOvsSwitchContext, copiedNBL, TRUE);
+    OvsCompleteNBL(switchContext, copiedNBL, TRUE);
 analyzeDone:
     NdisAdvanceNetBufferDataStart(netBuffer,
                                   packet->transportHeaderSize + packet->ipHeaderSize,
                                   FALSE,
                                   NULL);
+    OvsReleaseSwitchContext(switchContext);
     return status;
 }
 
@@ -202,7 +217,8 @@ Exit:
 
 static NTSTATUS
 OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
-                              OVS_TUNNEL_PENDED_PACKET *packet)
+                              OVS_TUNNEL_PENDED_PACKET *packet,
+                              POVS_SWITCH_CONTEXT switchContext)
 {
     NTSTATUS status;
     OvsIPTunnelKey tunKey = {0};
@@ -224,9 +240,9 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
      * need a cross-datapath tunnel-vport registry keyed by the outer tunnel
      * identity (e.g. VNI), since the callout can only see the outer key.
      */
-    OVS_DATAPATH *datapath = &gOvsSwitchContext->datapath;
+    OVS_DATAPATH *datapath = &switchContext->datapath;
 
-    ASSERT(gOvsSwitchContext);
+    ASSERT(switchContext);
 
     /* Fill the tunnel key */
     status = OvsSlowPathDecapVxlan(pNbl, &tunKey);
@@ -253,7 +269,7 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
     }
 
     InitializeListHead(&missedPackets);
-    OvsInitCompletionList(&completionList, gOvsSwitchContext,
+    OvsInitCompletionList(&completionList, switchContext,
                           sendCompleteFlags);
 
     {
@@ -277,14 +293,14 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
         curNb = NET_BUFFER_LIST_FIRST_NB(pNbl);
         ASSERT(curNb->Next == NULL);
 
-        NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState, dispatch);
+        NdisAcquireRWLockRead(switchContext->dispatchLock, &lockState, dispatch);
 
         /* Lock the flowtable for the duration of accessing the flow */
         OvsAcquireDatapathRead(datapath, &dpLockState, NDIS_RWL_AT_DISPATCH_LEVEL);
 
         SendFlags |= NDIS_SEND_FLAGS_DISPATCH_LEVEL;
 
-        vport = OvsFindTunnelVportByDstPortAndType(gOvsSwitchContext,
+        vport = OvsFindTunnelVportByDstPortAndType(switchContext,
                                                    htons(tunKey.dst_port),
                                                    OVS_VPORT_TYPE_VXLAN);
 
@@ -307,7 +323,7 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
             OvsFlowUsed(flow, pNbl, &layers);
             datapath->hits++;
 
-            OvsActionsExecute(gOvsSwitchContext, &completionList, pNbl,
+            OvsActionsExecute(switchContext, &completionList, pNbl,
                               portNo, SendFlags, &key, &hash, &layers,
                               flow->actions, flow->actionsLen);
 
@@ -318,7 +334,7 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
             datapath->misses++;
             elem = OvsCreateQueueNlPacket(NULL, 0, OVS_PACKET_CMD_MISS,
                                           vport, &key, NULL, pNbl, curNb,
-                                          TRUE, &layers, gOvsSwitchContext->dpNo);
+                                          TRUE, &layers, switchContext->dpNo);
             if (elem) {
                 /* Complete the packet since it was copied to user buffer. */
                 InsertTailList(&missedPackets, &elem->link);
@@ -329,7 +345,7 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
             goto unlockAndDrop;
         }
 
-        NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
+        NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
 
     }
 
@@ -337,9 +353,9 @@ OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
 
 unlockAndDrop:
     OvsReleaseDatapath(datapath, &dpLockState);
-    NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
+    NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
 dropit:
-    pNbl = OvsCompleteNBL(gOvsSwitchContext, pNbl, TRUE);
+    pNbl = OvsCompleteNBL(switchContext, pNbl, TRUE);
     ASSERT(pNbl == NULL);
     return status;
 }
