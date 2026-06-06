@@ -127,6 +127,8 @@ struct mock_kernel {
     enum flow_reply flow_reply;
     struct mock_record flow_echo;
     struct mock_record flow_bad;
+    bool flow_req_had_key;      /* Last flow request carried OVS_FLOW_ATTR_KEY. */
+    bool flow_req_had_ufid;     /* Last flow request carried OVS_FLOW_ATTR_UFID. */
 
     /* Set when a validateDpIndex control command (subscribe/pend) arrives with a
      * dp_ifindex that is not the mock datapath -- the kernel rejects these. */
@@ -649,7 +651,24 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
     case OVS_WIN_NL_NETDEV_FAMILY_ID:
         return mock_netdev_get(m, in, in_len, out, out_len, bytes);
 
-    case OVS_WIN_NL_FLOW_FAMILY_ID:
+    case OVS_WIN_NL_FLOW_FAMILY_ID: {
+        size_t hdrlen = NLMSG_HDRLEN + GENL_HDRLEN + sizeof(struct ovs_header);
+
+        /* Record which identifiers the provider put on the wire, so tests can
+         * assert the FLOW request contract (e.g. a terse delete carries a UFID
+         * and omits the key). */
+        m->flow_req_had_key = false;
+        m->flow_req_had_ufid = false;
+        if (in_len >= hdrlen) {
+            const struct nlattr *attrs =
+                ALIGNED_CAST(const struct nlattr *, (const char *) in + hdrlen);
+            size_t alen = in_len - hdrlen;
+            m->flow_req_had_key =
+                nl_attr_find__(attrs, alen, OVS_FLOW_ATTR_KEY) != NULL;
+            m->flow_req_had_ufid =
+                nl_attr_find__(attrs, alen, OVS_FLOW_ATTR_UFID) != NULL;
+        }
+
         switch (m->flow_reply) {
         case FR_ECHO:      return record_copy(&m->flow_echo, out, out_len, bytes);
         case FR_MALFORMED: return record_copy(&m->flow_bad, out, out_len, bytes);
@@ -658,6 +677,7 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
         case FR_ACK:
         default:           return TRUE;   /* ack, empty reply */
         }
+    }
 
     case OVS_WIN_NL_VPORT_FAMILY_ID:
     case OVS_WIN_NL_PACKET_FAMILY_ID:
@@ -869,6 +889,8 @@ mock_reset_content(struct mock_kernel *m)
     m->validate_dp_failed = false;
     m->flow_dump_done = false;
     m->flow_reply = FR_ACK;
+    m->flow_req_had_key = false;
+    m->flow_req_had_ufid = false;
     /* Default to the feature-aware kernel: echo USER_FEATURES/MEGAFLOW_STATS so
      * dpif_open()'s feature negotiation succeeds.  A SET clears this back to the
      * negotiated value; tests that exercise the old-kernel path clear it. */
@@ -1483,6 +1505,42 @@ test_flow_del_stats(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&key);
 }
 
+/* Terse (UFID-only) delete contract. After a terse flow dump the revalidator
+ * deletes stale flows by UFID only (dpif_flow_del.terse = true, .key = NULL).
+ * The provider must then emit OVS_FLOW_ATTR_UFID and omit OVS_FLOW_ATTR_KEY --
+ * exactly like dpif-netlink -- and a UFID-capable kernel (the kernel now does
+ * UFID lookup) must accept it. (Guards the userspace marshalling; the live
+ * `failed to flow_del (Invalid argument) ufid:...` regression was the kernel
+ * lacking the lookup, fixed separately and validated on the VM.) */
+static void
+test_flow_del_ufid_terse(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct dpif_flow_del del;
+    struct dpif_op op;
+    struct dpif_op *ops[1];
+    ovs_u128 ufid = { .u32 = { 1, 2, 3, 4 } };
+
+    printf("test_flow_del_ufid_terse:\n");
+
+    mock_reset_content(m);
+    m->flow_reply = FR_ACK;
+    memset(&del, 0, sizeof del);
+    del.ufid = &ufid;
+    del.terse = true;                    /* UFID-only delete: no key */
+    memset(&op, 0, sizeof op);
+    op.type = DPIF_OP_FLOW_DEL;
+    op.flow_del = del;
+    ops[0] = &op;
+    dpif_operate(dpif, ops, 1, DPIF_OFFLOAD_NEVER);
+
+    /* The provider put a UFID on the wire and omitted the key (the dpif
+     * terse-delete contract)... */
+    CHECK(m->flow_req_had_ufid);
+    CHECK(!m->flow_req_had_key);
+    /* ...and a UFID-capable kernel accepts it. */
+    CHECK(op.error == 0);
+}
+
 /* The class 'operate' is the 3-arg contract; dpif_operate resolves offload
  * before dispatch.  Drive a multi-op batch through the public path to exercise
  * it end to end. */
@@ -1938,6 +1996,7 @@ main(int argc, char *argv[])
     test_flow_get_miss_vs_malformed(dpif, &mock);
     test_flow_put_stats(dpif, &mock);
     test_flow_del_stats(dpif, &mock);
+    test_flow_del_ufid_terse(dpif, &mock);
     test_operate_batch(dpif, &mock);
     test_port_poll(dpif, &mock);
     test_ct_limits(dpif, &mock);
