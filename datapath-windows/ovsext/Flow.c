@@ -373,10 +373,21 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         !flowAttrs[OVS_FLOW_ATTR_KEY] &&
         flowAttrs[OVS_FLOW_ATTR_UFID]) {
 
-        OVS_DATAPATH *datapath = &usrParamsCtx->switchContext->datapath;
+        POVS_SWITCH_CONTEXT switchContext = usrParamsCtx->switchContext;
+        OVS_DATAPATH *datapath;
         OvsFlow *flow;
         LOCK_STATE_EX dpLockState;
         ovs_u128 ufid;
+
+        /* Validate the target datapath against this switch, like the key-based
+         * paths (OvsPutFlowIoctl etc.) do, before touching any flow -- a request
+         * for another datapath must not delete from this one. */
+        if (switchContext == NULL ||
+            switchContext->dpNo != (UINT32)ovsHdr->dp_ifindex) {
+            rc = STATUS_INVALID_PARAMETER;
+            goto done;
+        }
+        datapath = &switchContext->datapath;
 
         RtlCopyMemory(&ufid, NlAttrGet(flowAttrs[OVS_FLOW_ATTR_UFID]),
                       sizeof(ufid));
