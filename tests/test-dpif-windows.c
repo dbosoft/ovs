@@ -127,6 +127,11 @@ struct mock_kernel {
     enum flow_reply flow_reply;
     struct mock_record flow_echo;
     struct mock_record flow_bad;
+    bool flow_require_key;      /* Model ovsext nlFlowPolicy: a flow command
+                                 * without OVS_FLOW_ATTR_KEY is rejected EINVAL
+                                 * (the current kernel has no UFID lookup). */
+    bool flow_req_had_key;      /* Last flow request carried OVS_FLOW_ATTR_KEY. */
+    bool flow_req_had_ufid;     /* Last flow request carried OVS_FLOW_ATTR_UFID. */
 
     /* Set when a validateDpIndex control command (subscribe/pend) arrives with a
      * dp_ifindex that is not the mock datapath -- the kernel rejects these. */
@@ -649,7 +654,26 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
     case OVS_WIN_NL_NETDEV_FAMILY_ID:
         return mock_netdev_get(m, in, in_len, out, out_len, bytes);
 
-    case OVS_WIN_NL_FLOW_FAMILY_ID:
+    case OVS_WIN_NL_FLOW_FAMILY_ID: {
+        size_t hdrlen = NLMSG_HDRLEN + GENL_HDRLEN + sizeof(struct ovs_header);
+
+        /* Record what the provider put on the wire and, when modelling the
+         * current kernel, enforce its nlFlowPolicy: OVS_FLOW_ATTR_KEY is
+         * mandatory and there is no OVS_FLOW_ATTR_UFID lookup, so a UFID-only
+         * (terse) request is rejected with EINVAL. */
+        if (in_len >= hdrlen) {
+            const struct nlattr *attrs =
+                ALIGNED_CAST(const struct nlattr *, (const char *) in + hdrlen);
+            size_t alen = in_len - hdrlen;
+            m->flow_req_had_key =
+                nl_attr_find__(attrs, alen, OVS_FLOW_ATTR_KEY) != NULL;
+            m->flow_req_had_ufid =
+                nl_attr_find__(attrs, alen, OVS_FLOW_ATTR_UFID) != NULL;
+        }
+        if (m->flow_require_key && !m->flow_req_had_key) {
+            return reply_nlmsgerr(EINVAL, out, out_len, bytes);
+        }
+
         switch (m->flow_reply) {
         case FR_ECHO:      return record_copy(&m->flow_echo, out, out_len, bytes);
         case FR_MALFORMED: return record_copy(&m->flow_bad, out, out_len, bytes);
@@ -658,6 +682,7 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
         case FR_ACK:
         default:           return TRUE;   /* ack, empty reply */
         }
+    }
 
     case OVS_WIN_NL_VPORT_FAMILY_ID:
     case OVS_WIN_NL_PACKET_FAMILY_ID:
@@ -869,6 +894,9 @@ mock_reset_content(struct mock_kernel *m)
     m->validate_dp_failed = false;
     m->flow_dump_done = false;
     m->flow_reply = FR_ACK;
+    m->flow_require_key = false;
+    m->flow_req_had_key = false;
+    m->flow_req_had_ufid = false;
     /* Default to the feature-aware kernel: echo USER_FEATURES/MEGAFLOW_STATS so
      * dpif_open()'s feature negotiation succeeds.  A SET clears this back to the
      * negotiated value; tests that exercise the old-kernel path clear it. */
@@ -1483,6 +1511,42 @@ test_flow_del_stats(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&key);
 }
 
+/* Reproduces the live revalidator failure: after a terse flow dump the
+ * revalidator deletes stale flows by UFID only (dpif_flow_del.terse = true,
+ * .key = NULL).  The provider then omits OVS_FLOW_ATTR_KEY and sends only
+ * OVS_FLOW_ATTR_UFID -- exactly like dpif-netlink.  The ovsext kernel, however,
+ * makes OVS_FLOW_ATTR_KEY mandatory and has no UFID lookup, so it rejects the
+ * request with EINVAL (the `failed to flow_del (Invalid argument) ufid:...`
+ * spam).  The fix belongs in the kernel (add UFID lookup); userspace is correct. */
+static void
+test_flow_del_ufid_terse(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct dpif_flow_del del;
+    struct dpif_op op;
+    struct dpif_op *ops[1];
+    ovs_u128 ufid = { .u32 = { 1, 2, 3, 4 } };
+
+    printf("test_flow_del_ufid_terse:\n");
+
+    mock_reset_content(m);
+    m->flow_require_key = true;          /* model current ovsext nlFlowPolicy */
+    memset(&del, 0, sizeof del);
+    del.ufid = &ufid;
+    del.terse = true;                    /* UFID-only delete: no key */
+    memset(&op, 0, sizeof op);
+    op.type = DPIF_OP_FLOW_DEL;
+    op.flow_del = del;
+    ops[0] = &op;
+    dpif_operate(dpif, ops, 1, DPIF_OFFLOAD_NEVER);
+
+    /* The provider put a UFID on the wire and (correctly, per the dpif
+     * contract) omitted the key... */
+    CHECK(m->flow_req_had_ufid);
+    CHECK(!m->flow_req_had_key);
+    /* ...and the key-requiring kernel rejected it -- the reproduced bug. */
+    CHECK(op.error == EINVAL);
+}
+
 /* The class 'operate' is the 3-arg contract; dpif_operate resolves offload
  * before dispatch.  Drive a multi-op batch through the public path to exercise
  * it end to end. */
@@ -1938,6 +2002,7 @@ main(int argc, char *argv[])
     test_flow_get_miss_vs_malformed(dpif, &mock);
     test_flow_put_stats(dpif, &mock);
     test_flow_del_stats(dpif, &mock);
+    test_flow_del_ufid_terse(dpif, &mock);
     test_operate_batch(dpif, &mock);
     test_port_poll(dpif, &mock);
     test_ct_limits(dpif, &mock);
