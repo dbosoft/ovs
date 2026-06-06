@@ -288,6 +288,8 @@ typedef struct OvsFlowPut {
     OvsFlowKey key;
     uint32_t flags;
     PNL_ATTR  actions;
+    ovs_u128  ufid;
+    BOOLEAN   ufidPresent;
 } OvsFlowPut;
 
 #define OVS_MIN_PACKET_SIZE 60

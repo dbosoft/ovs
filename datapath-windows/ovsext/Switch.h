@@ -52,7 +52,8 @@ typedef struct _OVS_VPORT_ENTRY *POVS_VPORT_ENTRY;
 
 typedef struct _OVS_DATAPATH
 {
-   PLIST_ENTRY             flowTable;       // Contains OvsFlows.
+   PLIST_ENTRY             flowTable;       // Contains OvsFlows (key index).
+   PLIST_ENTRY             ufidTable;       // Contains OvsFlows (ufid index).
    UINT32                  nFlows;          // Number of entries in flowTable.
 
    // List_Links              queues[64];      // Hash table of queue IDs.

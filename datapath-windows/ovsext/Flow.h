@@ -34,6 +34,9 @@ typedef struct _OvsFlow {
     UINT64 byteCount;
     UINT32 userActionsLen;   // used for flow query
     UINT32 actionBufferLen;  // used for flow reuse
+    ovs_u128   ufid;         // Userspace-assigned unique flow identifier.
+    BOOLEAN    ufidValid;    // TRUE when ufid was supplied on flow creation.
+    LIST_ENTRY ufidEntry;    // In Datapath's ufidTable bucket.
     NL_ATTR actions[1];
 } OvsFlow;
 
@@ -59,6 +62,7 @@ NDIS_STATUS OvsExtractFlow(const NET_BUFFER_LIST *pkt, UINT32 inPort,
                            OvsIPTunnelKey *tunKey);
 OvsFlow* OvsLookupFlow(OVS_DATAPATH *datapath, const OvsFlowKey *key,
                        UINT64 *hash, BOOLEAN hashValid);
+OvsFlow* OvsLookupFlowByUfid(OVS_DATAPATH *datapath, const ovs_u128 *ufid);
 OvsFlow* OvsLookupFlowRecirc(OVS_DATAPATH *datapath,
                              const OvsFlowKey *key,
                              UINT64 *hash);

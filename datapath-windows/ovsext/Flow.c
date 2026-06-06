@@ -52,6 +52,7 @@ static VOID __inline *GetStartAddrNBL(const NET_BUFFER_LIST *_pNB);
 static NTSTATUS _MapNlToFlowPut(POVS_MESSAGE msgIn, PNL_ATTR keyAttr,
                                 PNL_ATTR actionAttr,
                                 PNL_ATTR flowAttrClear,
+                                PNL_ATTR ufidAttr,
                                 OvsFlowPut *mappedFlow);
 static VOID _MapKeyAttrToFlowPut(PNL_ATTR *keyAttrs,
                                  PNL_ATTR *tunnelAttrs,
@@ -104,7 +105,7 @@ UINT16 OvsGetFlowIPL2Offset(const OvsIPTunnelKey *tunKey);
 
 /* For Parsing attributes in FLOW_* commands */
 const NL_POLICY nlFlowPolicy[] = {
-    [OVS_FLOW_ATTR_KEY] = {.type = NL_A_NESTED, .optional = FALSE},
+    [OVS_FLOW_ATTR_KEY]  = {.type = NL_A_NESTED, .optional = TRUE},
     [OVS_FLOW_ATTR_MASK] = {.type = NL_A_NESTED, .optional = TRUE},
     [OVS_FLOW_ATTR_ACTIONS] = {.type = NL_A_NESTED, .optional = TRUE},
     [OVS_FLOW_ATTR_STATS] = {.type = NL_A_UNSPEC,
@@ -113,7 +114,12 @@ const NL_POLICY nlFlowPolicy[] = {
                              .optional = TRUE},
     [OVS_FLOW_ATTR_TCP_FLAGS] = {NL_A_U8, .optional = TRUE},
     [OVS_FLOW_ATTR_USED] = {NL_A_U64, .optional = TRUE},
-    [OVS_FLOW_ATTR_PROBE] = {.type = NL_A_FLAG, .optional = TRUE}
+    [OVS_FLOW_ATTR_PROBE] = {.type = NL_A_FLAG, .optional = TRUE},
+    [OVS_FLOW_ATTR_UFID] = {.type = NL_A_UNSPEC,
+                            .minLen = sizeof(ovs_u128),
+                            .maxLen = sizeof(ovs_u128),
+                            .optional = TRUE},
+    [OVS_FLOW_ATTR_UFID_FLAGS] = {.type = NL_A_U32, .optional = TRUE},
 };
 
 /* For Parsing nested OVS_FLOW_ATTR_KEY attributes. */
@@ -357,9 +363,86 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         }
     }
 
+    /*
+     * UFID-only DEL: delete a flow identified solely by its UFID, without a
+     * flow key.  This matches the Linux datapath behaviour.  GET-by-UFID and
+     * dump UFID echo are not implemented here; userspace computes the UFID
+     * from the key and does not need them for the DEL path.
+     */
+    if (genlMsgHdr->cmd == OVS_FLOW_CMD_DEL &&
+        !flowAttrs[OVS_FLOW_ATTR_KEY] &&
+        flowAttrs[OVS_FLOW_ATTR_UFID]) {
+
+        OVS_DATAPATH *datapath = &usrParamsCtx->switchContext->datapath;
+        OvsFlow *flow;
+        LOCK_STATE_EX dpLockState;
+        ovs_u128 ufid;
+
+        RtlCopyMemory(&ufid, NlAttrGet(flowAttrs[OVS_FLOW_ATTR_UFID]),
+                      sizeof(ufid));
+
+        OvsAcquireDatapathWrite(datapath, &dpLockState, FALSE);
+        flow = OvsLookupFlowByUfid(datapath, &ufid);
+        if (!flow) {
+            OvsReleaseDatapath(datapath, &dpLockState);
+            nlError = NL_ERROR_NOENT;
+            goto done;
+        }
+        /* Capture the stats before RemoveFlow() frees the flow and nulls the
+         * local pointer. */
+        stats.packetCount = flow->packetCount;
+        stats.byteCount   = flow->byteCount;
+        stats.tcpFlags    = flow->tcpFlags;
+        stats.used        = flow->used;
+        RemoveFlow(datapath, &flow);
+        OvsReleaseDatapath(datapath, &dpLockState);
+
+        replyStats.n_packets = stats.packetCount;
+        replyStats.n_bytes   = stats.byteCount;
+
+        NlBufInit(&nlBuf, usrParamsCtx->outputBuffer,
+                  usrParamsCtx->outputLength);
+        ok = NlFillOvsMsg(&nlBuf, nlMsgHdr->nlmsgType, 0,
+                          nlMsgHdr->nlmsgSeq, nlMsgHdr->nlmsgPid,
+                          genlMsgHdr->cmd, OVS_FLOW_VERSION,
+                          ovsHdr->dp_ifindex);
+        if (!ok) {
+            rc = STATUS_INVALID_BUFFER_SIZE;
+            goto done;
+        }
+
+        /* Echo the UFID back; key is not present in this request variant. */
+        if (!NlMsgPutTailUnspec(&nlBuf, OVS_FLOW_ATTR_UFID,
+                                (PCHAR)&ufid, sizeof(ufid))) {
+            OVS_LOG_ERROR("Adding OVS_FLOW_ATTR_UFID attribute failed.");
+            rc = STATUS_INVALID_BUFFER_SIZE;
+            goto done;
+        }
+
+        if (!NlMsgPutTailUnspec(&nlBuf, OVS_FLOW_ATTR_STATS,
+                                (PCHAR)(&replyStats), sizeof(replyStats))) {
+            OVS_LOG_ERROR("Adding OVS_FLOW_ATTR_STATS attribute failed.");
+            rc = STATUS_INVALID_BUFFER_SIZE;
+            goto done;
+        }
+
+        msgOut->nlMsg.nlmsgLen = NLMSG_ALIGN(NlBufSize(&nlBuf));
+        *replyLen = msgOut->nlMsg.nlmsgLen;
+        goto done;
+    }
+
+    /* KEY is required for all non-UFID-only paths. */
+    if (!flowAttrs[OVS_FLOW_ATTR_KEY]) {
+        OVS_LOG_ERROR("OVS_FLOW_ATTR_KEY missing for cmd %d",
+                      genlMsgHdr->cmd);
+        rc = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+
     if ((rc = _MapNlToFlowPut(msgIn, flowAttrs[OVS_FLOW_ATTR_KEY],
                               flowAttrs[OVS_FLOW_ATTR_ACTIONS],
                               flowAttrs[OVS_FLOW_ATTR_CLEAR],
+                              flowAttrs[OVS_FLOW_ATTR_UFID],
                               &mappedFlow))
         != STATUS_SUCCESS) {
         OVS_LOG_ERROR("Conversion to OvsFlowPut failed");
@@ -400,13 +483,15 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         rc = STATUS_SUCCESS;
     }
 
-    /* Append OVS_FLOW_ATTR_KEY attribute. This is need i.e. for flow delete*/
-    if (!NlMsgPutNested(&nlBuf, OVS_FLOW_ATTR_KEY,
-                        NlAttrData(flowAttrs[OVS_FLOW_ATTR_KEY]),
-                        NlAttrGetSize(flowAttrs[OVS_FLOW_ATTR_KEY]))) {
-        OVS_LOG_ERROR("Adding OVS_FLOW_ATTR_KEY attribute failed.");
-        rc = STATUS_INVALID_BUFFER_SIZE;
-        goto done;
+    /* Echo OVS_FLOW_ATTR_KEY back to userspace (e.g. for flow delete). */
+    if (flowAttrs[OVS_FLOW_ATTR_KEY]) {
+        if (!NlMsgPutNested(&nlBuf, OVS_FLOW_ATTR_KEY,
+                            NlAttrData(flowAttrs[OVS_FLOW_ATTR_KEY]),
+                            NlAttrGetSize(flowAttrs[OVS_FLOW_ATTR_KEY]))) {
+            OVS_LOG_ERROR("Adding OVS_FLOW_ATTR_KEY attribute failed.");
+            rc = STATUS_INVALID_BUFFER_SIZE;
+            goto done;
+        }
     }
 
     /* Append OVS_FLOW_ATTR_STATS attribute */
@@ -1431,6 +1516,7 @@ done:
 static NTSTATUS
 _MapNlToFlowPut(POVS_MESSAGE msgIn, PNL_ATTR keyAttr,
                 PNL_ATTR actionAttr, PNL_ATTR flowAttrClear,
+                PNL_ATTR ufidAttr,
                 OvsFlowPut *mappedFlow)
 {
     NTSTATUS rc = STATUS_SUCCESS;
@@ -1438,7 +1524,6 @@ _MapNlToFlowPut(POVS_MESSAGE msgIn, PNL_ATTR keyAttr,
     PGENL_MSG_HDR genlMsgHdr = &(msgIn->genlMsg);
     POVS_HDR ovsHdr = &(msgIn->ovsHdr);
 
-    UINT32 keyAttrOffset = (UINT32)((PCHAR)keyAttr - (PCHAR)nlMsgHdr);
     UINT32 tunnelKeyAttrOffset;
     UINT32 encapOffset = 0;
 
@@ -1446,60 +1531,71 @@ _MapNlToFlowPut(POVS_MESSAGE msgIn, PNL_ATTR keyAttr,
     PNL_ATTR tunnelAttrs[__OVS_TUNNEL_KEY_ATTR_MAX] = {NULL};
     PNL_ATTR encapAttrs[__OVS_KEY_ATTR_MAX] = { NULL };
 
-    /* Get flow keys attributes */
-    if ((NlAttrParseNested(nlMsgHdr, keyAttrOffset, NlAttrLen(keyAttr),
-                           nlFlowKeyPolicy, ARRAY_SIZE(nlFlowKeyPolicy),
-                           keyAttrs, ARRAY_SIZE(keyAttrs)))
-                           != TRUE) {
-        OVS_LOG_ERROR("Key Attr Parsing failed for msg: %p",
-                      nlMsgHdr);
-        rc = STATUS_INVALID_PARAMETER;
-        goto done;
-    }
+    if (keyAttr) {
+        UINT32 keyAttrOffset = (UINT32)((PCHAR)keyAttr - (PCHAR)nlMsgHdr);
 
-    if (keyAttrs[OVS_KEY_ATTR_ENCAP]) {
-        encapOffset = (UINT32)((PCHAR)(keyAttrs[OVS_KEY_ATTR_ENCAP])
-                          - (PCHAR)nlMsgHdr);
-
-        if ((NlAttrParseNested(nlMsgHdr, encapOffset,
-                               NlAttrLen(keyAttrs[OVS_KEY_ATTR_ENCAP]),
-                               nlFlowKeyPolicy,
-                               ARRAY_SIZE(nlFlowKeyPolicy),
-                               encapAttrs, ARRAY_SIZE(encapAttrs)))
+        /* Get flow keys attributes */
+        if ((NlAttrParseNested(nlMsgHdr, keyAttrOffset, NlAttrLen(keyAttr),
+                               nlFlowKeyPolicy, ARRAY_SIZE(nlFlowKeyPolicy),
+                               keyAttrs, ARRAY_SIZE(keyAttrs)))
                                != TRUE) {
-            OVS_LOG_ERROR("Encap Key Attr Parsing failed for msg: %p",
+            OVS_LOG_ERROR("Key Attr Parsing failed for msg: %p",
                           nlMsgHdr);
             rc = STATUS_INVALID_PARAMETER;
             goto done;
         }
-    }
 
-    if (keyAttrs[OVS_KEY_ATTR_TUNNEL]) {
-        tunnelKeyAttrOffset = (UINT32)((PCHAR)
-                              (keyAttrs[OVS_KEY_ATTR_TUNNEL])
+        if (keyAttrs[OVS_KEY_ATTR_ENCAP]) {
+            encapOffset = (UINT32)((PCHAR)(keyAttrs[OVS_KEY_ATTR_ENCAP])
                               - (PCHAR)nlMsgHdr);
 
-        /* Get tunnel keys attributes */
-        if ((NlAttrParseNested(nlMsgHdr, tunnelKeyAttrOffset,
-                               NlAttrLen(keyAttrs[OVS_KEY_ATTR_TUNNEL]),
-                               nlFlowTunnelKeyPolicy,
-                               ARRAY_SIZE(nlFlowTunnelKeyPolicy),
-                               tunnelAttrs, ARRAY_SIZE(tunnelAttrs)))
-                               != TRUE) {
-            OVS_LOG_ERROR("Tunnel key Attr Parsing failed for msg: %p",
-                          nlMsgHdr);
-            rc = STATUS_INVALID_PARAMETER;
-            goto done;
+            if ((NlAttrParseNested(nlMsgHdr, encapOffset,
+                                   NlAttrLen(keyAttrs[OVS_KEY_ATTR_ENCAP]),
+                                   nlFlowKeyPolicy,
+                                   ARRAY_SIZE(nlFlowKeyPolicy),
+                                   encapAttrs, ARRAY_SIZE(encapAttrs)))
+                                   != TRUE) {
+                OVS_LOG_ERROR("Encap Key Attr Parsing failed for msg: %p",
+                              nlMsgHdr);
+                rc = STATUS_INVALID_PARAMETER;
+                goto done;
+            }
+        }
+
+        if (keyAttrs[OVS_KEY_ATTR_TUNNEL]) {
+            tunnelKeyAttrOffset = (UINT32)((PCHAR)
+                                  (keyAttrs[OVS_KEY_ATTR_TUNNEL])
+                                  - (PCHAR)nlMsgHdr);
+
+            /* Get tunnel keys attributes */
+            if ((NlAttrParseNested(nlMsgHdr, tunnelKeyAttrOffset,
+                                   NlAttrLen(keyAttrs[OVS_KEY_ATTR_TUNNEL]),
+                                   nlFlowTunnelKeyPolicy,
+                                   ARRAY_SIZE(nlFlowTunnelKeyPolicy),
+                                   tunnelAttrs, ARRAY_SIZE(tunnelAttrs)))
+                                   != TRUE) {
+                OVS_LOG_ERROR("Tunnel key Attr Parsing failed for msg: %p",
+                              nlMsgHdr);
+                rc = STATUS_INVALID_PARAMETER;
+                goto done;
+            }
+        }
+
+        _MapKeyAttrToFlowPut(keyAttrs, tunnelAttrs,
+                             &(mappedFlow->key));
+        ASSERT(keyAttrs[OVS_KEY_ATTR_IN_PORT]);
+
+        if (encapOffset) {
+            _MapKeyAttrToFlowPut(encapAttrs, tunnelAttrs,
+                                 &(mappedFlow->key));
         }
     }
 
-    _MapKeyAttrToFlowPut(keyAttrs, tunnelAttrs,
-                         &(mappedFlow->key));
-    ASSERT(keyAttrs[OVS_KEY_ATTR_IN_PORT]);
-
-    if (encapOffset) {
-        _MapKeyAttrToFlowPut(encapAttrs, tunnelAttrs,
-                             &(mappedFlow->key));
+    /* Map the UFID if present. */
+    if (ufidAttr) {
+        RtlCopyMemory(&mappedFlow->ufid, NlAttrGet(ufidAttr),
+                      sizeof(mappedFlow->ufid));
+        mappedFlow->ufidPresent = TRUE;
     }
 
     /* Map the action */
@@ -2055,6 +2151,11 @@ OvsDeleteFlowTable(OVS_DATAPATH *datapath)
     OvsFreeMemoryWithTag(datapath->flowTable, OVS_FLOW_POOL_TAG);
     datapath->flowTable = NULL;
 
+    if (datapath->ufidTable != NULL) {
+        OvsFreeMemoryWithTag(datapath->ufidTable, OVS_FLOW_POOL_TAG);
+        datapath->ufidTable = NULL;
+    }
+
     if (datapath->lock == NULL) {
         return NDIS_STATUS_SUCCESS;
     }
@@ -2088,6 +2189,19 @@ OvsAllocateFlowTable(OVS_DATAPATH *datapath,
         bucket = &(datapath->flowTable[i]);
         InitializeListHead(bucket);
     }
+
+    datapath->ufidTable = OvsAllocateMemoryWithTag(
+        OVS_FLOW_TABLE_SIZE * sizeof(LIST_ENTRY), OVS_FLOW_POOL_TAG);
+    if (!datapath->ufidTable) {
+        OvsFreeMemoryWithTag(datapath->flowTable, OVS_FLOW_POOL_TAG);
+        datapath->flowTable = NULL;
+        return NDIS_STATUS_RESOURCES;
+    }
+    for (i = 0; i < OVS_FLOW_TABLE_SIZE; i++) {
+        bucket = &(datapath->ufidTable[i]);
+        InitializeListHead(bucket);
+    }
+
     datapath->lock = NdisAllocateRWLock(switchContext->NdisFilterHandle);
 
     if (!datapath->lock) {
@@ -2723,9 +2837,13 @@ AddFlow(OVS_DATAPATH *datapath, OvsFlow *flow)
      */
     KeMemoryBarrier();
 
-    //KeAcquireSpinLock(&FilterDeviceExtension->NblQueueLock, &oldIrql);
     InsertTailList(head, &flow->ListEntry);
-    //KeReleaseSpinLock(&FilterDeviceExtension->NblQueueLock, oldIrql);
+
+    if (flow->ufidValid) {
+        UINT32 ufidHash = OvsJhashBytes(&flow->ufid, sizeof(flow->ufid), 0);
+        InsertTailList(&datapath->ufidTable[HASH_BUCKET(ufidHash)],
+                       &flow->ufidEntry);
+    }
 
     datapath->nFlows++;
 
@@ -2747,8 +2865,10 @@ RemoveFlow(OVS_DATAPATH *datapath,
 
     ASSERT(datapath->nFlows);
     datapath->nFlows--;
-    // Remove the flow  from queue
     RemoveEntryList(&f->ListEntry);
+    if (f->ufidValid) {
+        RemoveEntryList(&f->ufidEntry);
+    }
     FreeFlow(f);
 }
 
@@ -2827,6 +2947,38 @@ OvsLookupFlow(OVS_DATAPATH *datapath,
         OvsFlow *flow = CONTAINING_RECORD(link, OvsFlow, ListEntry);
 
         if (FlowEqual(flow, key, start, *hash, offset, size)) {
+            return flow;
+        }
+        link = link->Flink;
+    }
+    return NULL;
+}
+
+
+/*
+ * ----------------------------------------------------------------------------
+ * OvsLookupFlowByUfid --
+ *
+ *    Find a flow by its unique flow identifier (UFID).
+ *    Caller must hold the datapath lock (read or write).
+ *    Only called from the control IOCTL path, not the packet fast path.
+ *
+ * Results:
+ *    Flow pointer if found, NULL otherwise.
+ * ----------------------------------------------------------------------------
+ */
+OvsFlow *
+OvsLookupFlowByUfid(OVS_DATAPATH *datapath, const ovs_u128 *ufid)
+{
+    UINT32 hash = OvsJhashBytes(ufid, sizeof(*ufid), 0);
+    PLIST_ENTRY head, link;
+
+    head = &datapath->ufidTable[HASH_BUCKET(hash)];
+    link = head->Flink;
+    while (link != head) {
+        OvsFlow *flow = CONTAINING_RECORD(link, OvsFlow, ufidEntry);
+        if (flow->ufidValid &&
+            RtlEqualMemory(&flow->ufid, ufid, sizeof(*ufid))) {
             return flow;
         }
         link = link->Flink;
@@ -3171,6 +3323,8 @@ OvsPrepareFlow(OvsFlow **flow,
         localFlow->byteCount = 0;
         localFlow->tcpFlags = 0;
         localFlow->hash = hash;
+        localFlow->ufid = put->ufid;
+        localFlow->ufidValid = put->ufidPresent;
     } while(FALSE);
 
     return status;
