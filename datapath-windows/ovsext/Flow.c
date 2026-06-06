@@ -399,17 +399,13 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
             nlError = NL_ERROR_NOENT;
             goto done;
         }
-        /* Capture the stats before RemoveFlow() frees the flow and nulls the
-         * local pointer. */
-        stats.packetCount = flow->packetCount;
-        stats.byteCount   = flow->byteCount;
-        stats.tcpFlags    = flow->tcpFlags;
-        stats.used        = flow->used;
+        /* Capture the reply stats before RemoveFlow() frees the flow and nulls
+         * the local pointer. The reply carries OVS_FLOW_ATTR_STATS only, so just
+         * packet/byte counts are needed (matching the key-based delete reply). */
+        replyStats.n_packets = flow->packetCount;
+        replyStats.n_bytes   = flow->byteCount;
         RemoveFlow(datapath, &flow);
         OvsReleaseDatapath(datapath, &dpLockState);
-
-        replyStats.n_packets = stats.packetCount;
-        replyStats.n_bytes   = stats.byteCount;
 
         NlBufInit(&nlBuf, usrParamsCtx->outputBuffer,
                   usrParamsCtx->outputLength);
