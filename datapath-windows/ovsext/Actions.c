@@ -2315,14 +2315,16 @@ OvsExecuteDecTtl(OvsForwardingContext *ovsFwdCtx,
             return NDIS_STATUS_SUCCESS;
         }
         /*
-         * TTL is the high byte of the {TTL, protocol} 16-bit word, so the
-         * incremental checksum delta must shift it into the high byte (mirrors
-         * Linux set_ip_ttl: csum_replace2(htons(ttl << 8))). Passing the bare
-         * byte value would update the checksum at the wrong word position.
+         * ChecksumUpdate16() here takes the field value as read from the IP
+         * header in place, not the network-order 16-bit word that Linux's
+         * csum_replace2() expects -- so pass the raw TTL byte, matching the
+         * IPv4 TTL update in OvsUpdateIPv4Header(). Verified against a full
+         * header-checksum recompute that the bare byte (not 'ttl << 8') is the
+         * correct delta for this routine.
          */
-        oldTtl = (UINT16)(ipHdr->ttl << 8);
+        oldTtl = ipHdr->ttl & 0xff;
         ipHdr->ttl--;
-        newTtl = (UINT16)(ipHdr->ttl << 8);
+        newTtl = ipHdr->ttl & 0xff;
         if (ipHdr->check != 0) {
             ipHdr->check = ChecksumUpdate16(ipHdr->check, oldTtl, newTtl);
         }
@@ -2710,14 +2712,18 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
                 (const struct ovs_action_add_mpls *)NlAttrGet((const PNL_ATTR)a);
             struct ovs_action_push_mpls pushMpls;
 
-            if (addMpls->tun_flags & OVS_MPLS_L3_TUNNEL_FLAG_MASK) {
+            if (!(addMpls->tun_flags & OVS_MPLS_L3_TUNNEL_FLAG_MASK)) {
                 /*
-                 * The L3 (mac_len == 0) tunnel facet inserts the LSE at the
-                 * start of the L3 header with no Ethernet header in front; it
-                 * needs L3-port / packet_type support not present here.
+                 * Flag clear inserts the LSE at the very start of the packet --
+                 * an L3-only packet with no Ethernet header (mac_len == 0) --
+                 * which needs L3-port / packet_type support not present here.
+                 * The set flag (handled below) is the common over-Ethernet case
+                 * OVN actually emits. Fail closed rather than forward the packet
+                 * with the action silently skipped.
                  */
                 status = NDIS_STATUS_NOT_SUPPORTED;
-                break;
+                dropReason = L"OVS-add_mpls L3 facet not supported";
+                goto dropit;
             }
 
             if (ovsFwdCtx.destPortsSizeOut > 0 || ovsFwdCtx.tunnelTxNic != NULL
@@ -2730,9 +2736,10 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
             }
 
             /*
-             * The over-Ethernet facet is identical to push_mpls: insert one LSE
-             * in front of the L3 header. ovs_action_add_mpls carries the same
-             * mpls_lse/mpls_ethertype (the L3 tun_flags facet is handled above).
+             * OVS_MPLS_L3_TUNNEL_FLAG_MASK set: insert one LSE at the start of
+             * the L3 header, after the existing Ethernet header -- identical to
+             * push_mpls. ovs_action_add_mpls carries the same mpls_lse/
+             * mpls_ethertype.
              */
             pushMpls.mpls_lse = addMpls->mpls_lse;
             pushMpls.mpls_ethertype = addMpls->mpls_ethertype;
@@ -2811,14 +2818,20 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
 
         case OVS_ACTION_ATTR_DROP:
             /*
-             * Explicit, reason-carrying drop. The u32 xlate_error is not yet
-             * surfaced to userspace. OVN emits 'drop' as the sole action in a
-             * set, so abandoning the rest of the loop via dropit is correct;
-             * the assumption is that no OVS_ACTION_ATTR_OUTPUT precedes it in
-             * the same set (a preceding output's accumulated destination ports
-             * would be discarded by dropit without being flushed, as with every
-             * other mid-loop goto dropit).
+             * Explicit, reason-carrying drop (the u32 xlate_error is not yet
+             * surfaced to userspace). Linux emits outputs eagerly, so any
+             * OUTPUT earlier in the same list has already been sent; flush the
+             * accumulated destinations here before dropping so a list of
+             * output(s) followed by drop behaves the same way.
              */
+            if (ovsFwdCtx.destPortsSizeOut > 0 || ovsFwdCtx.tunnelTxNic != NULL
+                || ovsFwdCtx.tunnelRxNic != NULL) {
+                status = OvsOutputBeforeSetAction(&ovsFwdCtx);
+                if (status != NDIS_STATUS_SUCCESS) {
+                    dropReason = L"OVS-adding destination failed";
+                    goto dropit;
+                }
+            }
             ovsActionStats.explicitDrop++;
             dropReason = L"OVS-explicit drop action";
             goto dropit;
