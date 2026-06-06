@@ -588,7 +588,7 @@ mock_netdev_get(struct mock_kernel *m, const void *in OVS_UNUSED,
 
     ofpbuf_use_stub(&r, stub, sizeof stub);
     nl_msg_put_genlmsghdr(&r, 0, OVS_WIN_NL_NETDEV_FAMILY_ID, 0,
-                          OVS_WIN_NETDEV_CMD_GET, 1);
+                          OVS_WIN_NETDEV_CMD_GET, OVS_WIN_NETDEV_VERSION);
     ovs_header = ofpbuf_put_uninit(&r, sizeof *ovs_header);
     ovs_header->dp_ifindex = MOCK_DP_IFINDEX;
     nl_msg_put_u32(&r, OVS_WIN_NETDEV_ATTR_PORT_NO, m->nd_port_no);
@@ -1770,6 +1770,9 @@ test_netdev_refresh(struct mock_kernel *m)
     m->nd_mtu = 1500;
     m->nd_flags = OVS_WIN_NETDEV_IFF_UP;
 
+    /* Jump past the 1s refresh gate so this run() executes regardless of any
+     * earlier test having armed netdev_windows_next_refresh. */
+    timeval_warp(2000);
     netdev_windows_class.run(&netdev_windows_class);
 
     CHECK(netdev_get_etheraddr(netdev, &got) == 0 && eth_addr_equals(got, mac_b));
@@ -1805,29 +1808,31 @@ static const struct eth_addr ndc_mac_b = { .ea = { 0xbb, 0xbb, 0xbb, 0xbb,
                                                    0xbb, 0xbb } };
 static atomic_bool ndc_stop;
 static atomic_bool ndc_torn;
-static atomic_uint64_t ndc_reads;
+static atomic_bool ndc_saw_a;       /* reader observed MAC A while refreshing. */
+static atomic_bool ndc_saw_b;       /* reader observed MAC B while refreshing. */
 
 static void *
 ndc_reader(void *arg OVS_UNUSED)
 {
-    uint64_t reads = 0;
     bool stop = false;
 
     while (!stop) {
         struct eth_addr got;
         int mtu;
 
-        if (netdev_get_etheraddr(ndc_netdev, &got) == 0
-            && !eth_addr_equals(got, ndc_mac_a)
-            && !eth_addr_equals(got, ndc_mac_b)) {
-            atomic_store_relaxed(&ndc_torn, true);
+        if (netdev_get_etheraddr(ndc_netdev, &got) == 0) {
+            if (eth_addr_equals(got, ndc_mac_a)) {
+                atomic_store_relaxed(&ndc_saw_a, true);
+            } else if (eth_addr_equals(got, ndc_mac_b)) {
+                atomic_store_relaxed(&ndc_saw_b, true);
+            } else {
+                atomic_store_relaxed(&ndc_torn, true);
+            }
         }
         netdev_get_mtu(ndc_netdev, &mtu);
         netdev_get_carrier(ndc_netdev);
-        reads++;
         atomic_read_relaxed(&ndc_stop, &stop);
     }
-    atomic_store_relaxed(&ndc_reads, reads);
     return NULL;
 }
 
@@ -1835,8 +1840,7 @@ static void
 test_netdev_refresh_concurrent(struct mock_kernel *m)
 {
     pthread_t reader;
-    uint64_t reads;
-    bool torn;
+    bool torn, saw_a, saw_b;
     int i;
 
     printf("test_netdev_refresh_concurrent:\n");
@@ -1852,7 +1856,8 @@ test_netdev_refresh_concurrent(struct mock_kernel *m)
 
     atomic_init(&ndc_stop, false);
     atomic_init(&ndc_torn, false);
-    atomic_init(&ndc_reads, 0);
+    atomic_init(&ndc_saw_a, false);
+    atomic_init(&ndc_saw_b, false);
     reader = ovs_thread_create("nd-reader", ndc_reader, NULL);
 
     for (i = 0; i < NDC_REFRESH_ITERS; i++) {
@@ -1866,9 +1871,12 @@ test_netdev_refresh_concurrent(struct mock_kernel *m)
     xpthread_join(reader, NULL);
 
     atomic_read_relaxed(&ndc_torn, &torn);
-    atomic_read_relaxed(&ndc_reads, &reads);
+    atomic_read_relaxed(&ndc_saw_a, &saw_a);
+    atomic_read_relaxed(&ndc_saw_b, &saw_b);
     CHECK(!torn);            /* the reader never saw a partially-written MAC. */
-    CHECK(reads > 0);        /* the reader actually ran alongside the refresh. */
+    /* The reader observed BOTH alternating MACs, proving it actually overlapped
+     * the refresh/commit cycles (not merely ran before or after them). */
+    CHECK(saw_a && saw_b);
 
     /* The last iteration set MAC B; if it committed, the gate was really
      * defeated and run() executed every iteration (not skipped as a no-op). */
