@@ -19,6 +19,7 @@
 #include "Util.h"
 #include "Jhash.h"
 #include "Flow.h"
+#include "Recirc.h"
 #include "PacketParser.h"
 #include "Datapath.h"
 #include "Geneve.h"
@@ -3349,8 +3350,9 @@ OvsActionIsSupported(UINT32 type)
 static BOOLEAN
 OvsProbeActionsSupported(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
 {
-    /* Bound the walk at the executor's deferred-action nesting limit. */
-    const UINT32 maxDepth = 10;
+    /* Bound the walk at the executor's deferred-action nesting limit so the
+     * probe cannot admit nesting deeper than the executor can run. */
+    const UINT32 maxDepth = DEFERRED_ACTION_QUEUE_SIZE;
     PNL_ATTR a;
     INT rem;
 

@@ -2251,6 +2251,7 @@ OvsExecuteCheckPktLen(OvsForwardingContext *ovsFwdCtx,
     PNL_ATTR a = NULL;
     INT rem = 0;
     UINT16 pktLen = 0;
+    BOOLEAN havePktLen = FALSE;
     PNL_ATTR actionsIfGreater = NULL;
     PNL_ATTR actionsIfLessEqual = NULL;
     PNL_ATTR selected = NULL;
@@ -2261,6 +2262,7 @@ OvsExecuteCheckPktLen(OvsForwardingContext *ovsFwdCtx,
         switch (NlAttrType(a)) {
         case OVS_CHECK_PKT_LEN_ATTR_PKT_LEN:
             pktLen = NlAttrGetU16(a);
+            havePktLen = TRUE;
             break;
         case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER:
             actionsIfGreater = a;
@@ -2269,6 +2271,15 @@ OvsExecuteCheckPktLen(OvsForwardingContext *ovsFwdCtx,
             actionsIfLessEqual = a;
             break;
         }
+    }
+
+    if (!havePktLen) {
+        /*
+         * PKT_LEN is mandatory. A missing attribute is a malformed action;
+         * fail it rather than defaulting the threshold to 0 and silently
+         * taking the 'greater' branch for every non-empty packet.
+         */
+        return NDIS_STATUS_NOT_SUPPORTED;
     }
 
     len = NET_BUFFER_DATA_LENGTH(NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl));
