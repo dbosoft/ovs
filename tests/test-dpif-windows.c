@@ -661,6 +661,8 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
          * current kernel, enforce its nlFlowPolicy: OVS_FLOW_ATTR_KEY is
          * mandatory and there is no OVS_FLOW_ATTR_UFID lookup, so a UFID-only
          * (terse) request is rejected with EINVAL. */
+        m->flow_req_had_key = false;
+        m->flow_req_had_ufid = false;
         if (in_len >= hdrlen) {
             const struct nlattr *attrs =
                 ALIGNED_CAST(const struct nlattr *, (const char *) in + hdrlen);
