@@ -2314,9 +2314,15 @@ OvsExecuteDecTtl(OvsForwardingContext *ovsFwdCtx,
             *exception = TRUE;
             return NDIS_STATUS_SUCCESS;
         }
-        oldTtl = (ipHdr->ttl) & 0xff;
+        /*
+         * TTL is the high byte of the {TTL, protocol} 16-bit word, so the
+         * incremental checksum delta must shift it into the high byte (mirrors
+         * Linux set_ip_ttl: csum_replace2(htons(ttl << 8))). Passing the bare
+         * byte value would update the checksum at the wrong word position.
+         */
+        oldTtl = (UINT16)(ipHdr->ttl << 8);
         ipHdr->ttl--;
-        newTtl = (ipHdr->ttl) & 0xff;
+        newTtl = (UINT16)(ipHdr->ttl << 8);
         if (ipHdr->check != 0) {
             ipHdr->check = ChecksumUpdate16(ipHdr->check, oldTtl, newTtl);
         }
@@ -2777,19 +2783,24 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
             if (exception) {
                 /*
                  * TTL/hop-limit expired (<= 1): the packet is not forwarded.
-                 * Run the embedded OVS_DEC_TTL_ATTR_ACTION list -- for OVN a
-                 * single userspace/controller action -- on the current packet,
-                 * then drop the original via dropit.
+                 * Run the whole embedded OVS_DEC_TTL_ATTR_ACTION list (for OVN
+                 * a controller/userspace notification) on a copy via the
+                 * deferred-action queue -- like clone -- then drop the original
+                 * via dropit. This runs the full list (not just a single
+                 * userspace action) and balances the copy on every path.
                  */
                 PNL_ATTR exList = NlAttrFindNested((const PNL_ATTR)a,
                                                    OVS_DEC_TTL_ATTR_ACTION);
-                if (exList) {
-                    PNL_ATTR first = (PNL_ATTR)NlAttrData(exList);
-                    INT exRem = NlAttrGetSize(exList);
-                    if (exRem &&
-                        NlAttrType(first) == OVS_ACTION_ATTR_USERSPACE &&
-                        NlAttrIsLast(first, exRem)) {
-                        OvsOutputUserspaceAction(&ovsFwdCtx, key, first);
+                if (exList && NlAttrGetSize(exList)) {
+                    PNET_BUFFER_LIST exNbl =
+                        OvsPartialCopyNBL(ovsFwdCtx.switchContext,
+                                          ovsFwdCtx.curNbl, 0, 0, TRUE);
+                    if (exNbl == NULL) {
+                        ovsActionStats.noCopiedNbl++;
+                    } else if (!OvsAddDeferredActions(exNbl, key,
+                                                      &ovsFwdCtx.layers,
+                                                      exList)) {
+                        OvsCompleteNBL(ovsFwdCtx.switchContext, exNbl, TRUE);
                     }
                 }
                 dropReason = L"OVS-dec_ttl ttl expired";
