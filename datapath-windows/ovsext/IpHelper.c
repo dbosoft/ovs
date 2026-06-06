@@ -446,20 +446,26 @@ OvsGetRoute(SOCKADDR_INET *destinationAddress,
             OvsConvertWcharToAnsiStr(interfaceName, len, ansiIfname, 256);
             OVS_LOG_INFO("the found interface name is %s", ansiIfname);
 #endif
-            if (gOvsSwitchContext != NULL && NT_SUCCESS(status)) {
-                NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock,
-                    &lockState, 0);
-                *vport = OvsFindVportByHvNameW(gOvsSwitchContext,
-                                               interfaceName,
-                                               len);
+            if (NT_SUCCESS(status)) {
+                /* Take a reference on the default datapath instead of reading
+                 * the gOvsSwitchContext global bare: this runs on the IpHelper
+                 * worker thread, which can race switch detach. The reference
+                 * keeps the context (and its dispatchLock) alive for the lookup
+                 * and is counted by the teardown drain in OvsDeleteSwitch. */
+                POVS_SWITCH_CONTEXT dpCtx = OvsAcquireSwitchContext();
+                if (dpCtx != NULL) {
+                    NdisAcquireRWLockRead(dpCtx->dispatchLock, &lockState, 0);
+                    *vport = OvsFindVportByHvNameW(dpCtx, interfaceName, len);
 #ifdef DBG
-                if (*vport) {
-                    OVS_LOG_INFO("match the ovs port ovsName: %s", (*vport)->ovsName);
-                } else {
-                    OVS_LOG_INFO("not get the ovs port");
-                }
+                    if (*vport) {
+                        OVS_LOG_INFO("match the ovs port ovsName: %s", (*vport)->ovsName);
+                    } else {
+                        OVS_LOG_INFO("not get the ovs port");
+                    }
 #endif
-                NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
+                    NdisReleaseRWLock(dpCtx->dispatchLock, &lockState);
+                    OvsReleaseSwitchContext(dpCtx);
+                }
             }
         }
         ExReleaseResourceLite(&crtInstance->lock);
@@ -593,7 +599,7 @@ OvsUpdateIpInterfaceNotification(PMIB_IPINTERFACE_ROW ipRow)
              * Update the IP Interface Row
              */
             RtlCopyMemory(&instance->internalIPRow, ipRow,
-                          sizeof(PMIB_IPINTERFACE_ROW));
+                          sizeof(*ipRow));
             instance->isIpConfigured = TRUE;
 
             OVS_LOG_INFO("IP Interface with NetLuidIndex: %d, type: %d is %s",
@@ -657,11 +663,17 @@ OvsAddIpInterfaceNotification(PMIB_IPINTERFACE_ROW ipRow)
         status = ConvertInterfaceLuidToAlias(&ipRow->InterfaceLuid,
                                              interfaceName,
                                              IF_MAX_STRING_SIZE + 1);
-        if (gOvsSwitchContext == NULL || !NT_SUCCESS(status)) {
+        /* Reference the default datapath rather than reading gOvsSwitchContext
+         * bare: this runs on the IpHelper worker thread and can race detach. */
+        POVS_SWITCH_CONTEXT dpCtx = OvsAcquireSwitchContext();
+        if (dpCtx == NULL || !NT_SUCCESS(status)) {
+            if (dpCtx != NULL) {
+                OvsReleaseSwitchContext(dpCtx);
+            }
             goto error;
         }
-        NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState, 0);
-        POVS_VPORT_ENTRY vport = OvsFindVportByHvNameW(gOvsSwitchContext,
+        NdisAcquireRWLockRead(dpCtx->dispatchLock, &lockState, 0);
+        POVS_VPORT_ENTRY vport = OvsFindVportByHvNameW(dpCtx,
                                                        interfaceName,
                                                        sizeof(WCHAR) *
                                                        wcslen(interfaceName));
@@ -672,7 +684,8 @@ OvsAddIpInterfaceNotification(PMIB_IPINTERFACE_ROW ipRow)
                           sizeof(instance->netCfgId));
             instance->portNo = vport->portNo;
         }
-        NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
+        NdisReleaseRWLock(dpCtx->dispatchLock, &lockState);
+        OvsReleaseSwitchContext(dpCtx);
         RtlZeroMemory(&instance->internalRow, sizeof(MIB_IF_ROW2));
         RtlZeroMemory(&instance->internalIPRow, sizeof(MIB_IPINTERFACE_ROW));
         status = OvsGetIfEntry(&instance->netCfgId,
@@ -1970,6 +1983,12 @@ OvsStartIpHelper(PVOID data)
                     OvsCleanupFwdTable();
                 }
                 ExReleaseResourceLite(&ovsInstanceListLock);
+                /* portNo/netCfgInstanceId were copied to locals above, so the
+                 * request is done. Free it and break: without this break the
+                 * ADAPTER_DOWN request falls through into OvsHandleFwdRequest
+                 * and is reinterpreted as a (mistyped) forwarding request. */
+                OvsFreeMemoryWithTag(req, OVS_IPHELPER_POOL_TAG);
+                break;
             }
             case OVS_IP_HELPER_FWD_REQUEST:
                 OvsHandleFwdRequest(req);
