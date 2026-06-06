@@ -87,7 +87,12 @@ static NTSTATUS OvsDoDumpFlows(POVS_SWITCH_CONTEXT switchContext,
                                OvsFlowDumpOutput *dumpOutput,
                                UINT32 *replyLen);
 static NTSTATUS OvsProbeSupportedFeature(POVS_MESSAGE msgIn,
-                                         PNL_ATTR keyAttr);
+                                         PNL_ATTR keyAttr,
+                                         PNL_ATTR actionAttr);
+static BOOLEAN OvsActionIsSupported(UINT32 type);
+static BOOLEAN OvsProbeActionsSupported(const PNL_ATTR actions,
+                                        INT actionsLen,
+                                        UINT32 depth);
 UINT16 OvsGetFlowIPL2Offset(const OvsIPTunnelKey *tunKey);
 
 #define OVS_FLOW_TABLE_SIZE 2048
@@ -343,7 +348,8 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     }
 
     if (flowAttrs[OVS_FLOW_ATTR_PROBE]) {
-        rc = OvsProbeSupportedFeature(msgIn, flowAttrs[OVS_FLOW_ATTR_KEY]);
+        rc = OvsProbeSupportedFeature(msgIn, flowAttrs[OVS_FLOW_ATTR_KEY],
+                                      flowAttrs[OVS_FLOW_ATTR_ACTIONS]);
         if (rc != STATUS_SUCCESS) {
             nlError = NlMapStatusToNlErr(rc);
             goto done;
@@ -3287,8 +3293,134 @@ OvsTunKeyAttrSize(void)
 
 /*
  *----------------------------------------------------------------------------
+ *  OvsActionIsSupported --
+ *    Returns TRUE iff 'type' is an action the executor (OvsDoExecuteActions)
+ *    actually runs. This MUST stay in lockstep with the OvsDoExecuteActions
+ *    switch: admitting an action the executor does not handle turns a probe
+ *    into a false-positive (ofproto would emit an action the kernel silently
+ *    drops).
+ *
+ *    Admission is at action-type granularity. OVS_ACTION_ATTR_ADD_MPLS is the
+ *    one type the executor supports only partially -- the over-Ethernet facet,
+ *    not the L3-only one -- yet it is admitted here because ofproto's add_mpls
+ *    probe sends a zeroed (L3/flag-clear) action: rejecting it would report the
+ *    whole action unsupported and OVN would never emit add_mpls, including the
+ *    over-Ethernet form the executor does run. The unsupported L3 facet fails
+ *    closed at execution time instead.
+ *----------------------------------------------------------------------------
+ */
+static BOOLEAN
+OvsActionIsSupported(UINT32 type)
+{
+    switch (type) {
+    case OVS_ACTION_ATTR_OUTPUT:
+    case OVS_ACTION_ATTR_PUSH_VLAN:
+    case OVS_ACTION_ATTR_POP_VLAN:
+    case OVS_ACTION_ATTR_PUSH_MPLS:
+    case OVS_ACTION_ATTR_POP_MPLS:
+    case OVS_ACTION_ATTR_ADD_MPLS:
+    case OVS_ACTION_ATTR_HASH:
+    case OVS_ACTION_ATTR_CT:
+    case OVS_ACTION_ATTR_CT_CLEAR:
+    case OVS_ACTION_ATTR_RECIRC:
+    case OVS_ACTION_ATTR_USERSPACE:
+    case OVS_ACTION_ATTR_SET:
+    case OVS_ACTION_ATTR_METER:
+    case OVS_ACTION_ATTR_SAMPLE:
+    case OVS_ACTION_ATTR_CHECK_PKT_LEN:
+    case OVS_ACTION_ATTR_CLONE:
+    case OVS_ACTION_ATTR_DEC_TTL:
+    case OVS_ACTION_ATTR_DROP:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+/*
+ *----------------------------------------------------------------------------
+ *  OvsProbeActionsSupported --
+ *    Walks a probe flow's action list and returns TRUE iff every action is one
+ *    the executor runs, recursing into the nested action lists of clone /
+ *    check_pkt_len / sample / dec_ttl. Recursion is bounded by 'depth' to keep
+ *    a crafted probe from exhausting the stack.
+ *----------------------------------------------------------------------------
+ */
+static BOOLEAN
+OvsProbeActionsSupported(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
+{
+    /* Bound the walk at the executor's deferred-action nesting limit. */
+    const UINT32 maxDepth = 10;
+    PNL_ATTR a;
+    INT rem;
+
+    if (depth >= maxDepth) {
+        return FALSE;
+    }
+
+    NL_ATTR_FOR_EACH(a, rem, actions, actionsLen) {
+        UINT32 type = NlAttrType(a);
+
+        if (!OvsActionIsSupported(type)) {
+            return FALSE;
+        }
+
+        switch (type) {
+        case OVS_ACTION_ATTR_CLONE:
+            if (!OvsProbeActionsSupported(NlAttrData(a), NlAttrGetSize(a),
+                                          depth + 1)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_SAMPLE: {
+            const PNL_ATTR nested =
+                NlAttrFindNested(a, OVS_SAMPLE_ATTR_ACTIONS);
+            if (nested &&
+                !OvsProbeActionsSupported(NlAttrData(nested),
+                                          NlAttrGetSize(nested), depth + 1)) {
+                return FALSE;
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_CHECK_PKT_LEN: {
+            const PNL_ATTR gtr =
+                NlAttrFindNested(a, OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER);
+            const PNL_ATTR leq =
+                NlAttrFindNested(a, OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_LESS_EQUAL);
+            if (gtr &&
+                !OvsProbeActionsSupported(NlAttrData(gtr),
+                                          NlAttrGetSize(gtr), depth + 1)) {
+                return FALSE;
+            }
+            if (leq &&
+                !OvsProbeActionsSupported(NlAttrData(leq),
+                                          NlAttrGetSize(leq), depth + 1)) {
+                return FALSE;
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_DEC_TTL: {
+            const PNL_ATTR nested =
+                NlAttrFindNested(a, OVS_DEC_TTL_ATTR_ACTION);
+            if (nested &&
+                !OvsProbeActionsSupported(NlAttrData(nested),
+                                          NlAttrGetSize(nested), depth + 1)) {
+                return FALSE;
+            }
+            break;
+        }
+        }
+    }
+
+    return TRUE;
+}
+
+/*
+ *----------------------------------------------------------------------------
  *  OvsProbeSupportedFeature --
- *    Verifies if the probed feature is supported.
+ *    Verifies if the probed feature is supported. A probe either carries a
+ *    feature in its key (handled by the key branches below) or in its actions
+ *    (handled by the action branch once no key feature matched).
  *
  * Results:
  *   STATUS_SUCCESS if the probed feature is supported.
@@ -3296,7 +3428,8 @@ OvsTunKeyAttrSize(void)
  */
 static NTSTATUS
 OvsProbeSupportedFeature(POVS_MESSAGE msgIn,
-                         PNL_ATTR keyAttr)
+                         PNL_ATTR keyAttr,
+                         PNL_ATTR actionAttr)
 {
     NTSTATUS status = STATUS_SUCCESS;
     PNL_MSG_HDR nlMsgHdr = &(msgIn->nlMsg);
@@ -3393,6 +3526,18 @@ OvsProbeSupportedFeature(POVS_MESSAGE msgIn,
         if (!ct_tuple_ipv6) {
             OVS_LOG_ERROR("Invalid ct_tuple_ipv6.");
             status = STATUS_INVALID_PARAMETER;
+        }
+    } else if (actionAttr) {
+        /*
+         * No key feature matched: this is an action-based probe. Admit it iff
+         * every action (recursing into nested clone/check_pkt_len/sample/
+         * dec_ttl lists) is one the executor runs. ofproto probes action
+         * features (ct_clear, drop, check_pkt_len, add_mpls, sample nesting,
+         * clone) this way -- via flow_put + read-back -- not just dpif_execute.
+         */
+        if (!OvsProbeActionsSupported(NlAttrData(actionAttr),
+                                      NlAttrGetSize(actionAttr), 0)) {
+            status = STATUS_NOT_SUPPORTED;
         }
     } else {
         OVS_LOG_ERROR("Feature not supported.");
