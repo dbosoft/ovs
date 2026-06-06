@@ -56,6 +56,14 @@ POVS_SWITCH_CONTEXT gOvsDatapaths[OVS_MAX_DATAPATHS];
 NDIS_SPIN_LOCK     gOvsDatapathLock;
 
 /*
+ * Upper bound (milliseconds) that OvsDeleteSwitch waits for in-flight switch
+ * references to drain before tearing down the vport lists. References are all
+ * per-operation and bounded, so the drain normally completes well within this;
+ * the cap only prevents a wedged accessor from hanging driver teardown.
+ */
+#define OVS_SWITCH_TEARDOWN_DRAIN_MAX_MS 10000
+
+/*
  * The upcall pid hash maps a globally-unique handle pid to its open instance.
  * Pids are allocated from a single driver-wide counter, so the hash is a
  * driver-global resource (lifetime = driver load), not per-switch: this keeps
@@ -250,8 +258,36 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
     if (switchContext)
     {
         dpNo = switchContext->dpNo;
-        OvsClearAllSwitchVports(switchContext);
+
+        /*
+         * Remove the switch from the datapath registry FIRST, so no new path
+         * (userspace IOCTL lookup, IpHelper route walk, WFP tunnel classify)
+         * can reach it once teardown begins. Then wait for any in-flight
+         * reference holders to drain back to the owning baseline (refCount == 1)
+         * before tearing down the vport lists: every cross-thread accessor takes
+         * a transient reference (OvsAcquireSwitchContext / OvsAcquireDatapathBy*),
+         * so refCount == 1 means nobody else is walking the lists, which makes
+         * the lock-free OvsClearAllSwitchVports safe. All such references are
+         * per-operation (released before any IRP is pended), so this terminates;
+         * the bound is a backstop against a wedged accessor (logged, not hung).
+         */
         OvsUnregisterDatapath(switchContext);
+
+        ULONG drainMs = 0;
+        KeMemoryBarrier();
+        while (switchContext->refCount > 1 &&
+               drainMs < OVS_SWITCH_TEARDOWN_DRAIN_MAX_MS) {
+            NdisMSleep(1000);  /* 1 ms */
+            drainMs++;
+            KeMemoryBarrier();
+        }
+        if (switchContext->refCount > 1) {
+            OVS_LOG_WARN("Switch %p teardown proceeding with %d reference(s) "
+                         "still held after %u ms", switchContext,
+                         switchContext->refCount - 1, drainMs);
+        }
+
+        OvsClearAllSwitchVports(switchContext);
         OvsUninitSwitchContext(switchContext);
     }
     OVS_LOG_TRACE("Exit: deleted switch %p  dpNo: %d", switchContext, dpNo);
