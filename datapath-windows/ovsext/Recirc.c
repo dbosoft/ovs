@@ -322,13 +322,22 @@ OvsProcessDeferredActions(POVS_SWITCH_CONTEXT switchContext,
         layersDeferred = &(deferredAction->layers);
 
         if (deferredAction->actions) {
+            /*
+             * 'actions' holds the nested action-list container (e.g. a sample/
+             * clone/check_pkt_len sub-list). Execute the whole list: its data is
+             * the first sub-action and its size is the full list length, matching
+             * the netlink contract (cf. Linux odp_execute_actions(nl_attr_get(a),
+             * nl_attr_get_size(a))). Passing the container attr itself would parse
+             * its header as an action and drop every action after the first.
+             */
             status = OvsDoExecuteActions(switchContext,
                                          completionList,
                                          deferredAction->nbl,
                                          portNo,
                                          sendFlags,
                                          &deferredAction->key, NULL,
-                                         layersDeferred, deferredAction->actions,
+                                         layersDeferred,
+                                         NlAttrData(deferredAction->actions),
                                          NlAttrGetSize(deferredAction->actions));
         } else {
             status = OvsDoRecirc(switchContext,

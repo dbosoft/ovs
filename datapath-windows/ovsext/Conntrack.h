@@ -182,6 +182,7 @@ NTSTATUS OvsInitConntrack(NDIS_HANDLE ndisFilterHandle);
 NDIS_STATUS OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                                       OvsFlowKey *key,
                                       const PNL_ATTR a);
+VOID OvsCtClearFlowKey(OvsFlowKey *key);
 BOOLEAN OvsConntrackValidateTcpPacket(const TCPHdr *tcp);
 BOOLEAN OvsConntrackValidateIcmpPacket(const ICMPHdr *icmp);
 BOOLEAN OvsConntrackValidateIcmp6Packet(const ICMPHdr *icmp);

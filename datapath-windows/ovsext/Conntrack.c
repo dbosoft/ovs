@@ -258,6 +258,22 @@ OvsCtUpdateFlowKey(struct OvsFlowKey *key,
 
 /*
  *----------------------------------------------------------------------------
+ * OvsCtClearFlowKey
+ *     Drops all conntrack-derived metadata from the flow key, including the
+ *     OVS_CS_F_TRACKED bit, so the rest of the pipeline treats the packet as
+ *     untracked. The Windows flow key holds no conntrack-object reference, so
+ *     zeroing the whole 'ct' sub-struct is a complete clear. Unlike
+ *     OvsCtUpdateFlowKey it is a plain extern function (called from Actions.c).
+ *----------------------------------------------------------------------------
+ */
+VOID
+OvsCtClearFlowKey(OvsFlowKey *key)
+{
+    memset(&key->ct, 0, sizeof key->ct);
+}
+
+/*
+ *----------------------------------------------------------------------------
  * OvsPostCtEventEntry
  *     Assumes ct entry lock is acquired
  *     XXX Refactor OvsPostCtEvent() as it does not require ct entry lock.
