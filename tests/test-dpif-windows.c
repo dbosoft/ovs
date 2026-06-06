@@ -127,9 +127,6 @@ struct mock_kernel {
     enum flow_reply flow_reply;
     struct mock_record flow_echo;
     struct mock_record flow_bad;
-    bool flow_require_key;      /* Model ovsext nlFlowPolicy: a flow command
-                                 * without OVS_FLOW_ATTR_KEY is rejected EINVAL
-                                 * (the current kernel has no UFID lookup). */
     bool flow_req_had_key;      /* Last flow request carried OVS_FLOW_ATTR_KEY. */
     bool flow_req_had_ufid;     /* Last flow request carried OVS_FLOW_ATTR_UFID. */
 
@@ -657,10 +654,9 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
     case OVS_WIN_NL_FLOW_FAMILY_ID: {
         size_t hdrlen = NLMSG_HDRLEN + GENL_HDRLEN + sizeof(struct ovs_header);
 
-        /* Record what the provider put on the wire and, when modelling the
-         * current kernel, enforce its nlFlowPolicy: OVS_FLOW_ATTR_KEY is
-         * mandatory and there is no OVS_FLOW_ATTR_UFID lookup, so a UFID-only
-         * (terse) request is rejected with EINVAL. */
+        /* Record which identifiers the provider put on the wire, so tests can
+         * assert the FLOW request contract (e.g. a terse delete carries a UFID
+         * and omits the key). */
         m->flow_req_had_key = false;
         m->flow_req_had_ufid = false;
         if (in_len >= hdrlen) {
@@ -671,9 +667,6 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
                 nl_attr_find__(attrs, alen, OVS_FLOW_ATTR_KEY) != NULL;
             m->flow_req_had_ufid =
                 nl_attr_find__(attrs, alen, OVS_FLOW_ATTR_UFID) != NULL;
-        }
-        if (m->flow_require_key && !m->flow_req_had_key) {
-            return reply_nlmsgerr(EINVAL, out, out_len, bytes);
         }
 
         switch (m->flow_reply) {
@@ -896,7 +889,6 @@ mock_reset_content(struct mock_kernel *m)
     m->validate_dp_failed = false;
     m->flow_dump_done = false;
     m->flow_reply = FR_ACK;
-    m->flow_require_key = false;
     m->flow_req_had_key = false;
     m->flow_req_had_ufid = false;
     /* Default to the feature-aware kernel: echo USER_FEATURES/MEGAFLOW_STATS so
@@ -1513,13 +1505,13 @@ test_flow_del_stats(struct dpif *dpif, struct mock_kernel *m)
     ofpbuf_uninit(&key);
 }
 
-/* Reproduces the live revalidator failure: after a terse flow dump the
- * revalidator deletes stale flows by UFID only (dpif_flow_del.terse = true,
- * .key = NULL).  The provider then omits OVS_FLOW_ATTR_KEY and sends only
- * OVS_FLOW_ATTR_UFID -- exactly like dpif-netlink.  The ovsext kernel, however,
- * makes OVS_FLOW_ATTR_KEY mandatory and has no UFID lookup, so it rejects the
- * request with EINVAL (the `failed to flow_del (Invalid argument) ufid:...`
- * spam).  The fix belongs in the kernel (add UFID lookup); userspace is correct. */
+/* Terse (UFID-only) delete contract. After a terse flow dump the revalidator
+ * deletes stale flows by UFID only (dpif_flow_del.terse = true, .key = NULL).
+ * The provider must then emit OVS_FLOW_ATTR_UFID and omit OVS_FLOW_ATTR_KEY --
+ * exactly like dpif-netlink -- and a UFID-capable kernel (the kernel now does
+ * UFID lookup) must accept it. (Guards the userspace marshalling; the live
+ * `failed to flow_del (Invalid argument) ufid:...` regression was the kernel
+ * lacking the lookup, fixed separately and validated on the VM.) */
 static void
 test_flow_del_ufid_terse(struct dpif *dpif, struct mock_kernel *m)
 {
@@ -1531,7 +1523,7 @@ test_flow_del_ufid_terse(struct dpif *dpif, struct mock_kernel *m)
     printf("test_flow_del_ufid_terse:\n");
 
     mock_reset_content(m);
-    m->flow_require_key = true;          /* model current ovsext nlFlowPolicy */
+    m->flow_reply = FR_ACK;
     memset(&del, 0, sizeof del);
     del.ufid = &ufid;
     del.terse = true;                    /* UFID-only delete: no key */
@@ -1541,41 +1533,11 @@ test_flow_del_ufid_terse(struct dpif *dpif, struct mock_kernel *m)
     ops[0] = &op;
     dpif_operate(dpif, ops, 1, DPIF_OFFLOAD_NEVER);
 
-    /* The provider put a UFID on the wire and (correctly, per the dpif
-     * contract) omitted the key... */
+    /* The provider put a UFID on the wire and omitted the key (the dpif
+     * terse-delete contract)... */
     CHECK(m->flow_req_had_ufid);
     CHECK(!m->flow_req_had_key);
-    /* ...and the key-requiring kernel rejected it -- the reproduced bug. */
-    CHECK(op.error == EINVAL);
-}
-
-/* The fixed kernel resolves a terse (UFID-only) delete via its UFID index and
- * acks it. With the mock NOT requiring a key (flow_require_key = false), the
- * same UFID-only delete the provider emits must succeed. */
-static void
-test_flow_del_ufid_terse_supported(struct dpif *dpif, struct mock_kernel *m)
-{
-    struct dpif_flow_del del;
-    struct dpif_op op;
-    struct dpif_op *ops[1];
-    ovs_u128 ufid = { .u32 = { 5, 6, 7, 8 } };
-
-    printf("test_flow_del_ufid_terse_supported:\n");
-
-    mock_reset_content(m);
-    m->flow_require_key = false;         /* UFID-capable kernel */
-    m->flow_reply = FR_ACK;
-    memset(&del, 0, sizeof del);
-    del.ufid = &ufid;
-    del.terse = true;
-    memset(&op, 0, sizeof op);
-    op.type = DPIF_OP_FLOW_DEL;
-    op.flow_del = del;
-    ops[0] = &op;
-    dpif_operate(dpif, ops, 1, DPIF_OFFLOAD_NEVER);
-
-    CHECK(m->flow_req_had_ufid);
-    CHECK(!m->flow_req_had_key);
+    /* ...and a UFID-capable kernel accepts it. */
     CHECK(op.error == 0);
 }
 
@@ -2035,7 +1997,6 @@ main(int argc, char *argv[])
     test_flow_put_stats(dpif, &mock);
     test_flow_del_stats(dpif, &mock);
     test_flow_del_ufid_terse(dpif, &mock);
-    test_flow_del_ufid_terse_supported(dpif, &mock);
     test_operate_batch(dpif, &mock);
     test_port_poll(dpif, &mock);
     test_ct_limits(dpif, &mock);
