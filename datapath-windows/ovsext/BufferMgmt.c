@@ -2153,14 +2153,11 @@ OvsCompleteNBL(PVOID switch_ctx,
     if (parent != NULL) {
         ctx = (POVS_BUFFER_CONTEXT)NET_BUFFER_LIST_CONTEXT_DATA_START(parent);
         ASSERT(ctx && ctx->magic == OVS_CTX_MAGIC);
-        UINT16 pendingSend = 1, exchange = 0;
         value = InterlockedDecrement((LONG volatile *)&ctx->refCount);
-        /* pendingSend/exchange are locals used only to atomically sample the
-         * shared ctx->pendingSend; the interlocked-on-local idiom is intentional. */
-#pragma warning(suppress: 28113)
-        InterlockedCompareExchange16((SHORT volatile *)&pendingSend, exchange, (SHORT)ctx->pendingSend);
-#pragma warning(suppress: 28112)
-        if (value == 1 && pendingSend == exchange) {
+        /* Atomically read the shared pendingSend flag (otherwise mutated only via
+         * the Interlocked* family). */
+        SHORT pendingSend = InterlockedOr16((SHORT volatile *)&ctx->pendingSend, 0);
+        if (value == 1 && pendingSend == 1) {
             InterlockedExchange16((SHORT volatile *)&ctx->pendingSend, 0);
             OvsSendNBLIngress(context, parent, ctx->sendFlags);
         } else if (value == 0) {
