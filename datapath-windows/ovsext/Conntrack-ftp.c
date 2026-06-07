@@ -207,11 +207,14 @@ OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
         char *paren;
         paren = strchr(ftpMsg, '|');
         if (paren) {
-            req = paren + 3;
-            if (req >= ftpMsg + sizeof(ftpMsg)) {
-                /* The "|||" prefix ran off the end of the buffer. */
+            /* Bound the offset before forming the pointer: paren + 3 could
+             * otherwise be more than one-past-the-end of ftpMsg, which is
+             * undefined behavior even when only compared. */
+            size_t off = (size_t)(paren - ftpMsg) + 3;
+            if (off >= sizeof(ftpMsg)) {
                 return NDIS_STATUS_INVALID_PACKET;
             }
+            req = ftpMsg + off;
         } else {
             /* Not a valid EPSV packet. */
             return NDIS_STATUS_INVALID_PACKET;

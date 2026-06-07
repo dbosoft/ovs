@@ -1426,15 +1426,26 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
     NL_NESTED_FOR_EACH (ctAttr, left, a) {
         switch(NlAttrType(ctAttr)) {
             case OVS_CT_ATTR_ZONE:
+                /* Policy-less action attrs (see NAT below): guard the fixed-width
+                 * reads, which otherwise only ASSERT the attribute size. */
+                if (NlAttrGetSize(ctAttr) < sizeof(UINT16)) {
+                    return NDIS_STATUS_INVALID_PARAMETER;
+                }
                 zone = NlAttrGetU16(ctAttr);
                 break;
             case OVS_CT_ATTR_COMMIT:
                 commit = TRUE;
                 break;
             case OVS_CT_ATTR_MARK:
+                if (NlAttrGetSize(ctAttr) < sizeof(MD_MARK)) {
+                    return NDIS_STATUS_INVALID_PARAMETER;
+                }
                 mark = NlAttrGet(ctAttr);
                 break;
             case OVS_CT_ATTR_LABELS:
+                if (NlAttrGetSize(ctAttr) < sizeof(MD_LABELS)) {
+                    return NDIS_STATUS_INVALID_PARAMETER;
+                }
                 labels = NlAttrGet(ctAttr);
                 break;
             case OVS_CT_ATTR_HELPER:
@@ -1453,6 +1464,9 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                 commit = TRUE;
                 break;
             case OVS_CT_ATTR_EVENTMASK:
+                if (NlAttrGetSize(ctAttr) < sizeof(UINT32)) {
+                    return NDIS_STATUS_INVALID_PARAMETER;
+                }
                 eventmask = NlAttrGetU32(ctAttr);
                 /* Only mark and label updates are supported. */
                 if (eventmask & (1 << IPCT_MARK | 1 << IPCT_LABEL))
@@ -1478,10 +1492,12 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                         break;
                     case OVS_NAT_ATTR_IP_MIN:
                         /* This nested attribute is walked policy-less, so the
-                         * size is user-controlled; reject anything that would
-                         * overflow the address union (4 = IPv4, 16 = IPv6). */
-                        if (NlAttrGetSize(natAttr) >
-                                sizeof(natActionInfo.minAddr)) {
+                         * size is user-controlled. The payload must be exactly
+                         * an IPv4 (4) or IPv6 (16) address; reject anything else
+                         * so a short attr cannot leave a partial address. */
+                        if (NlAttrGetSize(natAttr) != sizeof(UINT32) &&
+                                NlAttrGetSize(natAttr) !=
+                                    sizeof(natActionInfo.minAddr)) {
                             return NDIS_STATUS_INVALID_PARAMETER;
                         }
                         memcpy(&natActionInfo.minAddr,
@@ -1489,8 +1505,9 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                         hasMinIp = TRUE;
                         break;
                     case OVS_NAT_ATTR_IP_MAX:
-                        if (NlAttrGetSize(natAttr) >
-                                sizeof(natActionInfo.maxAddr)) {
+                        if (NlAttrGetSize(natAttr) != sizeof(UINT32) &&
+                                NlAttrGetSize(natAttr) !=
+                                    sizeof(natActionInfo.maxAddr)) {
                             return NDIS_STATUS_INVALID_PARAMETER;
                         }
                         memcpy(&natActionInfo.maxAddr,
@@ -1499,15 +1516,15 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                         break;
                     case OVS_NAT_ATTR_PROTO_MIN:
                         /* Policy-less walk (see IP_MIN above): NlAttrGetU16 only
-                         * ASSERTs the size, so guard the read for non-DBG. */
-                        if (NlAttrGetSize(natAttr) < sizeof(UINT16)) {
+                         * ASSERTs the size, so require exactly a U16 here. */
+                        if (NlAttrGetSize(natAttr) != sizeof(UINT16)) {
                             return NDIS_STATUS_INVALID_PARAMETER;
                         }
                         natActionInfo.minPort = NlAttrGetU16(natAttr);
                         hasMinPort = TRUE;
                         break;
                     case OVS_NAT_ATTR_PROTO_MAX:
-                        if (NlAttrGetSize(natAttr) < sizeof(UINT16)) {
+                        if (NlAttrGetSize(natAttr) != sizeof(UINT16)) {
                             return NDIS_STATUS_INVALID_PARAMETER;
                         }
                         natActionInfo.maxPort = NlAttrGetU16(natAttr);
