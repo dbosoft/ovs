@@ -25,13 +25,13 @@
  * Conntrack zone-limit management (ct_set/get/del_limits, ct_get_features) and
  * OpenFlow meters (meter_get_features/set/get/del) are wired against the
  * kernel's OVS_CT_LIMIT and OVS_METER genl families over the ordinary
- * transaction channel.  Conntrack dump/flush are not provided here: their
- * userspace helpers (nl_ct_*) live in lib/netlink-conntrack.c, the
- * NETLINK_NETFILTER ctnetlink transport, which is not built on Windows -- a
- * userspace gap, not a kernel one (the ovsext kernel does serve the ctnetlink
- * dump/delete path).  Bond and timeout-policy management remain absent (not
- * wired yet); those class members default to NULL.  Upcalls use a single
- * handler, as Windows always has.
+ * transaction channel.  Conntrack dump/flush (ct_dump_*, ct_flush) are served
+ * by the kernel's netfilter-framed CT family; the provider drives them over
+ * ovsext-channel and reuses lib/netlink-conntrack.c's ctnetlink parser/encoder
+ * (only that file's NETLINK_NETFILTER socket transport is compiled out on
+ * Windows).  Bond and timeout-policy management remain absent (not wired yet);
+ * those class members default to NULL.  Upcalls use a single handler, as
+ * Windows always has.
  *
  * See datapath-windows/NATIVE-DPIF-EXPERIMENT.md for the full spec. */
 
@@ -45,6 +45,7 @@
 
 #include "ct-dpif.h"
 #include "dpif-provider.h"
+#include "netlink-conntrack.h"  /* nl_ct_parse_entry, nl_msg_put_nfgenmsg. */
 #include "odp-netlink.h"        /* struct ovs_header, OVS_*_ATTR_*. */
 #include "ovsext-channel.h"
 #include "flow.h"
@@ -2456,6 +2457,128 @@ dpif_windows_ct_get_features(struct dpif *dpif_ OVS_UNUSED,
 }
 
 /* ====================================================================
+ * Conntrack dump & flush.
+ *
+ * The ovsext kernel serves the conntrack table over the netfilter-framed CT
+ * family (NFNL_SUBSYS_CTNETLINK): IPCTNL_MSG_CT_GET dumps every entry in the
+ * ctnetlink wire format, IPCTNL_MSG_CT_DELETE flushes (optionally scoped by
+ * zone and/or the original tuple).  The dump rides the ordinary dump-IOCTL
+ * cursor and each record is decoded by nl_ct_parse_entry(), shared with the
+ * Linux ctnetlink path.  The kernel dumps every zone, so the zone filter is
+ * applied here.
+ * ==================================================================== */
+
+struct dpif_windows_ct_dump_state {
+    struct ct_dpif_dump_state up;
+    struct ovsext_dump dump;
+    bool filter_zone;
+    uint16_t zone;
+};
+
+static int
+dpif_windows_ct_dump_start(struct dpif *dpif_,
+                           struct ct_dpif_dump_state **dump_,
+                           const uint16_t *zone, int *ptot_bkts)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+    struct dpif_windows_ct_dump_state *dump;
+    struct ofpbuf *buf;
+
+    dump = xzalloc(sizeof *dump);
+    if (zone) {
+        dump->filter_zone = true;
+        dump->zone = *zone;
+    }
+
+    buf = ofpbuf_new(1024);
+    nl_msg_put_nfgenmsg(buf, 0, AF_UNSPEC, NFNL_SUBSYS_CTNETLINK,
+                        IPCTNL_MSG_CT_GET, NLM_F_REQUEST | NLM_F_DUMP);
+    ovsext_dump_start(&dump->dump, &dpif->channel, buf);
+    ofpbuf_delete(buf);
+
+    *dump_ = &dump->up;
+    *ptot_bkts = -1;        /* The kernel does not expose bucket counts. */
+    return 0;
+}
+
+static int
+dpif_windows_ct_dump_next(struct dpif *dpif_ OVS_UNUSED,
+                          struct ct_dpif_dump_state *dump_,
+                          struct ct_dpif_entry *entry)
+{
+    struct dpif_windows_ct_dump_state *dump =
+        CONTAINER_OF(dump_, struct dpif_windows_ct_dump_state, up);
+    struct ofpbuf reply;
+
+    for (;;) {
+        enum nl_ct_event_type type;
+
+        if (!ovsext_dump_next(&dump->dump, &reply)) {
+            return EOF;
+        }
+        if (!nl_ct_parse_entry(&reply, entry, &type)) {
+            /* Skip a record we cannot decode.  nl_ct_parse_entry() already
+             * uninitializes and zeroes 'entry' on its failure path, so no
+             * ct_dpif_entry_uninit() is needed here. */
+            continue;
+        }
+        if (dump->filter_zone && entry->zone != dump->zone) {
+            ct_dpif_entry_uninit(entry);
+            continue;
+        }
+        return 0;
+    }
+}
+
+static int
+dpif_windows_ct_dump_done(struct dpif *dpif_ OVS_UNUSED,
+                          struct ct_dpif_dump_state *dump_)
+{
+    struct dpif_windows_ct_dump_state *dump =
+        CONTAINER_OF(dump_, struct dpif_windows_ct_dump_state, up);
+    int error = ovsext_dump_done(&dump->dump);
+
+    free(dump);
+    return error;
+}
+
+static int
+dpif_windows_ct_flush(struct dpif *dpif_, const uint16_t *zone,
+                      const struct ct_dpif_tuple *tuple)
+{
+    struct dpif_windows *dpif = dpif_windows_cast(dpif_);
+    struct ofpbuf *request;
+    int error;
+
+    /* The kernel's tuple-scoped delete (OvsCtDeleteCmdHandler -> MapNlToCtTuple)
+     * only handles IPv4 tuples (struct ovs_key_ct_tuple_ipv4).  Reject an IPv6
+     * tuple rather than issue a delete that would silently match nothing. */
+    if (tuple && tuple->l3_type != AF_INET) {
+        return EOPNOTSUPP;
+    }
+
+    request = ofpbuf_new(1024);
+    nl_msg_put_nfgenmsg(request, 0, tuple ? tuple->l3_type : AF_UNSPEC,
+                        NFNL_SUBSYS_CTNETLINK, IPCTNL_MSG_CT_DELETE,
+                        NLM_F_REQUEST);
+    /* A tuple-scoped flush with no zone targets the default zone (0); emit
+     * CTA_ZONE in that case too, matching nl_ct_flush_tuple(). */
+    if (zone || tuple) {
+        nl_msg_put_be16(request, CTA_ZONE, htons(zone ? *zone : 0));
+    }
+    if (tuple) {
+        if (!nl_ct_put_ct_tuple(request, tuple, CTA_TUPLE_ORIG)) {
+            ofpbuf_delete(request);
+            return EOPNOTSUPP;
+        }
+    }
+
+    error = ovsext_transact(&dpif->channel, request, NULL);
+    ofpbuf_delete(request);
+    return error;
+}
+
+/* ====================================================================
  * OpenFlow meters (mirrors dpif-netlink's meter_* members).
  *
  * The ovsext kernel serves the OVS_METER genl family at the fixed id
@@ -2750,6 +2873,10 @@ const struct dpif_class dpif_windows_class = {
     .recv_wait = dpif_windows_recv_wait,
     .recv_purge = dpif_windows_recv_purge,
     .get_datapath_version = dpif_windows_get_datapath_version,
+    .ct_dump_start = dpif_windows_ct_dump_start,
+    .ct_dump_next = dpif_windows_ct_dump_next,
+    .ct_dump_done = dpif_windows_ct_dump_done,
+    .ct_flush = dpif_windows_ct_flush,
     .ct_set_limits = dpif_windows_ct_set_limits,
     .ct_get_limits = dpif_windows_ct_get_limits,
     .ct_del_limits = dpif_windows_ct_del_limits,

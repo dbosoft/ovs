@@ -99,11 +99,9 @@ static const struct nl_policy nfnlgrp_conntrack_policy[] = {
      * CTA_LABELS_MASK are not received from kernel. */
 };
 
-/* Declarations for conntrack netlink dumping. */
-static void nl_msg_put_nfgenmsg(struct ofpbuf *msg, size_t expected_payload,
-                                int family, uint8_t subsystem, uint8_t cmd,
-                                uint32_t flags);
-
+/* Declarations for conntrack netlink dumping.  nl_msg_put_nfgenmsg() and
+ * nl_ct_put_ct_tuple() are declared (non-static) in netlink-conntrack.h so the
+ * native Windows dpif provider can reuse them over its own transport. */
 static bool nl_ct_parse_header_policy(struct ofpbuf *buf,
         enum nl_ct_event_type *event_type,
         uint8_t *nfgen_family,
@@ -112,9 +110,8 @@ static bool nl_ct_parse_header_policy(struct ofpbuf *buf,
 static bool nl_ct_attrs_to_ct_dpif_entry(struct ct_dpif_entry *entry,
         struct nlattr *attrs[ARRAY_SIZE(nfnlgrp_conntrack_policy)],
         uint8_t nfgen_family);
-static bool nl_ct_put_ct_tuple(struct ofpbuf *buf,
-        const struct ct_dpif_tuple *tuple, enum ctattr_type type);
 
+#ifndef _WIN32
 struct nl_ct_dump_state {
     struct nl_dump dump;
     struct ofpbuf buf;
@@ -210,6 +207,7 @@ nl_ct_dump_done(struct nl_ct_dump_state *state)
     free(state);
     return error;
 }
+#endif /* !_WIN32 */
 
 /* Format conntrack event 'entry' of 'type' to 'ds'. */
 void
@@ -225,6 +223,7 @@ nl_ct_format_event_entry(const struct ct_dpif_entry *entry,
     ct_dpif_format_entry(entry, ds, verbose, print_stats);
 }
 
+#ifndef _WIN32
 int
 nl_ct_flush(void)
 {
@@ -283,14 +282,6 @@ nl_ct_flush_zone_with_cta_zone(uint16_t flush_zone)
 
     return err;
 }
-
-#ifdef _WIN32
-int
-nl_ct_flush_zone(uint16_t flush_zone)
-{
-    return nl_ct_flush_zone_with_cta_zone(flush_zone);
-}
-#else
 
 static bool
 netlink_flush_supports_zone(void)
@@ -387,7 +378,7 @@ nl_ct_flush_zone(uint16_t flush_zone)
      * have a parent connection anymore */
     return 0;
 }
-#endif
+#endif /* !_WIN32 */
 
 /* Conntrack netlink parsing. */
 
@@ -633,7 +624,7 @@ nl_ct_put_tuple_proto(struct ofpbuf *buf, const struct ct_dpif_tuple *tuple)
     return true;
 }
 
-static bool
+bool
 nl_ct_put_ct_tuple(struct ofpbuf *buf, const struct ct_dpif_tuple *tuple,
                    enum ctattr_type type)
 {
@@ -890,6 +881,7 @@ nl_ct_parse_helper(struct nlattr *nla, struct ct_dpif_helper *helper)
     return parsed;
 }
 
+#ifndef _WIN32
 static int nl_ct_timeout_policy_max_attr[] = {
     [IPPROTO_TCP] = CTA_TIMEOUT_TCP_MAX,
     [IPPROTO_UDP] = CTA_TIMEOUT_UDP_MAX,
@@ -1190,6 +1182,7 @@ nl_ct_timeout_policy_dump_done(struct nl_ct_timeout_policy_dump_state *state)
     free(state);
     return err;
 }
+#endif /* !_WIN32 */
 
 /* Translate netlink entry status flags to CT_DPIF_TCP status flags. */
 static uint32_t
@@ -1364,7 +1357,7 @@ nl_ct_parse_entry(struct ofpbuf *buf, struct ct_dpif_entry *entry,
  *
  * nl_msg_put_nlmsghdr() should be used to compose Netlink messages that are
  * not NetFilter Netlink messages. */
-static void
+void
 nl_msg_put_nfgenmsg(struct ofpbuf *msg, size_t expected_payload,
                     int family, uint8_t subsystem, uint8_t cmd,
                     uint32_t flags)
