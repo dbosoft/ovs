@@ -268,8 +268,13 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
          * a transient reference (OvsAcquireSwitchContext / OvsAcquireDatapathBy*),
          * so refCount == 1 means nobody else is walking the lists, which makes
          * the lock-free OvsClearAllSwitchVports safe. All such references are
-         * per-operation (released before any IRP is pended), so this terminates;
-         * the bound is a backstop against a wedged accessor (logged, not hung).
+         * per-operation (released before any IRP is pended), so this normally
+         * drains well within the bound. The bound is a last-resort backstop
+         * against a wedged accessor: it trades an unbounded driver-teardown hang
+         * for a bounded one, but if it ever fires, an accessor is still holding
+         * the context and proceeding to free it below is a use-after-free. A
+         * warning here therefore means a real missing reference-release to fix,
+         * not a benign timeout.
          */
         OvsUnregisterDatapath(switchContext);
 
@@ -282,9 +287,10 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
             KeMemoryBarrier();
         }
         if (switchContext->refCount > 1) {
-            OVS_LOG_WARN("Switch %p teardown proceeding with %d reference(s) "
-                         "still held after %u ms", switchContext,
-                         switchContext->refCount - 1, drainMs);
+            OVS_LOG_ERROR("Switch %p teardown: %d reference(s) still held after "
+                          "%u ms; proceeding (USE-AFTER-FREE RISK -- a wedged "
+                          "accessor failed to release its reference)",
+                          switchContext, switchContext->refCount - 1, drainMs);
         }
 
         OvsClearAllSwitchVports(switchContext);

@@ -1345,9 +1345,11 @@ OvsRemoveAndDeleteVport(PVOID usrParamsContext,
         if (hvDelete && vport->isAbsentOnHv == FALSE) {
             switchContext->countInternalVports--;
             ASSERT(switchContext->countInternalVports >= 0);
-            /* Runs under dispatchLock on the vport-delete path, or single-threaded
-             * during switch teardown; PREfast cannot model the lock across these
-             * mixed callers (genuine false positive). */
+            /* On the vport-delete path dispatchLock is held; during switch
+             * teardown (OvsClearAllSwitchVports) it is NOT held, but the
+             * teardown reference drain guarantees no concurrent accessor, so the
+             * unsynchronized access is safe there. PREfast cannot model either
+             * case across these mixed callers. */
 #pragma warning(suppress: 26110)
             OvsUnBindVportWithIpHelper(vport, switchContext);
         }
@@ -1492,7 +1494,9 @@ OvsRemoveTunnelVport(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
      * thread) or a failure status (the callback already ran synchronously via
      * OvsTunnelFilterCompleteRequest). So drop the reference here only on the
      * STATUS_SUCCESS no-callback paths -- releasing on any non-success status
-     * would double-release the reference the callback already dropped.
+     * would double-release the reference the callback already dropped. On those
+     * same no-callback paths the callback also never frees tunnelContext, so it
+     * must be freed here too.
      */
     NTSTATUS status;
     InterlockedIncrement(&switchContext->refCount);
@@ -1500,6 +1504,7 @@ OvsRemoveTunnelVport(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                                    tunnelContext);
     if (status == STATUS_SUCCESS) {
         OvsReleaseSwitchContext(switchContext);
+        OvsFreeMemoryWithTag(tunnelContext, OVS_VPORT_POOL_TAG);
     }
     return status;
 }
