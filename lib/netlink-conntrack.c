@@ -283,14 +283,6 @@ nl_ct_flush_zone_with_cta_zone(uint16_t flush_zone)
     return err;
 }
 
-#ifdef _WIN32
-int
-nl_ct_flush_zone(uint16_t flush_zone)
-{
-    return nl_ct_flush_zone_with_cta_zone(flush_zone);
-}
-#else
-
 static bool
 netlink_flush_supports_zone(void)
 {
@@ -386,7 +378,6 @@ nl_ct_flush_zone(uint16_t flush_zone)
      * have a parent connection anymore */
     return 0;
 }
-#endif
 #endif /* !_WIN32 */
 
 /* Conntrack netlink parsing. */

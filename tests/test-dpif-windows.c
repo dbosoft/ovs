@@ -270,7 +270,7 @@ build_flow_bad(struct mock_record *r)
  * tuples, status and id.  Built with the shared ctnetlink encoders so the
  * record is exactly what nl_ct_parse_entry() (used by the provider) decodes. */
 static void
-build_ct_record(struct mock_record *r)
+build_ct_record(struct mock_record *r, uint16_t zone)
 {
     uint64_t stub[MOCK_RECORD_CAP / 8];
     struct ofpbuf b;
@@ -294,6 +294,10 @@ build_ct_record(struct mock_record *r)
     nl_ct_put_ct_tuple(&b, &reply, CTA_TUPLE_REPLY);
     nl_msg_put_be32(&b, CTA_STATUS, htonl(0x8 /* IPS_CONFIRMED */));
     nl_msg_put_be32(&b, CTA_ID, htonl(0xabcd));
+    /* The kernel emits CTA_ZONE only for a non-default zone. */
+    if (zone) {
+        nl_msg_put_be16(&b, CTA_ZONE, htons(zone));
+    }
     nl_msg_nlmsghdr(&b)->nlmsg_len = b.size;
     finish_record(r, &b);
 }
@@ -681,12 +685,25 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
         return TRUE;                   /* ack, empty reply */
     }
 
-    case (NFNL_SUBSYS_CTNETLINK << 8 | IPCTNL_MSG_CT_DELETE):
-        /* Conntrack flush.  Record that it happened; the request is framed as
-         * nfgenmsg + ovs_header (the Windows nfgenmsg carries the ovs_header)
-         * optionally followed by CTA_ZONE. */
+    case (NFNL_SUBSYS_CTNETLINK << 8 | IPCTNL_MSG_CT_DELETE): {
+        /* Conntrack flush.  The request is framed as nfgenmsg + ovs_header (the
+         * Windows nfgenmsg embeds the ovs_header) optionally followed by
+         * CTA_ZONE / CTA_TUPLE_ORIG.  Record the flush and the requested zone. */
+        size_t hdrlen = NLMSG_HDRLEN + sizeof(struct nfgenmsg);
+
         m->ct_flushed = true;
+        m->ct_flush_zone = 0;
+        if (in_len > hdrlen) {
+            const struct nlattr *attrs = ALIGNED_CAST(const struct nlattr *,
+                                            (const char *) in + hdrlen);
+            const struct nlattr *za =
+                nl_attr_find__(attrs, in_len - hdrlen, CTA_ZONE);
+            if (za) {
+                m->ct_flush_zone = ntohs(nl_attr_get_be16(za));
+            }
+        }
         return TRUE;                   /* ack, empty reply */
+    }
 
     case OVS_WIN_NL_METER_FAMILY_ID:
         return mock_meter(m, in, in_len, out, out_len, bytes);
@@ -1762,17 +1779,20 @@ test_ct_dump_flush(struct dpif *dpif, struct mock_kernel *m)
 {
     struct ct_dpif_dump_state *dump = NULL;
     struct ct_dpif_entry entry;
+    uint16_t zone5 = 5;
     int tot_bkts = 0;
     int n = 0;
     int error;
 
     mock_reset_content(m);
-    build_ct_record(&m->ct[0]);
-    m->n_ct = 1;
+    build_ct_record(&m->ct[0], 0);     /* default zone */
+    build_ct_record(&m->ct[1], 5);     /* zone 5 */
+    m->n_ct = 2;
 
+    /* Unfiltered dump returns both entries and terminates at EOF. */
     error = ct_dpif_dump_start(dpif, &dump, NULL, &tot_bkts);
     CHECK(error == 0);
-
+    n = 0;
     while (!(error = ct_dpif_dump_next(dump, &entry))) {
         CHECK(entry.tuple_orig.l3_type == AF_INET);
         CHECK(entry.tuple_orig.ip_proto == IPPROTO_TCP);
@@ -1782,14 +1802,36 @@ test_ct_dump_flush(struct dpif *dpif, struct mock_kernel *m)
         ct_dpif_entry_uninit(&entry);
     }
     CHECK(error == EOF);
+    CHECK(n == 2);
+    CHECK(ct_dpif_dump_done(dump) == 0);
+
+    /* The kernel dumps all zones; the provider filters client-side, so a
+     * zone-5 dump returns only the zone-5 entry. */
+    error = ct_dpif_dump_start(dpif, &dump, &zone5, &tot_bkts);
+    CHECK(error == 0);
+    n = 0;
+    while (!(error = ct_dpif_dump_next(dump, &entry))) {
+        CHECK(entry.zone == 5);
+        n++;
+        ct_dpif_entry_uninit(&entry);
+    }
+    CHECK(error == EOF);
     CHECK(n == 1);
-    ct_dpif_dump_done(dump);
+    CHECK(ct_dpif_dump_done(dump) == 0);
 
     /* Flush all zones. */
     m->ct_flushed = false;
     error = ct_dpif_flush(dpif, NULL, NULL);
     CHECK(error == 0);
     CHECK(m->ct_flushed);
+
+    /* Zone-scoped flush carries CTA_ZONE. */
+    m->ct_flushed = false;
+    m->ct_flush_zone = 0xffff;
+    error = ct_dpif_flush(dpif, &zone5, NULL);
+    CHECK(error == 0);
+    CHECK(m->ct_flushed);
+    CHECK(m->ct_flush_zone == 5);
 }
 
 /* Datapath feature negotiation: the open requested OVS_DP_F_UNALIGNED |

@@ -2468,12 +2468,6 @@ dpif_windows_ct_get_features(struct dpif *dpif_ OVS_UNUSED,
  * applied here.
  * ==================================================================== */
 
-/* CTA_ZONE is not in the (older) ctnetlink uapi; netlink-conntrack.c defines it
- * internally.  Mirror that here for the flush request. */
-#ifndef CTA_ZONE
-#define CTA_ZONE (CTA_SECMARK + 1)
-#endif
-
 struct dpif_windows_ct_dump_state {
     struct ct_dpif_dump_state up;
     struct ovsext_dump dump;
@@ -2523,7 +2517,10 @@ dpif_windows_ct_dump_next(struct dpif *dpif_ OVS_UNUSED,
             return EOF;
         }
         if (!nl_ct_parse_entry(&reply, entry, &type)) {
-            continue;       /* Skip a record we cannot decode. */
+            /* Skip a record we cannot decode.  nl_ct_parse_entry() already
+             * uninitializes and zeroes 'entry' on its failure path, so no
+             * ct_dpif_entry_uninit() is needed here. */
+            continue;
         }
         if (dump->filter_zone && entry->zone != dump->zone) {
             ct_dpif_entry_uninit(entry);
@@ -2550,14 +2547,24 @@ dpif_windows_ct_flush(struct dpif *dpif_, const uint16_t *zone,
                       const struct ct_dpif_tuple *tuple)
 {
     struct dpif_windows *dpif = dpif_windows_cast(dpif_);
-    struct ofpbuf *request = ofpbuf_new(1024);
-    int family = tuple ? tuple->l3_type : AF_UNSPEC;
+    struct ofpbuf *request;
     int error;
 
-    nl_msg_put_nfgenmsg(request, 0, family, NFNL_SUBSYS_CTNETLINK,
-                        IPCTNL_MSG_CT_DELETE, NLM_F_REQUEST);
-    if (zone) {
-        nl_msg_put_be16(request, CTA_ZONE, htons(*zone));
+    /* The kernel's tuple-scoped delete (OvsCtDeleteCmdHandler -> MapNlToCtTuple)
+     * only handles IPv4 tuples (struct ovs_key_ct_tuple_ipv4).  Reject an IPv6
+     * tuple rather than issue a delete that would silently match nothing. */
+    if (tuple && tuple->l3_type != AF_INET) {
+        return EOPNOTSUPP;
+    }
+
+    request = ofpbuf_new(1024);
+    nl_msg_put_nfgenmsg(request, 0, tuple ? tuple->l3_type : AF_UNSPEC,
+                        NFNL_SUBSYS_CTNETLINK, IPCTNL_MSG_CT_DELETE,
+                        NLM_F_REQUEST);
+    /* A tuple-scoped flush with no zone targets the default zone (0); emit
+     * CTA_ZONE in that case too, matching nl_ct_flush_tuple(). */
+    if (zone || tuple) {
+        nl_msg_put_be16(request, CTA_ZONE, htons(zone ? *zone : 0));
     }
     if (tuple) {
         if (!nl_ct_put_ct_tuple(request, tuple, CTA_TUPLE_ORIG)) {
