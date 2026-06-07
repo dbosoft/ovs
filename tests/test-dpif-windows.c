@@ -37,6 +37,7 @@
 
 #include "dpif.h"
 #include "ct-dpif.h"
+#include "netlink-conntrack.h"
 #include "netdev.h"
 #include "netdev-provider.h"
 #include "openvswitch/ofp-meter.h"
@@ -81,7 +82,7 @@ static int failures;
 
 /* ---- mock "kernel" state ------------------------------------------------- */
 
-enum mock_dump { DUMP_NONE, DUMP_VPORT, DUMP_FLOW, DUMP_DP };
+enum mock_dump { DUMP_NONE, DUMP_VPORT, DUMP_FLOW, DUMP_DP, DUMP_CT };
 
 /* How an OVS_IOCTL_TRANSACT against the FLOW family answers. */
 enum flow_reply {
@@ -114,8 +115,13 @@ struct mock_kernel {
     struct mock_record dp[MOCK_MAX_RECORDS];    int n_dp;
     struct mock_record vport[MOCK_MAX_RECORDS]; int n_vport;
     struct mock_record flow[MOCK_MAX_RECORDS];  int n_flow;
+    struct mock_record ct[MOCK_MAX_RECORDS];    int n_ct;
     bool flow_dump_done;        /* FLOW dump ends with an NLMSG_DONE record
                                  * (as the kernel does), not a zero-length read. */
+
+    /* CT flush (IPCTNL_MSG_CT_DELETE) bookkeeping. */
+    bool ct_flushed;
+    uint16_t ct_flush_zone;
 
     /* Queued packet upcalls, delivered one per OVS_IOCTL_READ_PACKET. */
     struct mock_record pkt[MOCK_MAX_RECORDS];   int pkt_head, pkt_len;
@@ -256,6 +262,39 @@ build_flow_bad(struct mock_record *r)
                           OVS_FLOW_CMD_NEW, OVS_FLOW_VERSION);
     ovs_header = ofpbuf_put_uninit(&b, sizeof *ovs_header);
     ovs_header->dp_ifindex = MOCK_DP_IFINDEX;
+    finish_record(r, &b);
+}
+
+/* Builds a conntrack dump record as the kernel's OvsCreateNlMsgFromCtEntry
+ * does: an IPCTNL_MSG_CT_NEW ctnetlink message with the mandatory orig/reply
+ * tuples, status and id.  Built with the shared ctnetlink encoders so the
+ * record is exactly what nl_ct_parse_entry() (used by the provider) decodes. */
+static void
+build_ct_record(struct mock_record *r)
+{
+    uint64_t stub[MOCK_RECORD_CAP / 8];
+    struct ofpbuf b;
+    struct ct_dpif_tuple orig = {
+        .l3_type = AF_INET, .ip_proto = IPPROTO_TCP,
+        .src = { .ip = htonl(0x0a000064) },     /* 10.0.0.100 */
+        .dst = { .ip = htonl(0x0a000065) },     /* 10.0.0.101 */
+        .src_port = htons(12345), .dst_port = htons(80),
+    };
+    struct ct_dpif_tuple reply = {
+        .l3_type = AF_INET, .ip_proto = IPPROTO_TCP,
+        .src = { .ip = htonl(0x0a000065) },
+        .dst = { .ip = htonl(0x0a000064) },
+        .src_port = htons(80), .dst_port = htons(12345),
+    };
+
+    ofpbuf_use_stub(&b, stub, sizeof stub);
+    nl_msg_put_nfgenmsg(&b, 0, AF_INET, NFNL_SUBSYS_CTNETLINK,
+                        IPCTNL_MSG_CT_NEW, NLM_F_CREATE);
+    nl_ct_put_ct_tuple(&b, &orig, CTA_TUPLE_ORIG);
+    nl_ct_put_ct_tuple(&b, &reply, CTA_TUPLE_REPLY);
+    nl_msg_put_be32(&b, CTA_STATUS, htonl(0x8 /* IPS_CONFIRMED */));
+    nl_msg_put_be32(&b, CTA_ID, htonl(0xabcd));
+    nl_msg_nlmsghdr(&b)->nlmsg_len = b.size;
     finish_record(r, &b);
 }
 
@@ -642,6 +681,13 @@ mock_transact(struct mock_kernel *m, const void *in, DWORD in_len,
         return TRUE;                   /* ack, empty reply */
     }
 
+    case (NFNL_SUBSYS_CTNETLINK << 8 | IPCTNL_MSG_CT_DELETE):
+        /* Conntrack flush.  Record that it happened; the request is framed as
+         * nfgenmsg + ovs_header (the Windows nfgenmsg carries the ovs_header)
+         * optionally followed by CTA_ZONE. */
+        m->ct_flushed = true;
+        return TRUE;                   /* ack, empty reply */
+
     case OVS_WIN_NL_METER_FAMILY_ID:
         return mock_meter(m, in, in_len, out, out_len, bytes);
 
@@ -705,6 +751,8 @@ mock_write(struct mock_kernel *m, struct mock_handle *h,
         case OVS_WIN_NL_VPORT_FAMILY_ID:    h->dump = DUMP_VPORT; break;
         case OVS_WIN_NL_FLOW_FAMILY_ID:     h->dump = DUMP_FLOW;  break;
         case OVS_WIN_NL_DATAPATH_FAMILY_ID: h->dump = DUMP_DP;    break;
+        case (NFNL_SUBSYS_CTNETLINK << 8 | IPCTNL_MSG_CT_GET):
+            h->dump = DUMP_CT; break;
         default:                            h->dump = DUMP_NONE;  break;
         }
     }
@@ -747,6 +795,7 @@ mock_read_dump(struct mock_kernel *m, struct mock_handle *h,
     case DUMP_DP:    recs = m->dp;    n = m->n_dp;    break;
     case DUMP_VPORT: recs = m->vport; n = m->n_vport; break;
     case DUMP_FLOW:  recs = m->flow;  n = m->n_flow;  break;
+    case DUMP_CT:    recs = m->ct;    n = m->n_ct;    break;
     case DUMP_NONE:  default:         return TRUE;    /* nothing armed */
     }
 
@@ -881,6 +930,9 @@ mock_reset_content(struct mock_kernel *m)
 {
     m->n_vport = 0;
     m->n_flow = 0;
+    m->n_ct = 0;
+    m->ct_flushed = false;
+    m->ct_flush_zone = 0;
     m->pkt_head = 0;
     m->pkt_len = 0;
     m->evt_head = 0;
@@ -1701,6 +1753,45 @@ test_ct_limits(struct dpif *dpif, struct mock_kernel *m)
     CHECK(feat == 0);
 }
 
+/* Conntrack dump & flush: the kernel serves the conntrack table over the
+ * netfilter-framed CT family.  A dump round-trips one ctnetlink record into a
+ * ct_dpif_entry (orig/reply tuple, proto), terminates with a zero-length EOF,
+ * and a flush issues IPCTNL_MSG_CT_DELETE. */
+static void
+test_ct_dump_flush(struct dpif *dpif, struct mock_kernel *m)
+{
+    struct ct_dpif_dump_state *dump = NULL;
+    struct ct_dpif_entry entry;
+    int tot_bkts = 0;
+    int n = 0;
+    int error;
+
+    mock_reset_content(m);
+    build_ct_record(&m->ct[0]);
+    m->n_ct = 1;
+
+    error = ct_dpif_dump_start(dpif, &dump, NULL, &tot_bkts);
+    CHECK(error == 0);
+
+    while (!(error = ct_dpif_dump_next(dump, &entry))) {
+        CHECK(entry.tuple_orig.l3_type == AF_INET);
+        CHECK(entry.tuple_orig.ip_proto == IPPROTO_TCP);
+        CHECK(entry.tuple_orig.dst_port == htons(80));
+        CHECK(entry.tuple_reply.src_port == htons(80));
+        n++;
+        ct_dpif_entry_uninit(&entry);
+    }
+    CHECK(error == EOF);
+    CHECK(n == 1);
+    ct_dpif_dump_done(dump);
+
+    /* Flush all zones. */
+    m->ct_flushed = false;
+    error = ct_dpif_flush(dpif, NULL, NULL);
+    CHECK(error == 0);
+    CHECK(m->ct_flushed);
+}
+
 /* Datapath feature negotiation: the open requested OVS_DP_F_UNALIGNED |
  * OVS_DP_F_VPORT_PIDS, the kernel stored and echoed them, and
  * get_features/get_stats reflect the negotiated mask.  An unsupported bit is
@@ -2000,6 +2091,7 @@ main(int argc, char *argv[])
     test_operate_batch(dpif, &mock);
     test_port_poll(dpif, &mock);
     test_ct_limits(dpif, &mock);
+    test_ct_dump_flush(dpif, &mock);
     test_meters(dpif, &mock);
     test_feature_negotiation(dpif, &mock);
 
