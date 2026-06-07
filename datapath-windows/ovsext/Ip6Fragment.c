@@ -690,13 +690,17 @@ OvsGetPacketMeta(PIP6_PktExtHeader_Meta pktMeta, EthHdr *eth,
             nextHdr == SOCKET_IPPROTO_DSTOPTS ||
             nextHdr == SOCKET_IPPROTO_AH) {
             UINT8 len  = extHdr->hdrExtLen;
+            /* The AH vs non-AH length formula must key off the header being
+             * advanced past (the current one), so capture it before nextHdr is
+             * overwritten with the following header's type. */
+            UINT8 curHdr = nextHdr;
             UINT32 hdrLen;
             nextHdr = extHdr->nextHeader;
             if (nextHdr == SOCKET_IPPROTO_FRAGMENT) {
                 pktMeta->beforeFragElePtr = (PCHAR)(extHdr);
             }
 
-            hdrLen = (nextHdr == SOCKET_IPPROTO_AH)
+            hdrLen = (curHdr == SOCKET_IPPROTO_AH)
                      ? ((UINT32)len + 2) * 4 : ((UINT32)len + 1) * 8;
             if ((UINT32)pktMeta->extHdrTotalLen + hdrLen > payloadLen) {
                 return NDIS_STATUS_INVALID_LENGTH;

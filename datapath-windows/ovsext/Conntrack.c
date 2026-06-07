@@ -1498,10 +1498,18 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                         hasMaxIp = TRUE;
                         break;
                     case OVS_NAT_ATTR_PROTO_MIN:
+                        /* Policy-less walk (see IP_MIN above): NlAttrGetU16 only
+                         * ASSERTs the size, so guard the read for non-DBG. */
+                        if (NlAttrGetSize(natAttr) < sizeof(UINT16)) {
+                            return NDIS_STATUS_INVALID_PARAMETER;
+                        }
                         natActionInfo.minPort = NlAttrGetU16(natAttr);
                         hasMinPort = TRUE;
                         break;
                     case OVS_NAT_ATTR_PROTO_MAX:
+                        if (NlAttrGetSize(natAttr) < sizeof(UINT16)) {
+                            return NDIS_STATUS_INVALID_PARAMETER;
+                        }
                         natActionInfo.maxPort = NlAttrGetU16(natAttr);
                         hasMaxPort = TRUE;
                         break;

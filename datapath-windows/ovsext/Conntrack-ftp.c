@@ -208,6 +208,10 @@ OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
         paren = strchr(ftpMsg, '|');
         if (paren) {
             req = paren + 3;
+            if (req >= ftpMsg + sizeof(ftpMsg)) {
+                /* The "|||" prefix ran off the end of the buffer. */
+                return NDIS_STATUS_INVALID_PACKET;
+            }
         } else {
             /* Not a valid EPSV packet. */
             return NDIS_STATUS_INVALID_PACKET;
@@ -269,10 +273,12 @@ OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
             if (reqLen >= sizeof(ftpStr)) {
                 return NDIS_STATUS_SUCCESS;
             }
-            RtlCopyMemory(ftpStr, req, reqLen);
-            ftpStrEnd = ftpStr + sizeof(ftpStr);
-            /* Scan for the leading '|'. The trailing zero-fill is not '|', so the
-             * scan must stop at the buffer end or it reads past ftpStr. */
+            /* Copy the NUL too (reqLen < sizeof(ftpStr)) and bound the scans to
+             * the actual payload, so they cannot run past it regardless of the
+             * zero-fill above. */
+            RtlCopyMemory(ftpStr, req, reqLen + 1);
+            ftpStrEnd = ftpStr + reqLen;
+            /* Scan for the leading '|', bounded by the copied payload. */
             for (curHdr = ftpStr; curHdr < ftpStrEnd && *curHdr != '|'; curHdr++);
             if (curHdr >= ftpStrEnd) {
                 /* No '|' delimiter in a malformed payload. */
@@ -316,7 +322,9 @@ OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
                 index++;
             } while (1);
 
-            if (index < 2) { /* Not valid packet due to less than three parameter */
+            if (index < 3) {
+                /* Need all three fields (family, address, port); a truncated
+                 * EPRT (e.g. an unterminated port field) leaves port == 0. */
                 return NDIS_STATUS_SUCCESS;
             }
             serverIp.ipv6 = key->ipv6Key.ipv6Dst;

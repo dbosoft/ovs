@@ -241,16 +241,25 @@ OvsReadDpIoctl(PFILE_OBJECT fileObject,
             UINT16 sum, *ptr;
             UINT16 size = (UINT16)(elem->packet.payload - elem->packet.data +
                                   elem->hdrInfo.l4Offset);
-            RtlCopyMemory(outputBuffer, &elem->packet.data, size);
-            ASSERT(len - size >= elem->hdrInfo.l4PayLoad);
-            sum = CopyAndCalculateChecksum((UINT8 *)outputBuffer + size,
-                                           (UINT8 *)&elem->packet.data + size,
-                                           elem->hdrInfo.l4PayLoad, 0);
-            ptr =(UINT16 *)((UINT8 *)outputBuffer + size +
-                            (elem->hdrInfo.tcpCsumNeeded ?
-                             TCP_CSUM_OFFSET : UDP_CSUM_OFFSET));
-            *ptr = sum;
-            ovsUserStats.l4Csum++;
+            /* l4PayLoad is derived from on-wire length fields (IPv4 TotalLength
+             * / IPv6 PayloadLength) and is not otherwise bounded against the
+             * actual packet, so a crafted length could drive the checksum copy
+             * past the buffer. Verify the L4 span fits before copying; if not,
+             * skip the (optional) checksum fixup and emit the packet as-is. */
+            if (size <= len &&
+                (UINT32)len - size >= elem->hdrInfo.l4PayLoad) {
+                RtlCopyMemory(outputBuffer, &elem->packet.data, size);
+                sum = CopyAndCalculateChecksum((UINT8 *)outputBuffer + size,
+                                               (UINT8 *)&elem->packet.data + size,
+                                               elem->hdrInfo.l4PayLoad, 0);
+                ptr =(UINT16 *)((UINT8 *)outputBuffer + size +
+                                (elem->hdrInfo.tcpCsumNeeded ?
+                                 TCP_CSUM_OFFSET : UDP_CSUM_OFFSET));
+                *ptr = sum;
+                ovsUserStats.l4Csum++;
+            } else {
+                RtlCopyMemory(outputBuffer, &elem->packet.data, len);
+            }
         } else {
             RtlCopyMemory(outputBuffer, &elem->packet.data, len);
         }
