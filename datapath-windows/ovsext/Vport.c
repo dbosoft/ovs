@@ -54,6 +54,7 @@
  * filter threads. */
 typedef struct _OVS_TUNFLT_INIT_CONTEXT {
     POVS_SWITCH_CONTEXT switchContext;
+    UINT32 dpNo;
     UINT32 outputLength;
     PVOID outputBuffer;
     PVOID inputBuffer;
@@ -334,6 +335,9 @@ HvDeletePort(POVS_SWITCH_CONTEXT switchContext,
  * to post an event to netdev-windows.c.
  * --------------------------------------------------------------------------
  */
+/* PASSIVE_LEVEL NDIS NIC-create callback with a bounded call depth; the
+ * IF_COUNTED_STRING friendly name on the frame is acceptable here. */
+#pragma warning(suppress: 6262)
 NDIS_STATUS
 HvCreateNic(POVS_SWITCH_CONTEXT switchContext,
             PNDIS_SWITCH_NIC_PARAMETERS nicParam)
@@ -1128,6 +1132,9 @@ OvsInitTunnelVport(PVOID userContext,
         tunnelContext->outputBuffer = usrParamsCtx->outputBuffer;
         tunnelContext->outputLength = usrParamsCtx->outputLength;
         tunnelContext->vport = vport;
+        /* Record the originating datapath so the async completion attaches the
+         * vport to the datapath this create targeted, not the default one. */
+        tunnelContext->dpNo = usrParamsCtx->switchContext->dpNo;
 
         status = OvsInitVxlanTunnel(usrParamsCtx->irp,
                                     vport,
@@ -1342,6 +1349,12 @@ OvsRemoveAndDeleteVport(PVOID usrParamsContext,
         if (hvDelete && vport->isAbsentOnHv == FALSE) {
             switchContext->countInternalVports--;
             ASSERT(switchContext->countInternalVports >= 0);
+            /* On the vport-delete path dispatchLock is held; during switch
+             * teardown (OvsClearAllSwitchVports) it is NOT held, but the
+             * teardown reference drain guarantees no concurrent accessor, so the
+             * unsynchronized access is safe there. PREfast cannot model either
+             * case across these mixed callers. */
+#pragma warning(suppress: 26110)
             OvsUnBindVportWithIpHelper(vport, switchContext);
         }
         hvSwitchPort = TRUE;
@@ -1470,8 +1483,34 @@ OvsRemoveTunnelVport(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         irp = usrParamsCtx->irp;
     }
 
-    return OvsCleanupVxlanTunnel(irp, vport, OvsTunnelVportPendingRemove,
-                                 tunnelContext);
+    /*
+     * Reference the switch context on behalf of the asynchronous remove
+     * callback (OvsTunnelVportPendingRemove), which dereferences
+     * tunnelContext->switchContext after this function returns. Holding the
+     * reference keeps the context (and its dispatchLock) alive until the tunnel
+     * filter delete completes, and makes the OvsDeleteSwitch teardown drain wait
+     * for that completion instead of freeing the context under it.
+     *
+     * The callback runs (and releases this reference) on every path except
+     * OvsCleanupVxlanTunnel's inline no-op returns (no VXLAN filter to remove),
+     * which return STATUS_SUCCESS without queuing a request. When a delete is
+     * queued it returns STATUS_PENDING (the callback runs later on the tunnel
+     * thread) or a failure status (the callback already ran synchronously via
+     * OvsTunnelFilterCompleteRequest). So drop the reference here only on the
+     * STATUS_SUCCESS no-callback paths -- releasing on any non-success status
+     * would double-release the reference the callback already dropped. On those
+     * same no-callback paths the callback also never frees tunnelContext, so it
+     * must be freed here too.
+     */
+    NTSTATUS status;
+    InterlockedIncrement(&switchContext->refCount);
+    status = OvsCleanupVxlanTunnel(irp, vport, OvsTunnelVportPendingRemove,
+                                   tunnelContext);
+    if (status == STATUS_SUCCESS) {
+        OvsReleaseSwitchContext(switchContext);
+        OvsFreeMemoryWithTag(tunnelContext, OVS_VPORT_POOL_TAG);
+    }
+    return status;
 }
 
 /*
@@ -2253,6 +2292,7 @@ OvsGetVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
 }
 
+_Requires_lock_held_(switchContext->dispatchLock)
 static UINT32
 OvsComputeVportNo(POVS_SWITCH_CONTEXT switchContext)
 {
@@ -2516,6 +2556,9 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                  vport->ovsType);
 
 Cleanup:
+    /* dispatchLock is acquired before any goto Cleanup; PREfast cannot prove it
+     * is held on every path to this shared label (genuine false positive). */
+#pragma warning(suppress: 26110)
     NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
 
     if ((nlError != NL_ERROR_SUCCESS) && (nlError != NL_ERROR_PENDING)) {
@@ -2740,6 +2783,9 @@ OvsDeleteVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     }
 
 Cleanup:
+    /* dispatchLock is acquired before any goto Cleanup; PREfast cannot prove it
+     * is held on every path to this shared label (genuine false positive). */
+#pragma warning(suppress: 26110)
     NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
 
     if ((nlError != NL_ERROR_SUCCESS) && (nlError != NL_ERROR_PENDING)) {
@@ -2805,6 +2851,9 @@ OvsTunnelVportPendingRemove(PVOID context,
     OvsFreeMemoryWithTag(vport, OVS_VPORT_POOL_TAG);
 
     NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
+
+    /* Release the reference taken in OvsRemoveTunnelVport for this callback. */
+    OvsReleaseSwitchContext(switchContext);
 }
 
 static VOID
@@ -2822,10 +2871,23 @@ OvsTunnelVportPendingInit(PVOID context,
     UINT32 portType = 0;
     NL_ERROR nlError = NL_ERROR_SUCCESS;
     BOOLEAN error = TRUE;
+    /* This async callback runs on a tunnel-filter worker thread and can race
+     * switch detach; reference the originating datapath (the one the create
+     * targeted) and hold its dispatchLock while mutating the vport lists (the
+     * create path holds it too). If that datapath has detached meanwhile,
+     * OvsAcquireDatapathByNumber returns NULL and we fail cleanly below. */
+    POVS_SWITCH_CONTEXT switchContext =
+        OvsAcquireDatapathByNumber(tunnelContext->dpNo);
+    LOCK_STATE_EX lockState;
+    BOOLEAN locked = FALSE;
 
     do {
         if (!NT_SUCCESS(status)) {
             nlError = NlMapStatusToNlErr(status);
+            break;
+        }
+        if (switchContext == NULL) {
+            nlError = NL_ERROR_NODEV;
             break;
         }
 
@@ -2874,6 +2936,9 @@ OvsTunnelVportPendingInit(PVOID context,
          */
         vport->isAbsentOnHv = TRUE;
 
+        NdisAcquireRWLockWrite(switchContext->dispatchLock, &lockState, 0);
+        locked = TRUE;
+
         if (vportAttrs[OVS_VPORT_ATTR_PORT_NO] != NULL) {
             /*
              * XXX: when we implement the limit for OVS port number to be
@@ -2884,7 +2949,7 @@ OvsTunnelVportPendingInit(PVOID context,
                 NlAttrGetU32(vportAttrs[OVS_VPORT_ATTR_PORT_NO]);
         } else {
             vport->portNo =
-                OvsComputeVportNo(gOvsSwitchContext);
+                OvsComputeVportNo(switchContext);
             if (vport->portNo == OVS_DPPORT_NUMBER_INVALID) {
                 nlError = NL_ERROR_NOMEM;
                 break;
@@ -2908,19 +2973,23 @@ OvsTunnelVportPendingInit(PVOID context,
         vport->upcallPid =
             NlAttrGetU32(vportAttrs[OVS_VPORT_ATTR_UPCALL_PID]);
 
-        status = InitOvsVportCommon(gOvsSwitchContext, vport);
+        status = InitOvsVportCommon(switchContext, vport);
         ASSERT(status == STATUS_SUCCESS);
 
         OvsCreateMsgFromVport(vport,
                               msgIn,
                               msgOut,
                               tunnelContext->outputLength,
-                              gOvsSwitchContext->dpNo);
+                              switchContext->dpNo);
 
         *replyLen = msgOut->nlMsg.nlmsgLen;
 
         error = FALSE;
     } while (error);
+
+    if (locked) {
+        NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
+    }
 
     if (error) {
         POVS_MESSAGE_ERROR msgError = (POVS_MESSAGE_ERROR)msgOut;
@@ -2931,6 +3000,10 @@ OvsTunnelVportPendingInit(PVOID context,
         ASSERT(msgError);
         NlBuildErrorMsg(msgIn, msgError, nlError, replyLen);
         ASSERT(*replyLen != 0);
+    }
+
+    if (switchContext != NULL) {
+        OvsReleaseSwitchContext(switchContext);
     }
 }
 

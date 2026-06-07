@@ -519,6 +519,9 @@ _Use_decl_annotations_
 VOID
 OvsReleaseCtrlLock()
 {
+    /* NdisReleaseSpinLock resolves to KeReleaseSpinLock on the lock's inner
+     * SpinLock member, which PREfast cannot match to the annotated lock. */
+#pragma warning(suppress: 26110)
     NdisReleaseSpinLock(gOvsCtrlLock);
 }
 

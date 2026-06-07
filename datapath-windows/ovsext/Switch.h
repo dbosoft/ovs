@@ -236,6 +236,9 @@ OvsReleaseDatapath(OVS_DATAPATH *datapath,
                    LOCK_STATE_EX *lockState)
 {
     ASSERT(datapath);
+    /* PREfast cannot match the NDIS RW-lock handle released here to the lock
+     * identity named in the _Requires_lock_held_ annotation above. */
+#pragma warning(suppress: 26110)
     NdisReleaseRWLock(datapath->lock, lockState);
 }
 
@@ -243,10 +246,14 @@ POVS_SWITCH_CONTEXT
 OvsAcquireSwitchContext(VOID);
 
 /*
- * Must run at PASSIVE_LEVEL: when the last reference drops, the context is
- * freed, which releases NDIS RW and spin locks that require PASSIVE_LEVEL.
+ * Drops a reference. When the last reference drops the context is freed
+ * (OvsDeleteSwitchContext), which releases NDIS RW/spin locks and so requires
+ * PASSIVE_LEVEL. The release itself is callable up to DISPATCH_LEVEL: transient
+ * DISPATCH releases (e.g. the WFP tunnel path) never hold the last reference --
+ * the owning reference plus the teardown drain ensure the final release, and
+ * thus the free, only happens at PASSIVE_LEVEL.
  */
-_IRQL_requires_(PASSIVE_LEVEL)
+_IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext);
 

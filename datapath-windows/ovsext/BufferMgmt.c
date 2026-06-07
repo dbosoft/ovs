@@ -1189,6 +1189,9 @@ FixFragmentHeader6(UINT16 offset, const EthHdr *dstEth,
     nextHdr = dstIP->nexthdr;
     while (nextHdr != SOCKET_IPPROTO_FRAGMENT) {
         nextHdr = extHdr->nextHeader;
+        /* A single option length is (hdrExtLen + 1) << 3 with hdrExtLen a UINT8,
+         * so this term is bounded by 2048 and cannot overflow. */
+#pragma warning(suppress: 6297)
         extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + OVS_IPV6_OPT_LEN(extHdr));
         if (!extHdr) {
             break;
@@ -1445,6 +1448,9 @@ OvsFigureIPV6ExtHdrLayout(PNET_BUFFER_LIST nbl,
 
         offset += OVS_IPV6_OPT_LEN(extHdr);
         nextHdr = extHdr->nextHeader;
+        /* A single option length is (hdrExtLen + 1) << 3 with hdrExtLen a UINT8,
+         * so this term is bounded by 2048 and cannot overflow. */
+#pragma warning(suppress: 6297)
         extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + OVS_IPV6_OPT_LEN(extHdr));
     }
 
@@ -1539,6 +1545,9 @@ FixIPV6ExtHdrField(PNET_BUFFER nb, UINT16 l3Offset, UINT16 l4Offset,
         offset += OVS_IPV6_OPT_LEN(extHdr);
         nextHdr = extHdr->nextHeader;
         lastExtHdr = extHdr;
+        /* A single option length is (hdrExtLen + 1) << 3 with hdrExtLen a UINT8,
+         * so this term is bounded by 2048 and cannot overflow. */
+#pragma warning(suppress: 6297)
         extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + OVS_IPV6_OPT_LEN(extHdr));
     }
 
@@ -1558,12 +1567,20 @@ GenFragIdent6(PNET_BUFFER_LIST nbl, POVS_PACKET_HDR_INFO hdrInfo)
 
     curNb = NET_BUFFER_LIST_FIRST_NB(nbl);
     ASSERT(NET_BUFFER_NEXT_NB(curNb) == NULL);
+
+    KeQuerySystemTime(&randomSeed);
+    randNumber = randomSeed.LowPart * OVS_FRAG_MAGIC_NUMBER + 1;
+
     eth = (EthHdr *)NdisGetDataBuffer(curNb,
                                       hdrInfo->l4Offset,
                                       NULL, 1, 0);
+    if (eth == NULL) {
+        /* Headers are not contiguous, so the addresses cannot be hashed; still
+         * return a per-packet pseudo-random identification rather than a
+         * constant 0, to avoid fragment-id collisions across such packets. */
+        return randNumber;
+    }
     ipv6Hdr = (IPv6Hdr *)((PCHAR)eth + hdrInfo->l3Offset);
-    KeQuerySystemTime(&randomSeed);
-    randNumber = randomSeed.LowPart * OVS_FRAG_MAGIC_NUMBER + 1;
 
     srcHash = OvsJhashBytes((UINT32 *)(&(ipv6Hdr->saddr)), 4, randNumber);
     dstHash = OvsJhashBytes((UINT32 *)(&(ipv6Hdr->daddr)), 4, srcHash);
@@ -2141,10 +2158,11 @@ OvsCompleteNBL(PVOID switch_ctx,
     if (parent != NULL) {
         ctx = (POVS_BUFFER_CONTEXT)NET_BUFFER_LIST_CONTEXT_DATA_START(parent);
         ASSERT(ctx && ctx->magic == OVS_CTX_MAGIC);
-        UINT16 pendingSend = 1, exchange = 0;
         value = InterlockedDecrement((LONG volatile *)&ctx->refCount);
-        InterlockedCompareExchange16((SHORT volatile *)&pendingSend, exchange, (SHORT)ctx->pendingSend);
-        if (value == 1 && pendingSend == exchange) {
+        /* Atomically read the shared pendingSend flag (otherwise mutated only via
+         * the Interlocked* family). */
+        SHORT pendingSend = InterlockedOr16((SHORT volatile *)&ctx->pendingSend, 0);
+        if (value == 1 && pendingSend == 1) {
             InterlockedExchange16((SHORT volatile *)&ctx->pendingSend, 0);
             OvsSendNBLIngress(context, parent, ctx->sendFlags);
         } else if (value == 0) {

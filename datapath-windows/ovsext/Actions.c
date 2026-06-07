@@ -289,6 +289,10 @@ OvsDetectTunnelPkt(OvsForwardingContext *ovsFwdCtx,
          */
         if (ovsFwdCtx->srcVportNo != OVS_DPPORT_NUMBER_INVALID) {
 
+            /* dispatchLock is held across the action pipeline by the NDIS
+             * ingress path; PREfast cannot track the NDIS RW-lock across the
+             * call chain (genuine false positive). */
+#pragma warning(suppress: 26110)
             POVS_VPORT_ENTRY vport = OvsFindVportByPortNo(
                 ovsFwdCtx->switchContext, ovsFwdCtx->srcVportNo);
 
@@ -357,6 +361,9 @@ OvsAddPorts(OvsForwardingContext *ovsFwdCtx,
      * instead of the VIF ports. The context for the tunnel is settable
      * in OvsForwardingContext.
      */
+    /* dispatchLock held by the NDIS ingress path; PREfast cannot track the
+     * NDIS RW-lock across the call chain (genuine false positive). */
+#pragma warning(suppress: 26110)
     vport = OvsFindVportByPortNo(ovsFwdCtx->switchContext, dstPortId);
     if (vport == NULL || vport->ovsState != OVS_STATE_CONNECTED) {
         /*
@@ -549,6 +556,9 @@ OvsDoFlowLookupOutput(OvsForwardingContext* ovsFwdCtx)
     OvsFlow *flow = NULL;
     UINT64 hash = 0;
     NDIS_STATUS status = NDIS_STATUS_SUCCESS;
+    /* dispatchLock held by the NDIS ingress path; PREfast cannot track the
+     * NDIS RW-lock across the call chain (genuine false positive). */
+#pragma warning(suppress: 26110)
     POVS_VPORT_ENTRY vport =
         OvsFindVportByPortNo(ovsFwdCtx->switchContext, ovsFwdCtx->srcVportNo);
     if (vport == NULL || vport->ovsState != OVS_STATE_CONNECTED) {
@@ -2075,6 +2085,9 @@ OvsOutputUserspaceAction(OvsForwardingContext *ovsFwdCtx,
     OVS_FWD_INFO fwdInfo;
     OvsIPTunnelKey tunKey;
 
+    /* dispatchLock held by the NDIS ingress path; PREfast cannot track the
+     * NDIS RW-lock across the call chain (genuine false positive). */
+#pragma warning(suppress: 26110)
     POVS_VPORT_ENTRY vport = OvsFindVportByPortNo(ovsFwdCtx->switchContext,
                                                   ovsFwdCtx->srcVportNo);
 
@@ -2989,6 +3002,9 @@ OvsDoRecirc(POVS_SWITCH_CONTEXT switchContext,
 
         ovsFwdCtx.switchContext->datapath.misses++;
         InitializeListHead(&missedPackets);
+        /* dispatchLock held by the NDIS ingress path; PREfast cannot track the
+         * NDIS RW-lock across the call chain (genuine false positive). */
+#pragma warning(suppress: 26110)
         vport = OvsFindVportByPortNo(switchContext, srcPortNo);
         if (vport == NULL || vport->ovsState != OVS_STATE_CONNECTED) {
             OvsCompleteNBLForwardingCtx(&ovsFwdCtx,

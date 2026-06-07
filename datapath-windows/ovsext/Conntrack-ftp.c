@@ -121,6 +121,10 @@ OvsCtExtractNumbers(char *buf,
  *      to '192.168.137.104' and 49678
  *----------------------------------------------------------------------------
  */
+/* FTP control-connection ALG, invoked only for infrequent FTP control packets;
+ * the two 256-byte parse buffers bound the control-data copy and keep the frame
+ * within budget for the conntrack call depth. */
+#pragma warning(suppress: 6262)
 NDIS_STATUS
 OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
                OVS_PACKET_HDR_INFO *layers, UINT64 currentTime,

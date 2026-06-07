@@ -56,6 +56,14 @@ POVS_SWITCH_CONTEXT gOvsDatapaths[OVS_MAX_DATAPATHS];
 NDIS_SPIN_LOCK     gOvsDatapathLock;
 
 /*
+ * Upper bound (milliseconds) that OvsDeleteSwitch waits for in-flight switch
+ * references to drain before tearing down the vport lists. References are all
+ * per-operation and bounded, so the drain normally completes well within this;
+ * the cap only prevents a wedged accessor from hanging driver teardown.
+ */
+#define OVS_SWITCH_TEARDOWN_DRAIN_MAX_MS 10000
+
+/*
  * The upcall pid hash maps a globally-unique handle pid to its open instance.
  * Pids are allocated from a single driver-wide counter, so the hash is a
  * driver-global resource (lifetime = driver load), not per-switch: this keeps
@@ -250,9 +258,52 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
     if (switchContext)
     {
         dpNo = switchContext->dpNo;
-        OvsClearAllSwitchVports(switchContext);
+
+        /*
+         * Remove the switch from the datapath registry FIRST, so no new path
+         * (userspace IOCTL lookup, IpHelper route walk, WFP tunnel classify)
+         * can reach it once teardown begins. Then wait for any in-flight
+         * reference holders to drain back to the owning baseline (refCount == 1)
+         * before tearing down the vport lists: every cross-thread accessor takes
+         * a transient reference (OvsAcquireSwitchContext / OvsAcquireDatapathBy*),
+         * so refCount == 1 means nobody else is walking the lists, which makes
+         * the lock-free OvsClearAllSwitchVports safe. All such references are
+         * per-operation (released before any IRP is pended), so this normally
+         * drains well within the bound. The bound is a last-resort backstop
+         * against a wedged accessor: it trades an unbounded driver-teardown hang
+         * for a bounded one. If it ever fires, an accessor is still holding the
+         * context, so freeing it would be a use-after-free -- in that case we
+         * deliberately LEAK the context instead (a bounded one-time leak; the
+         * switch is already unregistered and unreachable). A log here means a
+         * real missing reference-release to investigate, not a benign timeout.
+         *
+         * refCount is read with InterlockedOr(.., 0): other CPUs mutate it via
+         * the Interlocked* family, so a plain load could race or miss updates.
+         */
         OvsUnregisterDatapath(switchContext);
-        OvsUninitSwitchContext(switchContext);
+
+        /* Bound the drain by ELAPSED time, not iteration count: NdisMSleep
+         * rounds up to the system tick (~15 ms), so counting iterations would
+         * make the real timeout many times the intended bound and the logged
+         * duration inaccurate. KeQueryInterruptTime() is monotonic 100ns units. */
+        ULONG64 startTime = KeQueryInterruptTime();
+        ULONG elapsedMs = 0;
+        while (InterlockedOr((LONG volatile *)&switchContext->refCount, 0) > 1 &&
+               elapsedMs < OVS_SWITCH_TEARDOWN_DRAIN_MAX_MS) {
+            NdisMSleep(1000);  /* >= 1 ms (rounded up to the system tick) */
+            elapsedMs = (ULONG)((KeQueryInterruptTime() - startTime) / 10000ULL);
+        }
+
+        LONG heldRefs = InterlockedOr((LONG volatile *)&switchContext->refCount, 0);
+        if (heldRefs > 1) {
+            OVS_LOG_ERROR("Switch %p teardown: %d reference(s) still held after "
+                          "%u ms; leaking the context to avoid a use-after-free "
+                          "(a wedged accessor failed to release its reference)",
+                          switchContext, heldRefs - 1, elapsedMs);
+        } else {
+            OvsClearAllSwitchVports(switchContext);
+            OvsUninitSwitchContext(switchContext);
+        }
     }
     OVS_LOG_TRACE("Exit: deleted switch %p  dpNo: %d", switchContext, dpNo);
 }
@@ -418,6 +469,7 @@ OvsUninitSwitchContext(POVS_SWITCH_CONTEXT switchContext)
  *  Frees up the contents of and also the switch context.
  * --------------------------------------------------------------------------
  */
+_IRQL_requires_(PASSIVE_LEVEL)
 static VOID
 OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 {
@@ -447,6 +499,7 @@ OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
     OVS_LOG_TRACE("Exit: Delete switchContext: %p", switchContext);
 }
 
+_Use_decl_annotations_
 VOID
 OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 {
@@ -455,6 +508,13 @@ OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext)
     }
 
     if (InterlockedDecrement(&switchContext->refCount) == 0) {
+        /* OvsDeleteSwitchContext requires PASSIVE_LEVEL. Reaching refCount 0
+         * (the last release) only happens on the PASSIVE teardown path: the
+         * owning reference is held until OvsUninitSwitchContext, and the
+         * teardown drain waits for transient references (which may be released
+         * at DISPATCH, e.g. the WFP tunnel path) to drop first. So this call is
+         * always at PASSIVE despite this function being callable up to DISPATCH. */
+#pragma warning(suppress: 28118)
         OvsDeleteSwitchContext(switchContext);
     }
 }
