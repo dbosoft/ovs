@@ -196,11 +196,14 @@ set(OVS_LIB_SOURCES
   lib/netdev-windows.c lib/wmi.c
   # --- dbosoft native dpif provider ---
   # The Windows datapath is the native dpif-windows provider talking to the ovsext
-  # driver via ovsext-channel, so the netlink datapath transport is not built on
-  # Windows: dpif-netlink.c, netlink-socket.c, netlink-conntrack.c and
-  # netlink-notifier.c are omitted.  netlink.c (the message codec) IS built -- the
-  # ovsext ABI is netlink-message-framed and message bodies use nl_msg_*.
-  lib/dpif-windows.c lib/ovsext-channel.c)
+  # driver via ovsext-channel, so the netlink datapath socket transport is not
+  # built on Windows: dpif-netlink.c, netlink-socket.c and netlink-notifier.c are
+  # omitted.  netlink.c (the message codec) IS built -- the ovsext ABI is
+  # netlink-message-framed and message bodies use nl_msg_*.  netlink-conntrack.c
+  # IS built for its ctnetlink parser/encoder (the ovsext CT family speaks the
+  # same wire format); only its NETLINK_NETFILTER socket functions are compiled
+  # out (#ifndef _WIN32) -- the provider drives ct dump/flush over ovsext-channel.
+  lib/dpif-windows.c lib/ovsext-channel.c lib/netlink-conntrack.c)
 
 add_library(openvswitch STATIC ${OVS_LIB_SOURCES} ${OVS_GENERATED_SOURCES})
 

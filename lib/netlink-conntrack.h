@@ -17,6 +17,7 @@
 #ifndef NETLINK_CONNTRACK_H
 #define NETLINK_CONNTRACK_H
 
+#include <linux/netfilter/nfnetlink_conntrack.h>
 #include <linux/netfilter/nfnetlink_cttimeout.h>
 
 #include "byte-order.h"
@@ -48,6 +49,12 @@ struct nl_ct_timeout_policy {
 struct nl_ct_dump_state;
 struct nl_ct_timeout_policy_dump_state;
 
+/* The conntrack/timeout-policy dump and flush helpers below drive the Linux
+ * NETLINK_NETFILTER socket transport (nl_dump/nl_transact), which is not built
+ * on Windows.  There the native dpif-windows provider issues the equivalent
+ * ovsext CT-family requests over ovsext-channel and reuses the parser/encoder
+ * helpers that remain available on both platforms (see below). */
+#ifndef _WIN32
 int nl_ct_dump_start(struct nl_ct_dump_state **, const uint16_t *zone,
                      int *ptot_bkts);
 int nl_ct_dump_next(struct nl_ct_dump_state *, struct ct_dpif_entry *);
@@ -68,6 +75,14 @@ int nl_ct_timeout_policy_dump_next(
     struct nl_ct_timeout_policy *nl_tp);
 int nl_ct_timeout_policy_dump_done(
     struct nl_ct_timeout_policy_dump_state *state);
+#endif /* !_WIN32 */
+
+/* Transport-free ctnetlink message helpers, available on all platforms. */
+void nl_msg_put_nfgenmsg(struct ofpbuf *msg, size_t expected_payload,
+                         int family, uint8_t subsystem, uint8_t cmd,
+                         uint32_t flags);
+bool nl_ct_put_ct_tuple(struct ofpbuf *buf, const struct ct_dpif_tuple *tuple,
+                        enum ctattr_type type);
 
 bool nl_ct_parse_entry(struct ofpbuf *, struct ct_dpif_entry *,
                        enum nl_ct_event_type *);
