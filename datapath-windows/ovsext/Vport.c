@@ -54,6 +54,7 @@
  * filter threads. */
 typedef struct _OVS_TUNFLT_INIT_CONTEXT {
     POVS_SWITCH_CONTEXT switchContext;
+    UINT32 dpNo;
     UINT32 outputLength;
     PVOID outputBuffer;
     PVOID inputBuffer;
@@ -1131,6 +1132,9 @@ OvsInitTunnelVport(PVOID userContext,
         tunnelContext->outputBuffer = usrParamsCtx->outputBuffer;
         tunnelContext->outputLength = usrParamsCtx->outputLength;
         tunnelContext->vport = vport;
+        /* Record the originating datapath so the async completion attaches the
+         * vport to the datapath this create targeted, not the default one. */
+        tunnelContext->dpNo = usrParamsCtx->switchContext->dpNo;
 
         status = OvsInitVxlanTunnel(usrParamsCtx->irp,
                                     vport,
@@ -2868,10 +2872,12 @@ OvsTunnelVportPendingInit(PVOID context,
     NL_ERROR nlError = NL_ERROR_SUCCESS;
     BOOLEAN error = TRUE;
     /* This async callback runs on a tunnel-filter worker thread and can race
-     * switch detach; reference the default datapath instead of reading
-     * gOvsSwitchContext bare, and hold its dispatchLock while mutating the
-     * vport lists (the create path holds it too). */
-    POVS_SWITCH_CONTEXT switchContext = OvsAcquireSwitchContext();
+     * switch detach; reference the originating datapath (the one the create
+     * targeted) and hold its dispatchLock while mutating the vport lists (the
+     * create path holds it too). If that datapath has detached meanwhile,
+     * OvsAcquireDatapathByNumber returns NULL and we fail cleanly below. */
+    POVS_SWITCH_CONTEXT switchContext =
+        OvsAcquireDatapathByNumber(tunnelContext->dpNo);
     LOCK_STATE_EX lockState;
     BOOLEAN locked = FALSE;
 
