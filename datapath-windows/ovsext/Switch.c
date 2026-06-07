@@ -282,11 +282,16 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
          */
         OvsUnregisterDatapath(switchContext);
 
-        ULONG drainMs = 0;
+        /* Bound the drain by ELAPSED time, not iteration count: NdisMSleep
+         * rounds up to the system tick (~15 ms), so counting iterations would
+         * make the real timeout many times the intended bound and the logged
+         * duration inaccurate. KeQueryInterruptTime() is monotonic 100ns units. */
+        ULONG64 startTime = KeQueryInterruptTime();
+        ULONG elapsedMs = 0;
         while (InterlockedOr((LONG volatile *)&switchContext->refCount, 0) > 1 &&
-               drainMs < OVS_SWITCH_TEARDOWN_DRAIN_MAX_MS) {
-            NdisMSleep(1000);  /* 1 ms */
-            drainMs++;
+               elapsedMs < OVS_SWITCH_TEARDOWN_DRAIN_MAX_MS) {
+            NdisMSleep(1000);  /* >= 1 ms (rounded up to the system tick) */
+            elapsedMs = (ULONG)((KeQueryInterruptTime() - startTime) / 10000ULL);
         }
 
         LONG heldRefs = InterlockedOr((LONG volatile *)&switchContext->refCount, 0);
@@ -294,7 +299,7 @@ OvsDeleteSwitch(POVS_SWITCH_CONTEXT switchContext)
             OVS_LOG_ERROR("Switch %p teardown: %d reference(s) still held after "
                           "%u ms; leaking the context to avoid a use-after-free "
                           "(a wedged accessor failed to release its reference)",
-                          switchContext, heldRefs - 1, drainMs);
+                          switchContext, heldRefs - 1, elapsedMs);
         } else {
             OvsClearAllSwitchVports(switchContext);
             OvsUninitSwitchContext(switchContext);

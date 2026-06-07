@@ -1567,15 +1567,20 @@ GenFragIdent6(PNET_BUFFER_LIST nbl, POVS_PACKET_HDR_INFO hdrInfo)
 
     curNb = NET_BUFFER_LIST_FIRST_NB(nbl);
     ASSERT(NET_BUFFER_NEXT_NB(curNb) == NULL);
+
+    KeQuerySystemTime(&randomSeed);
+    randNumber = randomSeed.LowPart * OVS_FRAG_MAGIC_NUMBER + 1;
+
     eth = (EthHdr *)NdisGetDataBuffer(curNb,
                                       hdrInfo->l4Offset,
                                       NULL, 1, 0);
     if (eth == NULL) {
-        return 0;
+        /* Headers are not contiguous, so the addresses cannot be hashed; still
+         * return a per-packet pseudo-random identification rather than a
+         * constant 0, to avoid fragment-id collisions across such packets. */
+        return randNumber;
     }
     ipv6Hdr = (IPv6Hdr *)((PCHAR)eth + hdrInfo->l3Offset);
-    KeQuerySystemTime(&randomSeed);
-    randNumber = randomSeed.LowPart * OVS_FRAG_MAGIC_NUMBER + 1;
 
     srcHash = OvsJhashBytes((UINT32 *)(&(ipv6Hdr->saddr)), 4, randNumber);
     dstHash = OvsJhashBytes((UINT32 *)(&(ipv6Hdr->daddr)), 4, srcHash);
