@@ -244,21 +244,41 @@ OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
              * **/
             char *curHdr = NULL;
             char *nextHdr = NULL;
+            char *ftpStrEnd = NULL;
+            size_t reqLen = 0;
             int index = 0;
             int isIpv6AddressFamily = 0;
             char ftpStr[512] = {0x00};
 
-            RtlCopyMemory(ftpStr, req, strlen(req));
-            for (curHdr = ftpStr; *curHdr != '|'; curHdr++);
-            curHdr = curHdr + 1;;
+            /* 'req' is NUL-terminated inside ftpMsg[256], so it fits in ftpStr;
+             * bail defensively if a future caller passes something longer. */
+            reqLen = strlen(req);
+            if (reqLen >= sizeof(ftpStr)) {
+                return NDIS_STATUS_SUCCESS;
+            }
+            RtlCopyMemory(ftpStr, req, reqLen);
+            ftpStrEnd = ftpStr + sizeof(ftpStr);
+            /* Scan for the leading '|'. The trailing zero-fill is not '|', so the
+             * scan must stop at the buffer end or it reads past ftpStr. */
+            for (curHdr = ftpStr; curHdr < ftpStrEnd && *curHdr != '|'; curHdr++);
+            if (curHdr >= ftpStrEnd) {
+                /* No '|' delimiter in a malformed payload. */
+                return NDIS_STATUS_SUCCESS;
+            }
+            curHdr = curHdr + 1;
             do {
                 /** index == 0 parse address family,
                  *  index == 1 parse address,
                  *  index == 2 parse port **/
-                for (nextHdr = curHdr; *nextHdr != '|'; nextHdr++);
+                for (nextHdr = curHdr;
+                     nextHdr < ftpStrEnd && *nextHdr != '|'; nextHdr++);
+                if (nextHdr >= ftpStrEnd) {
+                    /* Field not terminated within the buffer. */
+                    break;
+                }
                 *nextHdr = '\0';
 
-                if (*curHdr == '0' || !curHdr || index > 2) {
+                if (!curHdr || *curHdr == '0' || index > 2) {
                     break;
                 }
 

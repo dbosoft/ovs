@@ -1477,11 +1477,22 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                                 ? NAT_ACTION_SRC : NAT_ACTION_DST);
                         break;
                     case OVS_NAT_ATTR_IP_MIN:
+                        /* This nested attribute is walked policy-less, so the
+                         * size is user-controlled; reject anything that would
+                         * overflow the address union (4 = IPv4, 16 = IPv6). */
+                        if (NlAttrGetSize(natAttr) >
+                                sizeof(natActionInfo.minAddr)) {
+                            return NDIS_STATUS_INVALID_PARAMETER;
+                        }
                         memcpy(&natActionInfo.minAddr,
                                 NlAttrData(natAttr), NlAttrGetSize(natAttr));
                         hasMinIp = TRUE;
                         break;
                     case OVS_NAT_ATTR_IP_MAX:
+                        if (NlAttrGetSize(natAttr) >
+                                sizeof(natActionInfo.maxAddr)) {
+                            return NDIS_STATUS_INVALID_PARAMETER;
+                        }
                         memcpy(&natActionInfo.maxAddr,
                                 NlAttrData(natAttr), NlAttrGetSize(natAttr));
                         hasMaxIp = TRUE;
