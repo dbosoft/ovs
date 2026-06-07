@@ -31,6 +31,18 @@ typedef enum FTP_TYPE {
     FTP_EXTEND_TYPE_ACTIVE
 } FTP_TYPE;
 
+/* ASCII-only uppercase. The CRT toupper() must not be used here: on Windows
+ * kernels it routes through RtlAnsiCharToUnicodeChar/RtlpIsUtf8Process, which
+ * touches pageable per-process locale state. The conntrack ALG runs in the
+ * datapath at DISPATCH_LEVEL, where such a page fault bugchecks the box
+ * (IRQL_NOT_LESS_OR_EQUAL). FTP control keywords are pure ASCII, so a plain
+ * 'a'..'z' fold is both correct and safe at any IRQL. */
+static __inline char
+OvsAsciiToUpper(char c)
+{
+    return (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
+}
+
 static __inline UINT32
 OvsStrncmp(const char *s1, const char *s2, size_t n)
 {
@@ -39,7 +51,8 @@ OvsStrncmp(const char *s1, const char *s2, size_t n)
     }
 
     const char *s2end = s2 + n;
-    while (s2 < s2end && *s2 != '\0' && toupper(*s1) == toupper(*s2)) {
+    while (s2 < s2end && *s2 != '\0'
+           && OvsAsciiToUpper(*s1) == OvsAsciiToUpper(*s2)) {
         s1++, s2++;
     }
 
@@ -47,7 +60,7 @@ OvsStrncmp(const char *s1, const char *s2, size_t n)
         return 0;
     }
 
-    return (UINT32)(toupper(*s1) - toupper(*s2));
+    return (UINT32)(OvsAsciiToUpper(*s1) - OvsAsciiToUpper(*s2));
 }
 
 static __inline VOID
