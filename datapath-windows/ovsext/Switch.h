@@ -236,6 +236,9 @@ OvsReleaseDatapath(OVS_DATAPATH *datapath,
                    LOCK_STATE_EX *lockState)
 {
     ASSERT(datapath);
+    /* PREfast cannot match the NDIS RW-lock handle released here to the lock
+     * identity named in the _Requires_lock_held_ annotation above. */
+#pragma warning(suppress: 26110)
     NdisReleaseRWLock(datapath->lock, lockState);
 }
 

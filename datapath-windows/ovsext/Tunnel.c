@@ -215,6 +215,9 @@ Exit:
 }
 
 
+/* WFP VXLAN-decap worker on the tunnel callout path, bounded call depth; the
+ * forwarding context and key structs on the frame are acceptable here. */
+#pragma warning(suppress: 6262)
 static NTSTATUS
 OvsInjectPacketThroughActions(PNET_BUFFER_LIST pNbl,
                               OVS_TUNNEL_PENDED_PACKET *packet,

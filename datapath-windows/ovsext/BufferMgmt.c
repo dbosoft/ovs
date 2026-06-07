@@ -1189,6 +1189,9 @@ FixFragmentHeader6(UINT16 offset, const EthHdr *dstEth,
     nextHdr = dstIP->nexthdr;
     while (nextHdr != SOCKET_IPPROTO_FRAGMENT) {
         nextHdr = extHdr->nextHeader;
+        /* A single option length is (hdrExtLen + 1) << 3 with hdrExtLen a UINT8,
+         * so this term is bounded by 2048 and cannot overflow. */
+#pragma warning(suppress: 6297)
         extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + OVS_IPV6_OPT_LEN(extHdr));
         if (!extHdr) {
             break;
@@ -1445,6 +1448,9 @@ OvsFigureIPV6ExtHdrLayout(PNET_BUFFER_LIST nbl,
 
         offset += OVS_IPV6_OPT_LEN(extHdr);
         nextHdr = extHdr->nextHeader;
+        /* A single option length is (hdrExtLen + 1) << 3 with hdrExtLen a UINT8,
+         * so this term is bounded by 2048 and cannot overflow. */
+#pragma warning(suppress: 6297)
         extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + OVS_IPV6_OPT_LEN(extHdr));
     }
 
@@ -1539,6 +1545,9 @@ FixIPV6ExtHdrField(PNET_BUFFER nb, UINT16 l3Offset, UINT16 l4Offset,
         offset += OVS_IPV6_OPT_LEN(extHdr);
         nextHdr = extHdr->nextHeader;
         lastExtHdr = extHdr;
+        /* A single option length is (hdrExtLen + 1) << 3 with hdrExtLen a UINT8,
+         * so this term is bounded by 2048 and cannot overflow. */
+#pragma warning(suppress: 6297)
         extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + OVS_IPV6_OPT_LEN(extHdr));
     }
 
@@ -1561,6 +1570,9 @@ GenFragIdent6(PNET_BUFFER_LIST nbl, POVS_PACKET_HDR_INFO hdrInfo)
     eth = (EthHdr *)NdisGetDataBuffer(curNb,
                                       hdrInfo->l4Offset,
                                       NULL, 1, 0);
+    if (eth == NULL) {
+        return 0;
+    }
     ipv6Hdr = (IPv6Hdr *)((PCHAR)eth + hdrInfo->l3Offset);
     KeQuerySystemTime(&randomSeed);
     randNumber = randomSeed.LowPart * OVS_FRAG_MAGIC_NUMBER + 1;
@@ -2143,7 +2155,11 @@ OvsCompleteNBL(PVOID switch_ctx,
         ASSERT(ctx && ctx->magic == OVS_CTX_MAGIC);
         UINT16 pendingSend = 1, exchange = 0;
         value = InterlockedDecrement((LONG volatile *)&ctx->refCount);
+        /* pendingSend/exchange are locals used only to atomically sample the
+         * shared ctx->pendingSend; the interlocked-on-local idiom is intentional. */
+#pragma warning(suppress: 28113)
         InterlockedCompareExchange16((SHORT volatile *)&pendingSend, exchange, (SHORT)ctx->pendingSend);
+#pragma warning(suppress: 28112)
         if (value == 1 && pendingSend == exchange) {
             InterlockedExchange16((SHORT volatile *)&ctx->pendingSend, 0);
             OvsSendNBLIngress(context, parent, ctx->sendFlags);

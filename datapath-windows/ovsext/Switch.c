@@ -483,6 +483,7 @@ OvsDeleteSwitchContext(POVS_SWITCH_CONTEXT switchContext)
     OVS_LOG_TRACE("Exit: Delete switchContext: %p", switchContext);
 }
 
+_IRQL_requires_(PASSIVE_LEVEL)
 VOID
 OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext)
 {

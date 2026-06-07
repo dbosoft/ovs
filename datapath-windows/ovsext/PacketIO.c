@@ -165,7 +165,11 @@ OvsSendNBLIngress(POVS_SWITCH_CONTEXT switchContext,
 
     POVS_BUFFER_CONTEXT ctx = (POVS_BUFFER_CONTEXT)NET_BUFFER_LIST_CONTEXT_DATA_START(netBufferLists);
     LONG refCount = 1, exchange = 0;
+    /* refCount/exchange are locals used only to atomically sample the shared
+     * ctx->refCount; the interlocked-on-local idiom is intentional. */
+#pragma warning(suppress: 28113)
     InterlockedCompareExchange((LONG volatile *)&refCount, exchange, (LONG)ctx->refCount);
+#pragma warning(suppress: 28112)
     if (refCount != exchange) {
         InterlockedExchange((LONG volatile *)&ctx->sendFlags, sendFlags);
         InterlockedExchange16((SHORT volatile *)&ctx->pendingSend, 1);

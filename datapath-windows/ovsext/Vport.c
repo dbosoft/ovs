@@ -334,6 +334,9 @@ HvDeletePort(POVS_SWITCH_CONTEXT switchContext,
  * to post an event to netdev-windows.c.
  * --------------------------------------------------------------------------
  */
+/* PASSIVE_LEVEL NDIS NIC-create callback with a bounded call depth; the
+ * IF_COUNTED_STRING friendly name on the frame is acceptable here. */
+#pragma warning(suppress: 6262)
 NDIS_STATUS
 HvCreateNic(POVS_SWITCH_CONTEXT switchContext,
             PNDIS_SWITCH_NIC_PARAMETERS nicParam)
@@ -1342,6 +1345,10 @@ OvsRemoveAndDeleteVport(PVOID usrParamsContext,
         if (hvDelete && vport->isAbsentOnHv == FALSE) {
             switchContext->countInternalVports--;
             ASSERT(switchContext->countInternalVports >= 0);
+            /* Runs under dispatchLock on the vport-delete path, or single-threaded
+             * during switch teardown; PREfast cannot model the lock across these
+             * mixed callers (genuine false positive). */
+#pragma warning(suppress: 26110)
             OvsUnBindVportWithIpHelper(vport, switchContext);
         }
         hvSwitchPort = TRUE;
@@ -2276,6 +2283,7 @@ OvsGetVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
 }
 
+_Requires_lock_held_(switchContext->dispatchLock)
 static UINT32
 OvsComputeVportNo(POVS_SWITCH_CONTEXT switchContext)
 {
@@ -2539,6 +2547,9 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                  vport->ovsType);
 
 Cleanup:
+    /* dispatchLock is acquired before any goto Cleanup; PREfast cannot prove it
+     * is held on every path to this shared label (genuine false positive). */
+#pragma warning(suppress: 26110)
     NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
 
     if ((nlError != NL_ERROR_SUCCESS) && (nlError != NL_ERROR_PENDING)) {
@@ -2763,6 +2774,9 @@ OvsDeleteVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     }
 
 Cleanup:
+    /* dispatchLock is acquired before any goto Cleanup; PREfast cannot prove it
+     * is held on every path to this shared label (genuine false positive). */
+#pragma warning(suppress: 26110)
     NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
 
     if ((nlError != NL_ERROR_SUCCESS) && (nlError != NL_ERROR_PENDING)) {

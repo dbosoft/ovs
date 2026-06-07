@@ -73,6 +73,9 @@ _Releases_lock_(gOvsPidHashLock)
 static __inline VOID
 OvsReleasePidHashLock()
 {
+    /* NdisReleaseSpinLock resolves to KeReleaseSpinLock on the lock's inner
+     * SpinLock member, which PREfast cannot match to the annotated lock. */
+#pragma warning(suppress: 26110)
     NdisReleaseSpinLock(&gOvsPidHashLock);
 }
 
@@ -416,6 +419,9 @@ _MapNlAttrToOvsPktExec(PNL_MSG_HDR nlMsgHdr, PNL_ATTR *nlAttrs,
     }
 }
 
+/* PASSIVE_LEVEL OVS_PACKET_CMD_EXECUTE IOCTL handler with a bounded call depth;
+ * the OvsFlowKey and header-info structs on the frame are acceptable here. */
+#pragma warning(suppress: 6262)
 NTSTATUS
 OvsExecuteDpIoctl(OvsPacketExecute *execute, POVS_SWITCH_CONTEXT switchContext)
 {

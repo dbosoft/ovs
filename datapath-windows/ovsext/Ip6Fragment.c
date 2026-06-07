@@ -30,6 +30,8 @@ static PLIST_ENTRY OvsIp6FragTable;
 #define MAX_IPDATAGRAM_SIZE 65535
 #define MAX_FRAGMENTS MAX_IPDATAGRAM_SIZE/MIN_FRAGMENT_SIZE + 1
 
+static KSTART_ROUTINE OvsIp6FragmentEntryCleaner;
+
 static __inline UINT32
 OvsGetIP6FragmentHash(POVS_IP6FRAG_KEY fragKey)
 {

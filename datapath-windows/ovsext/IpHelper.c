@@ -365,6 +365,10 @@ OvsDumpRoute(const SOCKADDR_INET *sourceAddress,
     OvsDumpIpAddrMsg("NextHop", &(route->NextHop));
 }
 
+/* PASSIVE_LEVEL route lookup (GetBestRoute2 requires PASSIVE_LEVEL) with a
+ * bounded call depth; the MIB_IPFORWARD_ROW2 and interface-name buffers on the
+ * frame are acceptable here. */
+#pragma warning(suppress: 6262)
 NTSTATUS
 OvsGetRoute(SOCKADDR_INET *destinationAddress,
             PMIB_IPFORWARD_ROW2 route,
@@ -402,6 +406,9 @@ OvsGetRoute(SOCKADDR_INET *destinationAddress,
                                &crtSrcAddr);
 
         if (result != STATUS_SUCCESS) {
+            /* lock acquired above for this list entry; PREfast loses the
+             * per-iteration lock identity across the list walk. */
+#pragma warning(suppress: 26110)
             ExReleaseResourceLite(&crtInstance->lock);
             continue;
         }
@@ -415,6 +422,9 @@ OvsGetRoute(SOCKADDR_INET *destinationAddress,
                                         IF_MAX_STRING_SIZE + 1);
 
         if (NT_SUCCESS(status)) {
+            /* DBG-only length for the trace below; the result is not examined
+             * further (status is reset before the route decision). */
+#pragma warning(suppress: 28193)
             status = RtlStringCbLengthW(interfaceName, IF_MAX_STRING_SIZE,
                                         &strLen);
         }
@@ -468,6 +478,9 @@ OvsGetRoute(SOCKADDR_INET *destinationAddress,
                 }
             }
         }
+        /* lock acquired above for this list entry; PREfast loses the
+         * per-iteration lock identity across the list walk. */
+#pragma warning(suppress: 26110)
         ExReleaseResourceLite(&crtInstance->lock);
     }
     ExReleaseResourceLite(&ovsInstanceListLock);

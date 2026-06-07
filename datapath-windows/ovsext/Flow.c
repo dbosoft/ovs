@@ -554,6 +554,9 @@ OvsFlowNlGetCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
  *    Handler for OVS_FLOW_CMD_GET command.
  *----------------------------------------------------------------------------
  */
+/* PASSIVE_LEVEL IOCTL handler with a bounded, shallow call depth; the netlink
+ * attribute arrays and flow get in/out structs on the frame are acceptable. */
+#pragma warning(suppress: 6262)
 NTSTATUS
 _FlowNlGetCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                      UINT32 *replyLen)
