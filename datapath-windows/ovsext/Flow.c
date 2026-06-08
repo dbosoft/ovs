@@ -1530,6 +1530,178 @@ done:
 
 /*
  *----------------------------------------------------------------------------
+ *  OvsValidateActionSizes --
+ *    Validates, once at flow-install time (PASSIVE_LEVEL), that every action
+ *    attribute the executor later reads at DISPATCH_LEVEL is large enough for
+ *    that read. Installed actions are stored verbatim and replayed by
+ *    OvsDoExecuteActions with no per-read size check (the NlAttrGet* accessors
+ *    only ASSERT the size, so a short attribute is an out-of-bounds read in the
+ *    hot path / a checked-build bugcheck). Rejecting an undersized action here
+ *    keeps the executor safe without a guard on every DISPATCH read.
+ *
+ *    Only minimum sizes are enforced (>=), never an exact match, so a
+ *    well-formed action carrying trailing bytes is still accepted. Variable
+ *    length actions whose payload is validated by their own handler (CT) or
+ *    that the executor reads without a fixed-size accessor are left untouched.
+ *    Recursion into nested action lists is bounded like the executor's
+ *    deferred-action nesting capacity.
+ *
+ *  Results:
+ *    TRUE if every checked attribute is adequately sized; FALSE otherwise.
+ *----------------------------------------------------------------------------
+ */
+static BOOLEAN
+OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
+{
+    const UINT32 maxDepth = DEFERRED_ACTION_QUEUE_SIZE;
+    PNL_ATTR a;
+    INT rem;
+
+    if (depth > maxDepth) {
+        return FALSE;
+    }
+
+    NL_ATTR_FOR_EACH (a, rem, actions, actionsLen) {
+        UINT32 size = NlAttrGetSize(a);
+
+        switch (NlAttrType(a)) {
+        case OVS_ACTION_ATTR_OUTPUT:
+        case OVS_ACTION_ATTR_RECIRC:
+        case OVS_ACTION_ATTR_METER:
+            if (size < sizeof(UINT32)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_POP_MPLS:
+            if (size < sizeof(ovs_be16)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_PUSH_VLAN:
+            if (size < sizeof(struct ovs_action_push_vlan)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_PUSH_MPLS:
+            if (size < sizeof(struct ovs_action_push_mpls)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_ADD_MPLS:
+            if (size < sizeof(struct ovs_action_add_mpls)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_HASH:
+            if (size < sizeof(struct ovs_action_hash)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_SET: {
+            /* The SET payload is a single nested flow-key attribute that
+             * OvsExecuteSetAction reads. Enforce that key attribute's minimum
+             * length, and for a tunnel set validate the sub-attributes
+             * OvsTunnelAttrToIPTunnelKey reads. */
+            PNL_ATTR setKey;
+            UINT32 keyType;
+
+            if (size < NLA_HDRLEN) {
+                return FALSE;
+            }
+            setKey = (PNL_ATTR)NlAttrData(a);
+            /* The nested key attribute must itself fit within the SET payload
+             * before its length/type are trusted below. */
+            if (!NlAttrIsValid(setKey, size)) {
+                return FALSE;
+            }
+            keyType = NlAttrType(setKey);
+            if (keyType < ARRAY_SIZE(nlFlowKeyPolicy) &&
+                nlFlowKeyPolicy[keyType].minLen &&
+                NlAttrGetSize(setKey) < nlFlowKeyPolicy[keyType].minLen) {
+                return FALSE;
+            }
+            if (keyType == OVS_KEY_ATTR_TUNNEL) {
+                PNL_ATTR t;
+                INT trem;
+                NL_ATTR_FOR_EACH (t, trem, NlAttrData(setKey),
+                                  NlAttrGetSize(setKey)) {
+                    UINT32 tt = NlAttrType(t);
+                    if (tt < ARRAY_SIZE(nlFlowTunnelKeyPolicy) &&
+                        nlFlowTunnelKeyPolicy[tt].minLen &&
+                        NlAttrGetSize(t) < nlFlowTunnelKeyPolicy[tt].minLen) {
+                        return FALSE;
+                    }
+                }
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_SAMPLE: {
+            const PNL_ATTR prob =
+                NlAttrFindNested(a, OVS_SAMPLE_ATTR_PROBABILITY);
+            const PNL_ATTR nested =
+                NlAttrFindNested(a, OVS_SAMPLE_ATTR_ACTIONS);
+            if (prob && NlAttrGetSize(prob) < sizeof(UINT32)) {
+                return FALSE;
+            }
+            if (nested &&
+                !OvsValidateActionSizes(NlAttrData(nested),
+                                        NlAttrGetSize(nested), depth + 1)) {
+                return FALSE;
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_CHECK_PKT_LEN: {
+            const PNL_ATTR pktLen =
+                NlAttrFindNested(a, OVS_CHECK_PKT_LEN_ATTR_PKT_LEN);
+            const PNL_ATTR gtr = NlAttrFindNested(a,
+                OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER);
+            const PNL_ATTR leq = NlAttrFindNested(a,
+                OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_LESS_EQUAL);
+            if (pktLen && NlAttrGetSize(pktLen) < sizeof(UINT16)) {
+                return FALSE;
+            }
+            if (gtr &&
+                !OvsValidateActionSizes(NlAttrData(gtr),
+                                        NlAttrGetSize(gtr), depth + 1)) {
+                return FALSE;
+            }
+            if (leq &&
+                !OvsValidateActionSizes(NlAttrData(leq),
+                                        NlAttrGetSize(leq), depth + 1)) {
+                return FALSE;
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_CLONE:
+            if (!OvsValidateActionSizes(NlAttrData(a), NlAttrGetSize(a),
+                                        depth + 1)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_DEC_TTL: {
+            const PNL_ATTR nested =
+                NlAttrFindNested(a, OVS_DEC_TTL_ATTR_ACTION);
+            if (nested &&
+                !OvsValidateActionSizes(NlAttrData(nested),
+                                        NlAttrGetSize(nested), depth + 1)) {
+                return FALSE;
+            }
+            break;
+        }
+        default:
+            /* Variable-length or payload-less actions (USERSPACE, CT,
+             * CT_CLEAR, POP_VLAN, TRUNC, DROP, ...): no fixed-size field is
+             * read here through a size-unchecked accessor, or the payload is
+             * validated by the action's own handler. */
+            break;
+        }
+    }
+
+    return TRUE;
+}
+
+/*
+ *----------------------------------------------------------------------------
  *  _MapNlToFlowPut --
  *    Maps input netlink message to OvsFlowPut.
  *----------------------------------------------------------------------------
@@ -1623,6 +1795,17 @@ _MapNlToFlowPut(POVS_MESSAGE msgIn, PNL_ATTR keyAttr,
     if (actionAttr) {
         mappedFlow->actionsLen = NlAttrGetSize(actionAttr);
         mappedFlow->actions = NlAttrGet(actionAttr);
+        /* The actions are stored verbatim and replayed at DISPATCH_LEVEL
+         * without per-read size checks; reject malformed action lengths now,
+         * at install time, so the executor's accessors never read past an
+         * attribute. */
+        if (!OvsValidateActionSizes(mappedFlow->actions,
+                                    mappedFlow->actionsLen, 0)) {
+            OVS_LOG_ERROR("Flow actions failed size validation, msg: %p",
+                          &(msgIn->nlMsg));
+            rc = STATUS_INVALID_PARAMETER;
+            goto done;
+        }
     }
 
     mappedFlow->dpNo = ovsHdr->dp_ifindex;

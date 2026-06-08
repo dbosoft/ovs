@@ -2116,8 +2116,11 @@ OvsOutputUserspaceAction(OvsForwardingContext *ovsFwdCtx,
         tunKey.flow_hash = tunKey.flow_hash ? tunKey.flow_hash : MAXINT16;
     }
 
-    elem = OvsCreateQueueNlPacket(NlAttrData(userdataAttr),
-                                  NlAttrGetSize(userdataAttr),
+    /* OVS_USERSPACE_ATTR_USERDATA is optional, so userdataAttr may be NULL;
+     * OvsCreateQueueNlPacket accepts a NULL/zero-length userdata. Do not pass
+     * it through NlAttrData/NlAttrGetSize, which would dereference NULL. */
+    elem = OvsCreateQueueNlPacket(userdataAttr ? NlAttrData(userdataAttr) : NULL,
+                                  userdataAttr ? NlAttrGetSize(userdataAttr) : 0,
                                   OVS_PACKET_CMD_ACTION,
                                   vport, key,
                                   egrTunAttr ? &(tunKey) : NULL,
