@@ -791,8 +791,19 @@ OvsPickupCtTupleAsLookupKey(POVS_CT_KEY ctKey, UINT16 zone, OvsFlowKey *flowKey)
             ctKey->src.addr.ipv4 = flowKey->ct.tuple_ipv4.ipv4_src;
             ctKey->dst.addr.ipv4 = flowKey->ct.tuple_ipv4.ipv4_dst;
             ctKey->nw_proto = flowKey->ct.tuple_ipv4.ipv4_proto;
-            ctKey->src.port = flowKey->ct.tuple_ipv4.src_port;
-            ctKey->dst.port = flowKey->ct.tuple_ipv4.dst_port;
+            /* For ICMP the ct tuple's src_port/dst_port encode the ICMP
+             * type/code rather than transport ports (see OvsCtUpdateTuple),
+             * and src.port aliases src.icmp_id in struct ct_endpoint. The
+             * caller OvsCtSetupLookupCtx already sets src.icmp_id and
+             * src.icmp_type from the packet (icmp_code stays 0, as required
+             * for echo request/reply). Copying the tuple's src_port into
+             * src.port here would overwrite that icmp_id with htons(icmp_type)
+             * and leave the reply icmp_id zero, so the reply would never match
+             * the entry. Carry the transport ports over only for non-ICMP. */
+            if (flowKey->ct.tuple_ipv4.ipv4_proto != IPPROTO_ICMP) {
+                ctKey->src.port = flowKey->ct.tuple_ipv4.src_port;
+                ctKey->dst.port = flowKey->ct.tuple_ipv4.dst_port;
+            }
         }
    }
 }
