@@ -241,16 +241,25 @@ OvsReadDpIoctl(PFILE_OBJECT fileObject,
             UINT16 sum, *ptr;
             UINT16 size = (UINT16)(elem->packet.payload - elem->packet.data +
                                   elem->hdrInfo.l4Offset);
-            RtlCopyMemory(outputBuffer, &elem->packet.data, size);
-            ASSERT(len - size >= elem->hdrInfo.l4PayLoad);
-            sum = CopyAndCalculateChecksum((UINT8 *)outputBuffer + size,
-                                           (UINT8 *)&elem->packet.data + size,
-                                           elem->hdrInfo.l4PayLoad, 0);
-            ptr =(UINT16 *)((UINT8 *)outputBuffer + size +
-                            (elem->hdrInfo.tcpCsumNeeded ?
-                             TCP_CSUM_OFFSET : UDP_CSUM_OFFSET));
-            *ptr = sum;
-            ovsUserStats.l4Csum++;
+            /* l4PayLoad is derived from on-wire length fields (IPv4 TotalLength
+             * / IPv6 PayloadLength) and is not otherwise bounded against the
+             * actual packet, so a crafted length could drive the checksum copy
+             * past the buffer. Verify the L4 span fits before copying; if not,
+             * skip the (optional) checksum fixup and emit the packet as-is. */
+            if (size <= len &&
+                (UINT32)len - size >= elem->hdrInfo.l4PayLoad) {
+                RtlCopyMemory(outputBuffer, &elem->packet.data, size);
+                sum = CopyAndCalculateChecksum((UINT8 *)outputBuffer + size,
+                                               (UINT8 *)&elem->packet.data + size,
+                                               elem->hdrInfo.l4PayLoad, 0);
+                ptr =(UINT16 *)((UINT8 *)outputBuffer + size +
+                                (elem->hdrInfo.tcpCsumNeeded ?
+                                 TCP_CSUM_OFFSET : UDP_CSUM_OFFSET));
+                *ptr = sum;
+                ovsUserStats.l4Csum++;
+            } else {
+                RtlCopyMemory(outputBuffer, &elem->packet.data, len);
+            }
         } else {
             RtlCopyMemory(outputBuffer, &elem->packet.data, len);
         }
@@ -883,21 +892,34 @@ OvsGetUpcallMsgSize(PVOID userData,
  */
 static VOID
 OvsCompletePacketHeader(UINT8 *packet,
+                        UINT32 packetLen,
                         BOOLEAN isRecv,
                         NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO csumInfo,
                         POVS_PACKET_HDR_INFO hdrInfoIn,
                         POVS_PACKET_HDR_INFO hdrInfoOut)
 {
+    /* l3Offset/l4Offset come from a prior parse of this packet; re-validate
+     * them against the copied buffer before dereferencing, so a malformed
+     * packet cannot drive an out-of-bounds access in this csum fixup (which
+     * is only an optimization -- skipping it on a bad offset is safe). */
     if ((isRecv && csumInfo.Receive.IpChecksumValueInvalid) ||
         (!isRecv && csumInfo.Transmit.IsIPv4 &&
         csumInfo.Transmit.IpHeaderChecksum)) {
-        PIPV4_HEADER ipHdr = (PIPV4_HEADER)(packet + hdrInfoOut->l3Offset);
-        ASSERT(hdrInfoIn->isIPv4);
-        ASSERT(ipHdr->Version == 4);
-        ipHdr->HeaderChecksum = IPChecksum((UINT8 *)ipHdr,
-            ipHdr->HeaderLength << 2,
-            (UINT16)~ipHdr->HeaderChecksum);
-        ovsUserStats.ipCsum++;
+        if ((UINT32)hdrInfoOut->l3Offset + sizeof(IPV4_HEADER) <= packetLen) {
+            PIPV4_HEADER ipHdr = (PIPV4_HEADER)(packet + hdrInfoOut->l3Offset);
+            ASSERT(hdrInfoIn->isIPv4);
+            ASSERT(ipHdr->Version == 4);
+            /* IPChecksum spans the full header including options
+             * (HeaderLength * 4), which can exceed the fixed 20 bytes checked
+             * above; ensure that extent is also within the buffer. */
+            if ((UINT32)hdrInfoOut->l3Offset +
+                    ((UINT32)ipHdr->HeaderLength << 2) <= packetLen) {
+                ipHdr->HeaderChecksum = IPChecksum((UINT8 *)ipHdr,
+                    ipHdr->HeaderLength << 2,
+                    (UINT16)~ipHdr->HeaderChecksum);
+                ovsUserStats.ipCsum++;
+            }
+        }
     }
     ASSERT(hdrInfoIn->tcpCsumNeeded == 0 && hdrInfoOut->udpCsumNeeded == 0);
     /*
@@ -910,36 +932,46 @@ OvsCompletePacketHeader(UINT8 *packet,
          * filled already.
          *
          */
-        PTCP_HDR tcpHdr = (PTCP_HDR)(packet + hdrInfoIn->l4Offset);
-        if (hdrInfoIn->isIPv4) {
-            PIPV4_HEADER ipHdr = (PIPV4_HEADER)(packet + hdrInfoIn->l3Offset);
-            hdrInfoOut->l4PayLoad = (UINT16)(ntohs(ipHdr->TotalLength) -
-                                    (ipHdr->HeaderLength << 2));
-            tcpHdr->th_sum = IPPseudoChecksum((UINT32 *)&ipHdr->SourceAddress,
-                                         (UINT32 *)&ipHdr->DestinationAddress,
-                                         IPPROTO_TCP, hdrInfoOut->l4PayLoad);
-        } else {
-            PIPV6_HEADER ipv6Hdr = (PIPV6_HEADER)(packet +
-                                                  hdrInfoIn->l3Offset);
-            hdrInfoOut->l4PayLoad =
-                (UINT16)(ntohs(ipv6Hdr->PayloadLength) +
-                hdrInfoIn->l3Offset + sizeof(IPV6_HEADER)-
-                hdrInfoIn->l4Offset);
-            ASSERT(hdrInfoIn->isIPv6);
-            tcpHdr->th_sum =
-                IPv6PseudoChecksum((UINT32 *)&ipv6Hdr->SourceAddress,
-                (UINT32 *)&ipv6Hdr->DestinationAddress,
-                IPPROTO_TCP, hdrInfoOut->l4PayLoad);
+        UINT32 l3HdrSize = hdrInfoIn->isIPv4 ? sizeof(IPV4_HEADER)
+                                             : sizeof(IPV6_HEADER);
+        if ((UINT32)hdrInfoIn->l4Offset + sizeof(TCP_HDR) <= packetLen &&
+            (UINT32)hdrInfoIn->l3Offset + l3HdrSize <= packetLen) {
+            PTCP_HDR tcpHdr = (PTCP_HDR)(packet + hdrInfoIn->l4Offset);
+            if (hdrInfoIn->isIPv4) {
+                PIPV4_HEADER ipHdr =
+                    (PIPV4_HEADER)(packet + hdrInfoIn->l3Offset);
+                hdrInfoOut->l4PayLoad = (UINT16)(ntohs(ipHdr->TotalLength) -
+                                        (ipHdr->HeaderLength << 2));
+                tcpHdr->th_sum =
+                    IPPseudoChecksum((UINT32 *)&ipHdr->SourceAddress,
+                                     (UINT32 *)&ipHdr->DestinationAddress,
+                                     IPPROTO_TCP, hdrInfoOut->l4PayLoad);
+            } else {
+                PIPV6_HEADER ipv6Hdr = (PIPV6_HEADER)(packet +
+                                                      hdrInfoIn->l3Offset);
+                hdrInfoOut->l4PayLoad =
+                    (UINT16)(ntohs(ipv6Hdr->PayloadLength) +
+                    hdrInfoIn->l3Offset + sizeof(IPV6_HEADER)-
+                    hdrInfoIn->l4Offset);
+                ASSERT(hdrInfoIn->isIPv6);
+                tcpHdr->th_sum =
+                    IPv6PseudoChecksum((UINT32 *)&ipv6Hdr->SourceAddress,
+                    (UINT32 *)&ipv6Hdr->DestinationAddress,
+                    IPPROTO_TCP, hdrInfoOut->l4PayLoad);
+            }
+            hdrInfoOut->tcpCsumNeeded = 1;
+            ovsUserStats.recalTcpCsum++;
         }
-        hdrInfoOut->tcpCsumNeeded = 1;
-        ovsUserStats.recalTcpCsum++;
     } else if (!isRecv) {
         if (hdrInfoIn->isTcp && csumInfo.Transmit.TcpChecksum) {
             hdrInfoOut->tcpCsumNeeded = 1;
         } else if (hdrInfoIn->isUdp && csumInfo.Transmit.UdpChecksum) {
             hdrInfoOut->udpCsumNeeded = 1;
         }
-        if (hdrInfoOut->tcpCsumNeeded || hdrInfoOut->udpCsumNeeded) {
+        if ((hdrInfoOut->tcpCsumNeeded || hdrInfoOut->udpCsumNeeded) &&
+            (UINT32)hdrInfoIn->l3Offset +
+                (hdrInfoIn->isIPv4 ? sizeof(IPV4_HEADER) : sizeof(IPV6_HEADER))
+                <= packetLen) {
 #ifdef DBG
             UINT16 sum, *ptr;
             UINT8 proto =
@@ -970,10 +1002,15 @@ OvsCompletePacketHeader(UINT8 *packet,
 #endif
             }
 #ifdef DBG
-            ptr = (UINT16 *)(packet + hdrInfoIn->l4Offset +
-                (hdrInfoOut->tcpCsumNeeded ?
-            TCP_CSUM_OFFSET : UDP_CSUM_OFFSET));
-            ASSERT(*ptr == sum);
+            if ((UINT32)hdrInfoIn->l4Offset +
+                    (hdrInfoOut->tcpCsumNeeded ?
+                         TCP_CSUM_OFFSET : UDP_CSUM_OFFSET) +
+                    sizeof(UINT16) <= packetLen) {
+                ptr = (UINT16 *)(packet + hdrInfoIn->l4Offset +
+                    (hdrInfoOut->tcpCsumNeeded ?
+                TCP_CSUM_OFFSET : UDP_CSUM_OFFSET));
+                ASSERT(*ptr == sum);
+            }
 #endif
         }
     }
@@ -1173,8 +1210,10 @@ OvsCreateQueueNlPacket(PVOID userData,
         RtlCopyMemory(dst, src, dataLen);
     }
 
-    /* Set csum if was offloaded */
-    OvsCompletePacketHeader(dst, isRecv, csumInfo, hdrInfo, &elem->hdrInfo);
+    /* Set csum if was offloaded. The packet payload occupies dataLen bytes at
+     * 'dst'; pass it so the header fixups stay within the copied buffer. */
+    OvsCompletePacketHeader(dst, dataLen, isRecv, csumInfo, hdrInfo,
+                            &elem->hdrInfo);
 
     /*
      * Finally insert VLAN tag

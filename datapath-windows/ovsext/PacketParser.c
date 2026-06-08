@@ -284,6 +284,8 @@ OvsParseIcmpV6(const NET_BUFFER_LIST *packet,
              */
             IPv6NdOptHdr ndOptStorage;
             const IPv6NdOptHdr *ndOpt;
+            UINT8 ndLinkAddrStorage[ETH_ADDR_LENGTH];
+            const UINT8 *ndLinkAddr;
             UINT16 optLen;
 
             ndOpt = OvsGetPacketBytes(packet, sizeof *ndOpt, ofs, &ndOptStorage);
@@ -299,17 +301,29 @@ OvsParseIcmpV6(const NET_BUFFER_LIST *packet,
             /*
              * Store the link layer address if the appropriate option is
              * provided.  It is considered an error if the same link
-             * layer option is specified twice.
+             * layer option is specified twice.  The address follows the
+             * 2-byte option header; fetch it from the packet rather than
+             * reading past the 2-byte option-header storage above.
              */
             if (ndOpt->type == ND_OPT_SOURCE_LINKADDR && optLen == 8) {
                 if (Eth_IsNullAddr(icmp6Key->arpSha)) {
-                    memcpy(icmp6Key->arpSha, ndOpt + 1, ETH_ADDR_LENGTH);
+                    ndLinkAddr = OvsGetPacketBytes(packet, ETH_ADDR_LENGTH,
+                        ofs + sizeof *ndOpt, ndLinkAddrStorage);
+                    if (!ndLinkAddr) {
+                        return NDIS_STATUS_FAILURE;
+                    }
+                    memcpy(icmp6Key->arpSha, ndLinkAddr, ETH_ADDR_LENGTH);
                 } else {
                     goto invalid;
                 }
             } else if (ndOpt->type == ND_OPT_TARGET_LINKADDR && optLen == 8) {
                 if (Eth_IsNullAddr(icmp6Key->arpTha)) {
-                    memcpy(icmp6Key->arpTha, ndOpt + 1, ETH_ADDR_LENGTH);
+                    ndLinkAddr = OvsGetPacketBytes(packet, ETH_ADDR_LENGTH,
+                        ofs + sizeof *ndOpt, ndLinkAddrStorage);
+                    if (!ndLinkAddr) {
+                        return NDIS_STATUS_FAILURE;
+                    }
+                    memcpy(icmp6Key->arpTha, ndLinkAddr, ETH_ADDR_LENGTH);
                 } else {
                     goto invalid;
                 }

@@ -191,7 +191,10 @@ OvsIpv4Reassemble(POVS_SWITCH_CONTEXT switchContext,
     packetHeader = layers->l3Offset + ipHdrLen;
     head = entry->head;
     while (head) {
-        if ((UINT32)(packetHeader + head->offset) > packetLen) {
+        /* Bound the full write extent (offset + len), not just the offset, so a
+         * crafted fragment cannot write past packetBuf. (The IPv6 reassembler
+         * already includes head->len in its equivalent guard.) */
+        if ((UINT32)(packetHeader + head->offset + head->len) > packetLen) {
             status = NDIS_STATUS_INVALID_DATA;
             goto cleanup;
         }

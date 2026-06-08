@@ -250,6 +250,15 @@ OvsBuildNewIpv6Hdr(EthHdr *eth, POVS_IP6FRAG_ENTRY entry,
         return NULL;
     }
 
+    /* The reassembled IPv6 payload (ext headers + data) is written into a
+     * UINT16 payload_len below; reject a sum that would not fit, so the
+     * allocation, the copies, and the written header stay consistent. The
+     * guard above bounds totalLen but not behindFragHdrLen. */
+    if ((UINT32)entry->beforeFragHdrLen + entry->behindFragHdrLen +
+            entry->totalLen > MAX_IPDATAGRAM_SIZE) {
+        return NULL;
+    }
+
     packetLen = (layers->l3Offset + sizeof(IPv6Hdr) +
                  entry->beforeFragHdrLen + entry->behindFragHdrLen + entry->totalLen);
     packetBuf = (CHAR*)OvsAllocateMemoryWithTag(packetLen, OVS_IP6FRAG_POOL_TAG);
@@ -656,6 +665,11 @@ OvsGetPacketMeta(PIP6_PktExtHeader_Meta pktMeta, EthHdr *eth,
         return NDIS_STATUS_INVALID_PACKET;
     }
 
+    /* Bound the extension-header walk and its length accumulation against the
+     * claimed payload, computed in 32-bit so a crafted header chain cannot wrap
+     * the UINT16 total or run the pointer walk past the payload. */
+    UINT32 payloadLen = ntohs(ip6Hdr->payload_len);
+
     for (;;) {
         if ((nextHdr != SOCKET_IPPROTO_HOPOPTS)
             && (nextHdr != SOCKET_IPPROTO_ROUTING)
@@ -676,23 +690,32 @@ OvsGetPacketMeta(PIP6_PktExtHeader_Meta pktMeta, EthHdr *eth,
             nextHdr == SOCKET_IPPROTO_DSTOPTS ||
             nextHdr == SOCKET_IPPROTO_AH) {
             UINT8 len  = extHdr->hdrExtLen;
+            /* The AH vs non-AH length formula must key off the header being
+             * advanced past (the current one), so capture it before nextHdr is
+             * overwritten with the following header's type. */
+            UINT8 curHdr = nextHdr;
+            UINT32 hdrLen;
             nextHdr = extHdr->nextHeader;
             if (nextHdr == SOCKET_IPPROTO_FRAGMENT) {
                 pktMeta->beforeFragElePtr = (PCHAR)(extHdr);
             }
 
-            if (nextHdr == SOCKET_IPPROTO_AH) {
-                extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + (len  + 2) * 4);
-                pktMeta->extHdrTotalLen += ((len + 2) * 4);
-            } else {
-                extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + (len + 1) * 8);
-                pktMeta->extHdrTotalLen += ((len + 1) * 8);
+            hdrLen = (curHdr == SOCKET_IPPROTO_AH)
+                     ? ((UINT32)len + 2) * 4 : ((UINT32)len + 1) * 8;
+            if ((UINT32)pktMeta->extHdrTotalLen + hdrLen > payloadLen) {
+                return NDIS_STATUS_INVALID_LENGTH;
             }
+            extHdr = (IPv6ExtHdr *)((PCHAR)extHdr + hdrLen);
+            pktMeta->extHdrTotalLen += (UINT16)hdrLen;
         } else if (nextHdr == SOCKET_IPPROTO_FRAGMENT) {
             IPv6FragHdr *fragHdr = (IPv6FragHdr *)extHdr;
             pktMeta->ident = fragHdr->ident;
             pktMeta->beforeFragExtHdrLen = pktMeta->extHdrTotalLen;
             pktMeta->fragExtHdrLen = sizeof(IPv6FragHdr);
+            if ((UINT32)pktMeta->extHdrTotalLen + sizeof(IPv6FragHdr) >
+                    payloadLen) {
+                return NDIS_STATUS_INVALID_LENGTH;
+            }
             pktMeta->extHdrTotalLen += sizeof(IPv6FragHdr);
             pktMeta->fragOffset = (ntohs(fragHdr->offlg)
                     & IP6F_OFF_HOST_ORDER_MASK) >> 3;
@@ -706,6 +729,8 @@ OvsGetPacketMeta(PIP6_PktExtHeader_Meta pktMeta, EthHdr *eth,
         }
     }
 
+    /* The walk above bounded extHdrTotalLen to the claimed payload, so this
+     * subtraction (UINT16) cannot underflow into a huge dataPayloadLen. */
     pktMeta->dataPayloadLen = (ntohs(ip6Hdr->payload_len) -
                                pktMeta->extHdrTotalLen);
     OVS_LOG_INFO("playload len %d, extotalLen %d, datapyaload len %d.",

@@ -31,6 +31,18 @@ typedef enum FTP_TYPE {
     FTP_EXTEND_TYPE_ACTIVE
 } FTP_TYPE;
 
+/* ASCII-only uppercase. The CRT toupper() must not be used here: on Windows
+ * kernels it routes through RtlAnsiCharToUnicodeChar/RtlpIsUtf8Process, which
+ * touches pageable per-process locale state. The conntrack ALG runs in the
+ * datapath at DISPATCH_LEVEL, where such a page fault bugchecks the box
+ * (IRQL_NOT_LESS_OR_EQUAL). FTP control keywords are pure ASCII, so a plain
+ * 'a'..'z' fold is both correct and safe at any IRQL. */
+static __inline char
+OvsAsciiToUpper(char c)
+{
+    return (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
+}
+
 static __inline UINT32
 OvsStrncmp(const char *s1, const char *s2, size_t n)
 {
@@ -39,7 +51,8 @@ OvsStrncmp(const char *s1, const char *s2, size_t n)
     }
 
     const char *s2end = s2 + n;
-    while (s2 < s2end && *s2 != '\0' && toupper(*s1) == toupper(*s2)) {
+    while (s2 < s2end && *s2 != '\0'
+           && OvsAsciiToUpper(*s1) == OvsAsciiToUpper(*s2)) {
         s1++, s2++;
     }
 
@@ -47,7 +60,7 @@ OvsStrncmp(const char *s1, const char *s2, size_t n)
         return 0;
     }
 
-    return (UINT32)(toupper(*s1) - toupper(*s2));
+    return (UINT32)(OvsAsciiToUpper(*s1) - OvsAsciiToUpper(*s2));
 }
 
 static __inline VOID
@@ -194,7 +207,14 @@ OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
         char *paren;
         paren = strchr(ftpMsg, '|');
         if (paren) {
-            req = paren + 3;
+            /* Bound the offset before forming the pointer: paren + 3 could
+             * otherwise be more than one-past-the-end of ftpMsg, which is
+             * undefined behavior even when only compared. */
+            size_t off = (size_t)(paren - ftpMsg) + 3;
+            if (off >= sizeof(ftpMsg)) {
+                return NDIS_STATUS_INVALID_PACKET;
+            }
+            req = ftpMsg + off;
         } else {
             /* Not a valid EPSV packet. */
             return NDIS_STATUS_INVALID_PACKET;
@@ -244,21 +264,43 @@ OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
              * **/
             char *curHdr = NULL;
             char *nextHdr = NULL;
+            char *ftpStrEnd = NULL;
+            size_t reqLen = 0;
             int index = 0;
             int isIpv6AddressFamily = 0;
             char ftpStr[512] = {0x00};
 
-            RtlCopyMemory(ftpStr, req, strlen(req));
-            for (curHdr = ftpStr; *curHdr != '|'; curHdr++);
-            curHdr = curHdr + 1;;
+            /* 'req' is NUL-terminated inside ftpMsg[256], so it fits in ftpStr;
+             * bail defensively if a future caller passes something longer. */
+            reqLen = strlen(req);
+            if (reqLen >= sizeof(ftpStr)) {
+                return NDIS_STATUS_SUCCESS;
+            }
+            /* Copy the NUL too (reqLen < sizeof(ftpStr)) and bound the scans to
+             * the actual payload, so they cannot run past it regardless of the
+             * zero-fill above. */
+            RtlCopyMemory(ftpStr, req, reqLen + 1);
+            ftpStrEnd = ftpStr + reqLen;
+            /* Scan for the leading '|', bounded by the copied payload. */
+            for (curHdr = ftpStr; curHdr < ftpStrEnd && *curHdr != '|'; curHdr++);
+            if (curHdr >= ftpStrEnd) {
+                /* No '|' delimiter in a malformed payload. */
+                return NDIS_STATUS_SUCCESS;
+            }
+            curHdr = curHdr + 1;
             do {
                 /** index == 0 parse address family,
                  *  index == 1 parse address,
                  *  index == 2 parse port **/
-                for (nextHdr = curHdr; *nextHdr != '|'; nextHdr++);
+                for (nextHdr = curHdr;
+                     nextHdr < ftpStrEnd && *nextHdr != '|'; nextHdr++);
+                if (nextHdr >= ftpStrEnd) {
+                    /* Field not terminated within the buffer. */
+                    break;
+                }
                 *nextHdr = '\0';
 
-                if (*curHdr == '0' || !curHdr || index > 2) {
+                if (!curHdr || *curHdr == '0' || index > 2) {
                     break;
                 }
 
@@ -283,7 +325,9 @@ OvsCtHandleFtp(PNET_BUFFER_LIST curNbl, OvsFlowKey *key,
                 index++;
             } while (1);
 
-            if (index < 2) { /* Not valid packet due to less than three parameter */
+            if (index < 3) {
+                /* Need all three fields (family, address, port); a truncated
+                 * EPRT (e.g. an unterminated port field) leaves port == 0. */
                 return NDIS_STATUS_SUCCESS;
             }
             serverIp.ipv6 = key->ipv6Key.ipv6Dst;
