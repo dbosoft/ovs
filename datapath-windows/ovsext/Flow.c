@@ -1530,6 +1530,223 @@ done:
 
 /*
  *----------------------------------------------------------------------------
+ *  OvsValidateActionSizes --
+ *    Validates, once at flow-install time (PASSIVE_LEVEL), that every action
+ *    attribute the executor later reads at DISPATCH_LEVEL is large enough for
+ *    that read. Installed actions are stored verbatim and replayed by
+ *    OvsDoExecuteActions with no per-read size check (the NlAttrGet* accessors
+ *    only ASSERT the size, so a short attribute is an out-of-bounds read in the
+ *    hot path / a checked-build bugcheck). Rejecting an undersized action here
+ *    keeps the executor safe without a guard on every DISPATCH read.
+ *
+ *    Only minimum sizes are enforced (>=), never an exact match, so a
+ *    well-formed action carrying trailing bytes is still accepted. Variable
+ *    length actions whose payload is validated by their own handler (CT) or
+ *    that the executor reads without a fixed-size accessor are left untouched.
+ *    Recursion into nested action lists is bounded like the executor's
+ *    deferred-action nesting capacity.
+ *
+ *  Results:
+ *    TRUE if every checked attribute is adequately sized; FALSE otherwise.
+ *----------------------------------------------------------------------------
+ */
+static BOOLEAN
+OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
+{
+    const UINT32 maxDepth = DEFERRED_ACTION_QUEUE_SIZE;
+    PNL_ATTR a;
+    INT rem;
+
+    if (depth > maxDepth) {
+        return FALSE;
+    }
+
+    NL_ATTR_FOR_EACH (a, rem, actions, actionsLen) {
+        UINT32 size = NlAttrGetSize(a);
+
+        switch (NlAttrType(a)) {
+        case OVS_ACTION_ATTR_OUTPUT:
+        case OVS_ACTION_ATTR_RECIRC:
+        case OVS_ACTION_ATTR_METER:
+            if (size < sizeof(UINT32)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_POP_MPLS:
+            if (size < sizeof(ovs_be16)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_PUSH_VLAN:
+            if (size < sizeof(struct ovs_action_push_vlan)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_PUSH_MPLS:
+            if (size < sizeof(struct ovs_action_push_mpls)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_ADD_MPLS:
+            if (size < sizeof(struct ovs_action_add_mpls)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_HASH:
+            if (size < sizeof(struct ovs_action_hash)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_SET: {
+            /* The SET payload is a single nested flow-key attribute that
+             * OvsExecuteSetAction reads. Enforce that key attribute's minimum
+             * length, and for a tunnel set validate the sub-attributes
+             * OvsTunnelAttrToIPTunnelKey reads. */
+            PNL_ATTR setKey;
+            UINT32 keyType;
+
+            if (size < NLA_HDRLEN) {
+                return FALSE;
+            }
+            setKey = (PNL_ATTR)NlAttrData(a);
+            /* The nested key attribute must itself fit within the SET payload
+             * before its length/type are trusted below. */
+            if (!NlAttrIsValid(setKey, size)) {
+                return FALSE;
+            }
+            keyType = NlAttrType(setKey);
+            if (keyType < ARRAY_SIZE(nlFlowKeyPolicy) &&
+                nlFlowKeyPolicy[keyType].minLen &&
+                NlAttrGetSize(setKey) < nlFlowKeyPolicy[keyType].minLen) {
+                return FALSE;
+            }
+            if (keyType == OVS_KEY_ATTR_TUNNEL) {
+                PNL_ATTR t;
+                INT trem;
+                NL_ATTR_FOR_EACH (t, trem, NlAttrData(setKey),
+                                  NlAttrGetSize(setKey)) {
+                    UINT32 tt = NlAttrType(t);
+                    if (tt < ARRAY_SIZE(nlFlowTunnelKeyPolicy) &&
+                        nlFlowTunnelKeyPolicy[tt].minLen &&
+                        NlAttrGetSize(t) < nlFlowTunnelKeyPolicy[tt].minLen) {
+                        return FALSE;
+                    }
+                }
+                /* A non-zero remainder means a malformed tunnel sub-attribute
+                 * stopped the walk early; OvsTunnelAttrToIPTunnelKey walks the
+                 * same stream and would read past it. Reject the stream. */
+                if (trem != 0) {
+                    return FALSE;
+                }
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_SAMPLE: {
+            /* OvsExecuteSampleAction walks the sample's sub-attributes with
+             * NL_ATTR_FOR_EACH_UNSAFE, so walk them here with bounds checking
+             * and reject any malformed remainder rather than relying on a
+             * lookup that stops silently. */
+            PNL_ATTR sub;
+            INT srem;
+            NL_ATTR_FOR_EACH (sub, srem, NlAttrData(a), NlAttrGetSize(a)) {
+                switch (NlAttrType(sub)) {
+                case OVS_SAMPLE_ATTR_PROBABILITY:
+                    if (NlAttrGetSize(sub) < sizeof(UINT32)) {
+                        return FALSE;
+                    }
+                    break;
+                case OVS_SAMPLE_ATTR_ACTIONS:
+                    if (!OvsValidateActionSizes(NlAttrData(sub),
+                                                NlAttrGetSize(sub),
+                                                depth + 1)) {
+                        return FALSE;
+                    }
+                    break;
+                }
+            }
+            if (srem != 0) {
+                return FALSE;
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_CHECK_PKT_LEN: {
+            /* OvsExecuteCheckPktLen walks the sub-attributes with
+             * NL_ATTR_FOR_EACH_UNSAFE, so walk them here with bounds checking
+             * and reject any malformed remainder rather than relying on a
+             * lookup that stops silently. */
+            PNL_ATTR sub;
+            INT crem;
+            NL_ATTR_FOR_EACH (sub, crem, NlAttrData(a), NlAttrGetSize(a)) {
+                switch (NlAttrType(sub)) {
+                case OVS_CHECK_PKT_LEN_ATTR_PKT_LEN:
+                    if (NlAttrGetSize(sub) < sizeof(UINT16)) {
+                        return FALSE;
+                    }
+                    break;
+                case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER:
+                case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_LESS_EQUAL:
+                    if (!OvsValidateActionSizes(NlAttrData(sub),
+                                                NlAttrGetSize(sub),
+                                                depth + 1)) {
+                        return FALSE;
+                    }
+                    break;
+                }
+            }
+            if (crem != 0) {
+                return FALSE;
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_CLONE:
+            if (!OvsValidateActionSizes(NlAttrData(a), NlAttrGetSize(a),
+                                        depth + 1)) {
+                return FALSE;
+            }
+            break;
+        case OVS_ACTION_ATTR_DEC_TTL: {
+            /* On TTL expiry the executor runs the embedded
+             * OVS_DEC_TTL_ATTR_ACTION list. Walk the sub-attributes here with
+             * bounds checking and reject any malformed remainder rather than
+             * relying on a lookup that stops silently. */
+            PNL_ATTR sub;
+            INT drem;
+            NL_ATTR_FOR_EACH (sub, drem, NlAttrData(a), NlAttrGetSize(a)) {
+                if (NlAttrType(sub) == OVS_DEC_TTL_ATTR_ACTION &&
+                    !OvsValidateActionSizes(NlAttrData(sub),
+                                            NlAttrGetSize(sub), depth + 1)) {
+                    return FALSE;
+                }
+            }
+            if (drem != 0) {
+                return FALSE;
+            }
+            break;
+        }
+        default:
+            /* Variable-length or payload-less actions (USERSPACE, CT,
+             * CT_CLEAR, POP_VLAN, TRUNC, DROP, ...): no fixed-size field is
+             * read here through a size-unchecked accessor, or the payload is
+             * validated by the action's own handler. */
+            break;
+        }
+    }
+
+    /* NL_ATTR_FOR_EACH stops as soon as it meets an attribute whose length is
+     * malformed, leaving 'rem' non-zero. The executor walks the same stream
+     * with NL_ATTR_FOR_EACH_UNSAFE, which does no such bounds check and would
+     * read past a short attribute. A non-zero remainder therefore means the
+     * stream cannot be safely replayed: reject it. This also covers every
+     * recursed action list, since each recursion runs this same loop. */
+    if (rem != 0) {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ *----------------------------------------------------------------------------
  *  _MapNlToFlowPut --
  *    Maps input netlink message to OvsFlowPut.
  *----------------------------------------------------------------------------
@@ -1623,6 +1840,17 @@ _MapNlToFlowPut(POVS_MESSAGE msgIn, PNL_ATTR keyAttr,
     if (actionAttr) {
         mappedFlow->actionsLen = NlAttrGetSize(actionAttr);
         mappedFlow->actions = NlAttrGet(actionAttr);
+        /* The actions are stored verbatim and replayed at DISPATCH_LEVEL
+         * without per-read size checks; reject malformed action lengths now,
+         * at install time, so the executor's accessors never read past an
+         * attribute. */
+        if (!OvsValidateActionSizes(mappedFlow->actions,
+                                    mappedFlow->actionsLen, 0)) {
+            OVS_LOG_ERROR("Flow actions failed size validation, msg: %p",
+                          &(msgIn->nlMsg));
+            rc = STATUS_INVALID_PARAMETER;
+            goto done;
+        }
     }
 
     mappedFlow->dpNo = ovsHdr->dp_ifindex;
