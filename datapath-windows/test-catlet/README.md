@@ -23,7 +23,8 @@ $rel = 'F:\path\to\build\Release'
 $exes = 'ovs-dpctl','ovs-vswitchd','ovsdb-server','ovs-vsctl','ovsdb-tool','ovs-appctl'
 & $scp -O ($exes | ForEach-Object { "$rel\$_.exe" }) vswitchd\vswitch.ovsschema `
     "<catlet>:C:/ovs-test/native/"
-& $scp -O datapath-windows\test-catlet\run-full-mgmt-dp-test.ps1 "<catlet>:C:/ovs-test/"
+& $scp -O datapath-windows\test-catlet\run-full-mgmt-dp-test.ps1 `
+    datapath-windows\utilities\ovs-tcpdump.ps1 "<catlet>:C:/ovs-test/"
 & $ssh <catlet> "powershell -NoProfile -ExecutionPolicy Bypass -File C:\ovs-test\run-full-mgmt-dp-test.ps1"
 ```
 
@@ -43,5 +44,9 @@ SFTP subsystem.
   catlet IDs are environment-specific — pass them as args or set
   `OVS_TEST_UB1_ID` / `OVS_TEST_UB2_ID`.
 - **`gather.ps1`** — diagnostics: `ovs-dpctl show` + per-VM OVS port mapping (WMI).
+- **`ovs-tcpdump.ps1`** — packet capture on an OVS port via pktmon, exported to
+  `.pcapng` (the `ovs-tcpdump` replacement; see `../utilities/README.md`). Copied
+  to `C:\ovs-test\` by the deploy steps above and by `deploy-driver.ps1`. Point
+  `-OvsCtl C:\ovs-test\native\ovs-vsctl.exe` at the test build when needed.
 
 These are manual/dev tools; they are not wired into CI.
