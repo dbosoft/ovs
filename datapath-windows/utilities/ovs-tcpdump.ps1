@@ -178,23 +178,22 @@ $compIds = @($compIds | Sort-Object -Unique)
 # ---- pktmon session ---------------------------------------------------------
 function Stop-PktmonQuietly { try { pktmon stop 2>&1 | Out-Null } catch { } }
 
-# optional narrowing filters
-$filterAdded = $false
+# pktmon filters are a single global, persistent set. Clear them up front so a
+# run without narrowing filters captures everything deterministically instead of
+# silently inheriting a stale filter from an earlier session, then add this run's
+# optional filters (and clear again in finally so we leave no residue).
+function Clear-Filters { pktmon filter remove 2>&1 | Out-Null }
 function Add-Filters {
     $fargs = @('ovs-tcpdump')
     if ($EtherType)  { $fargs += @('-d', $EtherType) }
     if ($Protocol)   { $fargs += @('-t', $Protocol) }
     if ($Ip)         { $fargs += @('-i', $Ip) }
     if ($TcpUdpPort) { $fargs += @('-p', "$TcpUdpPort") }
-    if ($fargs.Count -gt 1) {
-        pktmon filter remove 2>&1 | Out-Null
-        pktmon filter add @fargs 2>&1 | Out-Null
-        $script:filterAdded = $true
-    }
+    if ($fargs.Count -gt 1) { pktmon filter add @fargs 2>&1 | Out-Null }
 }
-function Remove-Filters { if ($script:filterAdded) { pktmon filter remove 2>&1 | Out-Null } }
 
 if ($Force) { Stop-PktmonQuietly }
+Clear-Filters
 Add-Filters
 
 $compArg = @('--comp') + ($compIds | ForEach-Object { "$_" })
@@ -211,13 +210,20 @@ try {
             $Out = Join-Path $env:TEMP "ovs-tcpdump-$safe-$stamp.pcapng"
         }
         $etl = [IO.Path]::ChangeExtension($Out, '.etl')
+        $outDir = Split-Path -Parent $Out
+        if ($outDir -and -not (Test-Path $outDir)) {
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        }
 
         $start = pktmon start --capture @compArg --pkt-size 0 --file-name $etl 2>&1
         if ($LASTEXITCODE -ne 0) {
             # most likely a leftover session; evict and retry once
             Write-Warning "pktmon start failed ($start). Retrying after stopping the current session."
             Stop-PktmonQuietly
-            pktmon start --capture @compArg --pkt-size 0 --file-name $etl 2>&1 | Out-Null
+            $start = pktmon start --capture @compArg --pkt-size 0 --file-name $etl 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "pktmon start failed ($start)."
+            }
         }
         $wait = if ($Seconds -gt 0) { "$Seconds s" } else { "until Ctrl+C" }
         Write-Host "Capturing on component(s) $($compIds -join ',') -> $etl ($wait)..." -ForegroundColor Green
@@ -239,5 +245,5 @@ try {
     }
 }
 finally {
-    Remove-Filters
+    Clear-Filters
 }

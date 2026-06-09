@@ -49,8 +49,8 @@ management sockets (`br-int.mgmt`) and the system-wide `OVS_RUNDIR` live under
 southbound DB, the bridge `.mgmt` path for `ovn-trace --ovs`) rather than
 relying on `OVS_RUNDIR`.
 
-## ovs-tcpdump.ps1 - binary locations
+## Locating ovs-vsctl
 
-`ovs-vsctl` is auto-detected (PATH, then the eryph and `C:\openvswitch` install
-trees); pass `-OvsCtl` to point at a specific build, and `-OvsDb` if your DB
-socket is elsewhere.
+`ovs-tcpdump.ps1` calls `ovs-vsctl` (for `-Port` / `-List`); it is auto-detected
+(PATH, then the eryph and `C:\openvswitch` install trees). Pass `-OvsCtl` to
+point at a specific build, and `-OvsDb` if your DB socket is elsewhere.
