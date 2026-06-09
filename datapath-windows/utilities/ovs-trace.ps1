@@ -160,23 +160,40 @@ if ($PSCmdlet.ParameterSetName -eq 'FromVm') {
     if (-not $inport) { $inport = $SrcPort }   # fall back to the port name
     $srcMac = Get-OvsInterfaceField $SrcPort 'mac_in_use'
 
-    if (-not $LsDatapath) {
-        # best-effort: resolve the logical switch (datapath) from the SB port_binding
-        try {
-            $sbctl = Resolve-Bin 'ovn-sbctl.exe'
+    # Resolve from the SB port_binding once: the logical switch (datapath) and the
+    # port's bound addresses. The latter lets us fill ip4.src/ip6.src so the trace
+    # clears OVN port security (an unset source IP becomes 0.0.0.0 and is dropped).
+    $pbMac = $null
+    try {
+        $sbctl = Resolve-Bin 'ovn-sbctl.exe'
+        $pbMac = ("$(& $sbctl --timeout=5 --db=$SbDb --bare --columns=mac find port_binding logical_port=$inport 2>$null)")
+        if (-not $LsDatapath) {
             # port -> its SB datapath_binding -> the NB logical switch id ovn-trace wants
             $dp = ("$(& $sbctl --timeout=5 --db=$SbDb --bare --columns=datapath find port_binding logical_port=$inport 2>$null)").Trim()
             if ($dp) {
                 $ls = ("$(& $sbctl --timeout=5 --db=$SbDb --if-exists get datapath_binding $dp 'external_ids:logical-switch' 2>$null)").Trim().Trim('"')
                 if ($ls) { $LsDatapath = $ls }
             }
-        } catch { }
-        if (-not $LsDatapath) { throw "Could not auto-resolve the logical switch; pass -LsDatapath." }
+        }
+    } catch { }
+    if (-not $LsDatapath) { throw "Could not auto-resolve the logical switch; pass -LsDatapath." }
+
+    # If no -SrcIp given, pull the bound address from the port_binding mac column
+    # ("<mac> <ip> [<ip>...]"), picking the family that matches the L4 selector.
+    if (-not $SrcIp -and $pbMac) {
+        $wantV6 = ($L4 -eq 'icmp6')
+        foreach ($tok in ($pbMac -split '\s+')) {
+            $ip = $null
+            if ([Net.IPAddress]::TryParse($tok, [ref]$ip)) {
+                $isV6 = ($ip.AddressFamily -eq 'InterNetworkV6')
+                if ($isV6 -eq $wantV6) { $SrcIp = $tok; break }
+            }
+        }
     }
 
     $parts = @("inport == `"$inport`"", "eth.src == $srcMac")
     if ($DstMac) { $parts += "eth.dst == $DstMac" }
-    if ($SrcIp)  { $parts += "ip4.src == $SrcIp" }
+    if ($SrcIp)  { $parts += $(if ($L4 -eq 'icmp6') { "ip6.src == $SrcIp" } else { "ip4.src == $SrcIp" }) }
     switch ($L4) {
         'icmp'  { $parts += "ip4.dst == $DstIp"; $parts += 'ip.ttl == 64'; $parts += 'icmp4.type == 8' }
         'icmp6' { $parts += "ip6.dst == $DstIp"; $parts += 'ip.ttl == 64'; $parts += 'icmp6.type == 128' }

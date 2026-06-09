@@ -43,7 +43,9 @@ quoting handled for you.
 ./ovs-trace.ps1 -Logical -LsDatapath <ls> -WithOvs -Microflow '<expr>'
 
 # Build the microflow automatically from a source port + destination
-./ovs-trace.ps1 -FromVm -SrcPort ovs_..._eth0 -DstIp 10.0.0.101 -L4 icmp
+# (-FromVm resolves the inport, source MAC, logical switch and the port's bound
+#  source IP from the OVN southbound DB, so the trace clears port security)
+./ovs-trace.ps1 -FromVm -Vm ub1 -DstIp 10.0.0.101 -DstMac <dst-mac> -L4 icmp
 
 # OVS datapath actions for a flow through a bridge
 ./ovs-trace.ps1 -Datapath -Bridge br-int -Flow 'in_port=4,icmp,nw_dst=10.0.0.101'
