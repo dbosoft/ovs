@@ -28,18 +28,18 @@
 
 .EXAMPLE
   # 30s capture of everything on ub1's port, open in Wireshark
-  ./ovs-pcap.ps1 -Vm ub1 -Open
+  ./ovs-tcpdump.ps1 -Vm ub1 -Open
 
 .EXAMPLE
   # Only ICMP to/from 10.0.0.101 on a specific OVS port, 15s
-  ./ovs-pcap.ps1 -Port ovs_a0b24961-..._eth0 -Protocol ICMP -Ip 10.0.0.101 -Seconds 15
+  ./ovs-tcpdump.ps1 -Port ovs_a0b24961-..._eth0 -Protocol ICMP -Ip 10.0.0.101 -Seconds 15
 
 .EXAMPLE
   # Live, tcpdump-style screen output until Ctrl+C
-  ./ovs-pcap.ps1 -Vm ub1 -RealTime
+  ./ovs-tcpdump.ps1 -Vm ub1 -RealTime
 
 .EXAMPLE
-  ./ovs-pcap.ps1 -List
+  ./ovs-tcpdump.ps1 -List
 #>
 [CmdletBinding(DefaultParameterSetName = 'Port')]
 param(
@@ -51,7 +51,7 @@ param(
 
     # Capture duration in seconds (ignored with -RealTime). 0 waits for Ctrl+C.
     [int]$Seconds = 30,
-    # Output .pcapng path. Default: %TEMP%\ovs-pcap-<target>-<timestamp>.pcapng
+    # Output .pcapng path. Default: %TEMP%\ovs-tcpdump-<target>-<timestamp>.pcapng
     [string]$Out,
 
     # Optional pktmon narrowing filters (applied on top of the component).
@@ -181,7 +181,7 @@ function Stop-PktmonQuietly { try { pktmon stop 2>&1 | Out-Null } catch { } }
 # optional narrowing filters
 $filterAdded = $false
 function Add-Filters {
-    $fargs = @('ovs-pcap')
+    $fargs = @('ovs-tcpdump')
     if ($EtherType)  { $fargs += @('-d', $EtherType) }
     if ($Protocol)   { $fargs += @('-t', $Protocol) }
     if ($Ip)         { $fargs += @('-i', $Ip) }
@@ -208,7 +208,7 @@ try {
         if (-not $Out) {
             $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
             $safe = ($label -replace '[^0-9A-Za-z_.-]', '_')
-            $Out = Join-Path $env:TEMP "ovs-pcap-$safe-$stamp.pcapng"
+            $Out = Join-Path $env:TEMP "ovs-tcpdump-$safe-$stamp.pcapng"
         }
         $etl = [IO.Path]::ChangeExtension($Out, '.etl')
 
