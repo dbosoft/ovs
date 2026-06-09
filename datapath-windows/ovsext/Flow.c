@@ -1632,42 +1632,68 @@ OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
                         return FALSE;
                     }
                 }
+                /* A non-zero remainder means a malformed tunnel sub-attribute
+                 * stopped the walk early; OvsTunnelAttrToIPTunnelKey walks the
+                 * same stream and would read past it. Reject the stream. */
+                if (trem != 0) {
+                    return FALSE;
+                }
             }
             break;
         }
         case OVS_ACTION_ATTR_SAMPLE: {
-            const PNL_ATTR prob =
-                NlAttrFindNested(a, OVS_SAMPLE_ATTR_PROBABILITY);
-            const PNL_ATTR nested =
-                NlAttrFindNested(a, OVS_SAMPLE_ATTR_ACTIONS);
-            if (prob && NlAttrGetSize(prob) < sizeof(UINT32)) {
-                return FALSE;
+            /* OvsExecuteSampleAction walks the sample's sub-attributes with
+             * NL_ATTR_FOR_EACH_UNSAFE, so walk them here with bounds checking
+             * and reject any malformed remainder rather than relying on a
+             * lookup that stops silently. */
+            PNL_ATTR sub;
+            INT srem;
+            NL_ATTR_FOR_EACH (sub, srem, NlAttrData(a), NlAttrGetSize(a)) {
+                switch (NlAttrType(sub)) {
+                case OVS_SAMPLE_ATTR_PROBABILITY:
+                    if (NlAttrGetSize(sub) < sizeof(UINT32)) {
+                        return FALSE;
+                    }
+                    break;
+                case OVS_SAMPLE_ATTR_ACTIONS:
+                    if (!OvsValidateActionSizes(NlAttrData(sub),
+                                                NlAttrGetSize(sub),
+                                                depth + 1)) {
+                        return FALSE;
+                    }
+                    break;
+                }
             }
-            if (nested &&
-                !OvsValidateActionSizes(NlAttrData(nested),
-                                        NlAttrGetSize(nested), depth + 1)) {
+            if (srem != 0) {
                 return FALSE;
             }
             break;
         }
         case OVS_ACTION_ATTR_CHECK_PKT_LEN: {
-            const PNL_ATTR pktLen =
-                NlAttrFindNested(a, OVS_CHECK_PKT_LEN_ATTR_PKT_LEN);
-            const PNL_ATTR gtr = NlAttrFindNested(a,
-                OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER);
-            const PNL_ATTR leq = NlAttrFindNested(a,
-                OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_LESS_EQUAL);
-            if (pktLen && NlAttrGetSize(pktLen) < sizeof(UINT16)) {
-                return FALSE;
+            /* OvsExecuteCheckPktLen walks the sub-attributes with
+             * NL_ATTR_FOR_EACH_UNSAFE, so walk them here with bounds checking
+             * and reject any malformed remainder rather than relying on a
+             * lookup that stops silently. */
+            PNL_ATTR sub;
+            INT crem;
+            NL_ATTR_FOR_EACH (sub, crem, NlAttrData(a), NlAttrGetSize(a)) {
+                switch (NlAttrType(sub)) {
+                case OVS_CHECK_PKT_LEN_ATTR_PKT_LEN:
+                    if (NlAttrGetSize(sub) < sizeof(UINT16)) {
+                        return FALSE;
+                    }
+                    break;
+                case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER:
+                case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_LESS_EQUAL:
+                    if (!OvsValidateActionSizes(NlAttrData(sub),
+                                                NlAttrGetSize(sub),
+                                                depth + 1)) {
+                        return FALSE;
+                    }
+                    break;
+                }
             }
-            if (gtr &&
-                !OvsValidateActionSizes(NlAttrData(gtr),
-                                        NlAttrGetSize(gtr), depth + 1)) {
-                return FALSE;
-            }
-            if (leq &&
-                !OvsValidateActionSizes(NlAttrData(leq),
-                                        NlAttrGetSize(leq), depth + 1)) {
+            if (crem != 0) {
                 return FALSE;
             }
             break;
@@ -1679,11 +1705,20 @@ OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
             }
             break;
         case OVS_ACTION_ATTR_DEC_TTL: {
-            const PNL_ATTR nested =
-                NlAttrFindNested(a, OVS_DEC_TTL_ATTR_ACTION);
-            if (nested &&
-                !OvsValidateActionSizes(NlAttrData(nested),
-                                        NlAttrGetSize(nested), depth + 1)) {
+            /* On TTL expiry the executor runs the embedded
+             * OVS_DEC_TTL_ATTR_ACTION list. Walk the sub-attributes here with
+             * bounds checking and reject any malformed remainder rather than
+             * relying on a lookup that stops silently. */
+            PNL_ATTR sub;
+            INT drem;
+            NL_ATTR_FOR_EACH (sub, drem, NlAttrData(a), NlAttrGetSize(a)) {
+                if (NlAttrType(sub) == OVS_DEC_TTL_ATTR_ACTION &&
+                    !OvsValidateActionSizes(NlAttrData(sub),
+                                            NlAttrGetSize(sub), depth + 1)) {
+                    return FALSE;
+                }
+            }
+            if (drem != 0) {
                 return FALSE;
             }
             break;
@@ -1695,6 +1730,16 @@ OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
              * validated by the action's own handler. */
             break;
         }
+    }
+
+    /* NL_ATTR_FOR_EACH stops as soon as it meets an attribute whose length is
+     * malformed, leaving 'rem' non-zero. The executor walks the same stream
+     * with NL_ATTR_FOR_EACH_UNSAFE, which does no such bounds check and would
+     * read past a short attribute. A non-zero remainder therefore means the
+     * stream cannot be safely replayed: reject it. This also covers every
+     * recursed action list, since each recursion runs this same loop. */
+    if (rem != 0) {
+        return FALSE;
     }
 
     return TRUE;
