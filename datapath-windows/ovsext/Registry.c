@@ -24,79 +24,82 @@
 #include "Debug.h"
 
 /*
+ * Read one REG_DWORD knob from the Parameters key into *target, keeping the
+ * passed-in default (the current global) when the value is absent or rejected.
+ *
+ * RTL_QUERY_REGISTRY_DIRECT writes straight into the target; seeding
+ * DefaultData with the current value makes an absent value a no-op, so the
+ * compile-time defaults stand on a clean install. TYPECHECK rejects a value of
+ * the wrong type rather than mis-coercing it. Each knob is queried on its own
+ * so a malformed value cannot discard a valid sibling.
+ */
+static VOID
+OvsReadLogDword(PCWSTR path, PCWSTR name, UINT32 *target)
+{
+    UINT32 def = *target;
+    RTL_QUERY_REGISTRY_TABLE table[2];
+    NTSTATUS status;
+
+    RtlZeroMemory(table, sizeof(table));
+    table[0].Flags = RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_TYPECHECK;
+    table[0].Name = (PWSTR)name;
+    table[0].EntryContext = target;
+    table[0].DefaultType =
+        (REG_DWORD << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT) | REG_DWORD;
+    table[0].DefaultData = &def;
+    table[0].DefaultLength = sizeof(ULONG);
+
+    status = RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, (PWSTR)path, table,
+                                    NULL, NULL);
+    /*
+     * A missing value/key is expected (default install) and leaves the DIRECT
+     * target at the seeded default. Any other failure means a present-but-
+     * malformed value (e.g. a wrong type rejected by TYPECHECK); restore the
+     * default and surface it so a field misconfiguration is not silently
+     * mistaken for "not set".
+     */
+    if (!NT_SUCCESS(status)) {
+        *target = def;
+        if (status != STATUS_OBJECT_NAME_NOT_FOUND) {
+            OVS_LOG_WARN("registry value '%S' rejected (status 0x%08x); "
+                         "keeping default 0x%x", name, status, def);
+        }
+    }
+}
+
+/*
  * Read the driver-global configuration from <service key>\Parameters. The
  * service key absolute path is the registryPath the I/O manager hands to
  * DriverEntry; the values live under its Parameters subkey by convention.
  *
- * RTL_QUERY_REGISTRY_DIRECT writes straight into the target global; seeding
- * DefaultData with the current value makes an absent value a no-op, so the
- * compile-time defaults stand on a clean install. TYPECHECK rejects a value of
- * the wrong type rather than mis-coercing it.
+ * Best-effort and non-fatal: any failure leaves the compile-time logging
+ * defaults in place, so there is no status for the caller to act on.
  */
-NTSTATUS
+VOID
 OvsReadDriverConfig(PUNICODE_STRING registryPath)
 {
     static const WCHAR paramsSuffix[] = L"\\Parameters";
     WCHAR path[512];
     USHORT chars;
-    ULONG defLevel, defMask;
-    RTL_QUERY_REGISTRY_TABLE table[3];
-    NTSTATUS status;
 
     if (registryPath == NULL || registryPath->Buffer == NULL) {
-        return STATUS_INVALID_PARAMETER;
+        return;
     }
 
     chars = registryPath->Length / sizeof(WCHAR);
     if ((SIZE_T)chars + RTL_NUMBER_OF(paramsSuffix) > RTL_NUMBER_OF(path)) {
         OVS_LOG_WARN("registry path too long (%u chars); using log defaults",
                      chars);
-        return STATUS_BUFFER_OVERFLOW;
+        return;
     }
 
     /* Build a NUL-terminated "<registryPath>\Parameters". */
     RtlCopyMemory(path, registryPath->Buffer, registryPath->Length);
     RtlCopyMemory(&path[chars], paramsSuffix, sizeof(paramsSuffix));
 
-    defLevel = ovsLogLevel;
-    defMask = ovsLogFlags;
-
-    RtlZeroMemory(table, sizeof(table));
-
-    table[0].Flags = RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_TYPECHECK;
-    table[0].Name = L"LogLevel";
-    table[0].EntryContext = &ovsLogLevel;
-    table[0].DefaultType =
-        (REG_DWORD << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT) | REG_DWORD;
-    table[0].DefaultData = &defLevel;
-    table[0].DefaultLength = sizeof(ULONG);
-
-    table[1].Flags = RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_TYPECHECK;
-    table[1].Name = L"LogModuleMask";
-    table[1].EntryContext = &ovsLogFlags;
-    table[1].DefaultType =
-        (REG_DWORD << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT) | REG_DWORD;
-    table[1].DefaultData = &defMask;
-    table[1].DefaultLength = sizeof(ULONG);
-
-    status = RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, path, table,
-                                    NULL, NULL);
-    /*
-     * A missing Parameters key is expected (default install) and still leaves
-     * the DIRECT targets at their seeded defaults, so treat that as "no
-     * overrides". Any other failure means a present-but-malformed value (e.g. a
-     * wrong type rejected by TYPECHECK) aborted the whole query and discarded
-     * even the valid sibling value; surface it so a field misconfiguration is
-     * not silently mistaken for a clean install.
-     */
-    if (!NT_SUCCESS(status)) {
-        ovsLogLevel = defLevel;
-        ovsLogFlags = defMask;
-        if (status != STATUS_OBJECT_NAME_NOT_FOUND) {
-            OVS_LOG_WARN("registry log config rejected (status 0x%08x); "
-                         "using defaults", status);
-        }
-    }
+    /* Each knob is read independently: a bad value falls back on its own. */
+    OvsReadLogDword(path, L"LogLevel", &ovsLogLevel);
+    OvsReadLogDword(path, L"LogModuleMask", &ovsLogFlags);
 
     /* Clamp to the valid OVS_DBG_* range; a bad value must not be honoured. */
     if (ovsLogLevel > OVS_DBG_LOUD) {
@@ -105,6 +108,4 @@ OvsReadDriverConfig(PUNICODE_STRING registryPath)
 
     OVS_LOG_INFO("log config applied: level=%u moduleMask=0x%08x",
                  ovsLogLevel, ovsLogFlags);
-
-    return STATUS_SUCCESS;
 }

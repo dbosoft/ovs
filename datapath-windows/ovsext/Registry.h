@@ -26,9 +26,10 @@
  *   LogModuleMask  REG_DWORD  per-module OVS_DBG_* enable bitmask
  *
  * Each knob defaults to the compile-time value when absent, so a clean install
- * behaves identically to one with no Parameters key. Must be called at
- * PASSIVE_LEVEL (it touches the registry); never read config on the datapath.
+ * behaves identically to one with no Parameters key. Best-effort and non-fatal
+ * (failures leave the defaults in place). Must be called at PASSIVE_LEVEL (it
+ * touches the registry); never read config on the datapath.
  */
-NTSTATUS OvsReadDriverConfig(PUNICODE_STRING registryPath);
+VOID OvsReadDriverConfig(PUNICODE_STRING registryPath);
 
 #endif /* __REGISTRY_H_ */

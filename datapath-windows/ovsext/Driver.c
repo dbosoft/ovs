@@ -28,7 +28,7 @@
 #ifdef OVS_DBG_MOD
 #undef OVS_DBG_MOD
 #endif
-#define OVS_DBG_MOD OVS_DBG_DRIVER
+#define OVS_DBG_MOD OVS_DBG_INIT
 #include "Debug.h"
 
 /* Global handles. XXX: Some of them need not be global. */
@@ -100,14 +100,20 @@ DriverEntry(PDRIVER_OBJECT driverObject,
             PUNICODE_STRING registryPath)
 {
     NDIS_STATUS status;
+    NTSTATUS tlStatus;
     NDIS_FILTER_DRIVER_CHARACTERISTICS driverChars;
 
     /*
      * Register the ETW provider first so logging is captured for the whole load
-     * sequence. A registration failure is non-fatal: DbgPrintEx still works and
-     * the driver must still load, so the result is intentionally not checked.
+     * sequence. A registration failure is non-fatal - DbgPrintEx still works and
+     * the driver must still load - but report it so the absence of ETW logs is
+     * diagnosable rather than mysterious.
      */
-    OvsTraceLoggingRegister();
+    tlStatus = OvsTraceLoggingRegister();
+    if (!NT_SUCCESS(tlStatus)) {
+        OVS_LOG_WARN("ETW provider registration failed (status 0x%08x); "
+                     "driver logs available via DbgPrint only", tlStatus);
+    }
 
     /*
      * Apply registry logging overrides before any further logging so the rest
