@@ -638,9 +638,10 @@ static void do_xlate_actions(const struct ofpact *, size_t ofpacts_len,
                              struct xlate_ctx *, bool, bool);
 static void clone_xlate_actions(const struct ofpact *, size_t ofpacts_len,
                                 struct xlate_ctx *, bool, bool);
-static void xlate_normal(struct xlate_ctx *);
+static void xlate_normal(struct xlate_ctx *, bool is_last_action);
 static void xlate_normal_flood(struct xlate_ctx *ct,
-                               struct xbundle *in_xbundle, struct xvlan *);
+                               struct xbundle *in_xbundle, struct xvlan *,
+                               bool is_last_action);
 static void xlate_table_action(struct xlate_ctx *, ofp_port_t in_port,
                                uint8_t table_id, bool may_packet_in,
                                bool honor_table_miss, bool with_ct_orig,
@@ -661,7 +662,7 @@ static void xvlan_output_translate(const struct xbundle *,
                                    const struct xvlan *xvlan,
                                    struct xvlan *out);
 static void output_normal(struct xlate_ctx *, const struct xbundle *,
-                          const struct xvlan *);
+                          const struct xvlan *, bool is_last_action);
 
 /* Optional bond recirculation parameter to compose_output_action(). */
 struct xlate_bond_recirc {
@@ -2355,7 +2356,7 @@ mirror_packet(struct xlate_ctx *ctx, struct xbundle *xbundle,
             struct xbundle *out_xbundle = xbundle_lookup(ctx->xcfg,
                                                          mc.out_bundle);
             if (out_xbundle) {
-                output_normal(ctx, out_xbundle, &xvlan);
+                output_normal(ctx, out_xbundle, &xvlan, false);
             }
         } else if (xvlan.v[0].vid != mc.out_vlan
                    && !eth_addr_is_reserved(ctx->xin->flow.dl_dst)) {
@@ -2366,7 +2367,7 @@ mirror_packet(struct xlate_ctx *ctx, struct xbundle *xbundle,
             LIST_FOR_EACH (xb, list_node, &xbridge->xbundles) {
                 if (xbundle_includes_vlan(xb, &xvlan)
                     && !xbundle_mirror_out(xbridge, xb)) {
-                    output_normal(ctx, xb, &xvlan);
+                    output_normal(ctx, xb, &xvlan, false);
                 }
             }
             xvlan.v[0].vid = old_vid;
@@ -2614,7 +2615,7 @@ check_and_set_cvlan_mask(struct flow_wildcards *wc,
 
 static void
 output_normal(struct xlate_ctx *ctx, const struct xbundle *out_xbundle,
-              const struct xvlan *xvlan)
+              const struct xvlan *xvlan, bool is_last_action)
 {
     uint16_t vid;
     union flow_vlan_hdr old_vlans[FLOW_MAX_VLAN_HEADERS];
@@ -2699,7 +2700,7 @@ output_normal(struct xlate_ctx *ctx, const struct xbundle *out_xbundle,
     xvlan_put(&ctx->xin->flow, &out_xvlan, out_xbundle->use_priority_tags);
 
     compose_output_action(ctx, xport->ofp_port, use_recirc ? &xr : NULL,
-                          false, false);
+                          is_last_action, false);
     memcpy(&ctx->xin->flow.vlans, &old_vlans, sizeof(old_vlans));
 }
 
@@ -3006,13 +3007,15 @@ mcast_output_add(struct mcast_output *out, struct xbundle *mcast_xbundle)
  * bundle 'in_xbundle' and the current 'xvlan'. */
 static void
 mcast_output_finish(struct xlate_ctx *ctx, struct mcast_output *out,
-                    struct xbundle *in_xbundle, struct xvlan *xvlan)
+                    struct xbundle *in_xbundle, struct xvlan *xvlan,
+                    bool is_last_action)
 {
     if (out->flood) {
-        xlate_normal_flood(ctx, in_xbundle, xvlan);
+        xlate_normal_flood(ctx, in_xbundle, xvlan, is_last_action);
     } else {
         for (size_t i = 0; i < out->n; i++) {
-            output_normal(ctx, out->xbundles[i], xvlan);
+            output_normal(ctx, out->xbundles[i], xvlan,
+                          is_last_action && i == out->n - 1);
         }
     }
 
@@ -3134,9 +3137,9 @@ xlate_normal_mcast_send_rports(struct xlate_ctx *ctx,
 
 static void
 xlate_normal_flood(struct xlate_ctx *ctx, struct xbundle *in_xbundle,
-                   struct xvlan *xvlan)
+                   struct xvlan *xvlan, bool is_last_action)
 {
-    struct xbundle *xbundle;
+    struct xbundle *xbundle, *last = NULL;
 
     LIST_FOR_EACH (xbundle, list_node, &ctx->xbridge->xbundles) {
         if (xbundle != in_xbundle
@@ -3144,8 +3147,14 @@ xlate_normal_flood(struct xlate_ctx *ctx, struct xbundle *in_xbundle,
             && xbundle_includes_vlan(xbundle, xvlan)
             && xbundle->floodable
             && !xbundle_mirror_out(ctx->xbridge, xbundle)) {
-            output_normal(ctx, xbundle, xvlan);
+            if (last) {
+                output_normal(ctx, last, xvlan, false);
+            }
+            last = xbundle;
         }
+    }
+    if (last) {
+        output_normal(ctx, last, xvlan, is_last_action);
     }
     ctx->nf_output_iface = NF_OUT_FLOOD;
 }
@@ -3165,7 +3174,7 @@ is_ip_local_multicast(const struct flow *flow, struct flow_wildcards *wc)
 }
 
 static void
-xlate_normal(struct xlate_ctx *ctx)
+xlate_normal(struct xlate_ctx *ctx, bool is_last_action)
 {
     struct flow_wildcards *wc = ctx->wc;
     struct flow *flow = &ctx->xin->flow;
@@ -3290,10 +3299,11 @@ xlate_normal(struct xlate_ctx *ctx)
                 xlate_normal_mcast_send_rports(ctx, ms, in_xbundle, &out);
                 ovs_rwlock_unlock(&ms->rwlock);
 
-                mcast_output_finish(ctx, &out, in_xbundle, &xvlan);
+                mcast_output_finish(ctx, &out, in_xbundle, &xvlan,
+                                    is_last_action);
             } else {
                 xlate_report(ctx, OFT_DETAIL, "multicast traffic, flooding");
-                xlate_normal_flood(ctx, in_xbundle, &xvlan);
+                xlate_normal_flood(ctx, in_xbundle, &xvlan, is_last_action);
             }
             return;
         } else if (is_mld(flow, wc)) {
@@ -3311,10 +3321,11 @@ xlate_normal(struct xlate_ctx *ctx)
                 xlate_normal_mcast_send_rports(ctx, ms, in_xbundle, &out);
                 ovs_rwlock_unlock(&ms->rwlock);
 
-                mcast_output_finish(ctx, &out, in_xbundle, &xvlan);
+                mcast_output_finish(ctx, &out, in_xbundle, &xvlan,
+                                    is_last_action);
             } else {
                 xlate_report(ctx, OFT_DETAIL, "MLD query, flooding");
-                xlate_normal_flood(ctx, in_xbundle, &xvlan);
+                xlate_normal_flood(ctx, in_xbundle, &xvlan, is_last_action);
             }
             return;
         } else {
@@ -3324,7 +3335,7 @@ xlate_normal(struct xlate_ctx *ctx)
                  * be forwarded on all ports */
                 xlate_report(ctx, OFT_DETAIL,
                              "RFC4541: section 2.1.2, item 2, flooding");
-                xlate_normal_flood(ctx, in_xbundle, &xvlan);
+                xlate_normal_flood(ctx, in_xbundle, &xvlan, is_last_action);
                 return;
             }
         }
@@ -3356,7 +3367,7 @@ xlate_normal(struct xlate_ctx *ctx)
         }
         ovs_rwlock_unlock(&ms->rwlock);
 
-        mcast_output_finish(ctx, &out, in_xbundle, &xvlan);
+        mcast_output_finish(ctx, &out, in_xbundle, &xvlan, is_last_action);
     } else {
         ovs_rwlock_rdlock(&ctx->xbridge->ml->rwlock);
         mac = mac_learning_lookup(ctx->xbridge->ml, flow->dl_dst, vlan);
@@ -3376,7 +3387,7 @@ xlate_normal(struct xlate_ctx *ctx)
                 && mac_xbundle != in_xbundle
                 && mac_xbundle->ofbundle != in_xbundle->ofbundle) {
                 xlate_report(ctx, OFT_DETAIL, "forwarding to learned port");
-                output_normal(ctx, mac_xbundle, &xvlan);
+                output_normal(ctx, mac_xbundle, &xvlan, is_last_action);
             } else if (!mac_xbundle) {
                 xlate_report(ctx, OFT_WARN,
                              "learned port is unknown, dropping");
@@ -3387,7 +3398,7 @@ xlate_normal(struct xlate_ctx *ctx)
         } else {
             xlate_report(ctx, OFT_DETAIL,
                          "no learned MAC for destination, flooding");
-            xlate_normal_flood(ctx, in_xbundle, &xvlan);
+            xlate_normal_flood(ctx, in_xbundle, &xvlan, is_last_action);
         }
     }
 }
@@ -3761,7 +3772,7 @@ tnl_send_nd_request(struct xlate_ctx *ctx, const struct xport *out_dev,
     struct dp_packet packet;
 
     dp_packet_init(&packet, 0);
-    compose_nd_ns(&packet, eth_src, ipv6_src, ipv6_dst);
+    compose_nd_ns(&packet, true, eth_src, eth_addr_zero, ipv6_src, ipv6_dst);
     compose_table_xlate(ctx, out_dev, &packet);
     dp_packet_uninit(&packet);
 }
@@ -5608,7 +5619,7 @@ xlate_output_action(struct xlate_ctx *ctx, ofp_port_t port,
                            do_xlate_actions);
         break;
     case OFPP_NORMAL:
-        xlate_normal(ctx);
+        xlate_normal(ctx, is_last_action);
         break;
     case OFPP_FLOOD:
         flood_packets(ctx, false, is_last_action);
@@ -6108,80 +6119,107 @@ xlate_sample_action(struct xlate_ctx *ctx,
     compose_sample_action(ctx, &compose_args);
 }
 
-/* Determine if an datapath action translated from the openflow action
- * can be reversed by another datapath action.
+/* Returns true if all datapath actions in [data, data + size) are reversible,
+ * i.e., the commit mechanism can produce datapath actions to undo their
+ * effects on the packet.
  *
- * Openflow actions that do not emit datapath actions are trivially
- * reversible. Reversiblity of other actions depends on nature of
- * action and their translation.  */
+ * Datapath clone() and sample() already isolate their inner actions and don't
+ * need inspection.  check_pkt_len() branches need recursive inspection.
+ *
+ * Push/pop for VLAN and MPLS are reversible by the commit mechanism, while
+ * the same is not the case for ETH or NSH, as well as ADD_MPLS that changes
+ * the packet type and cannot be easily undone.
+ *
+ * hash() is not considered reversible as it hashes the current set of headers
+ * and needs to be recalculated whenever headers change, and there is no action
+ * to clear the hash.
+ *
+ * recirc() is reversible because the packet is always cloned on recirculation
+ * by the datapath, unless it is the last action.
+ *
+ * dec_ttl() is not reversible, as there is no equivalent inc_ttl().  The
+ * commit mechanism cannot undo the change since the original TTL value is not
+ * matched.
+ *
+ * ct()/ct_clear() are not reversible as they work with the external state
+ * that cannot be easily restored.
+ */
 static bool
-reversible_actions(const struct ofpact *ofpacts, size_t ofpacts_len)
+odp_actions_are_reversible(const void *data, size_t size)
 {
-    const struct ofpact *a;
+    const struct nlattr *a;
+    unsigned int left;
 
-    OFPACT_FOR_EACH (a, ofpacts, ofpacts_len) {
-        switch (a->type) {
-        case OFPACT_BUNDLE:
-        case OFPACT_CLEAR_ACTIONS:
-        case OFPACT_CLONE:
-        case OFPACT_CONJUNCTION:
-        case OFPACT_CONTROLLER:
-        case OFPACT_DEBUG_RECIRC:
-        case OFPACT_DEBUG_SLOW:
-        case OFPACT_DEC_MPLS_TTL:
-        case OFPACT_DEC_TTL:
-        case OFPACT_ENQUEUE:
-        case OFPACT_EXIT:
-        case OFPACT_FIN_TIMEOUT:
-        case OFPACT_GOTO_TABLE:
-        case OFPACT_GROUP:
-        case OFPACT_LEARN:
-        case OFPACT_MULTIPATH:
-        case OFPACT_NOTE:
-        case OFPACT_OUTPUT:
-        case OFPACT_OUTPUT_REG:
-        case OFPACT_POP_MPLS:
-        case OFPACT_POP_QUEUE:
-        case OFPACT_PUSH_MPLS:
-        case OFPACT_PUSH_VLAN:
-        case OFPACT_REG_MOVE:
-        case OFPACT_RESUBMIT:
-        case OFPACT_SAMPLE:
-        case OFPACT_SET_ETH_DST:
-        case OFPACT_SET_ETH_SRC:
-        case OFPACT_SET_FIELD:
-        case OFPACT_SET_IP_DSCP:
-        case OFPACT_SET_IP_ECN:
-        case OFPACT_SET_IP_TTL:
-        case OFPACT_SET_IPV4_DST:
-        case OFPACT_SET_IPV4_SRC:
-        case OFPACT_SET_L4_DST_PORT:
-        case OFPACT_SET_L4_SRC_PORT:
-        case OFPACT_SET_MPLS_LABEL:
-        case OFPACT_SET_MPLS_TC:
-        case OFPACT_SET_MPLS_TTL:
-        case OFPACT_SET_QUEUE:
-        case OFPACT_SET_TUNNEL:
-        case OFPACT_SET_VLAN_PCP:
-        case OFPACT_SET_VLAN_VID:
-        case OFPACT_STACK_POP:
-        case OFPACT_STACK_PUSH:
-        case OFPACT_STRIP_VLAN:
-        case OFPACT_UNROLL_XLATE:
-        case OFPACT_WRITE_ACTIONS:
-        case OFPACT_WRITE_METADATA:
-        case OFPACT_CHECK_PKT_LARGER:
-        case OFPACT_DELETE_FIELD:
+    NL_ATTR_FOR_EACH (a, left, data, size) {
+        enum ovs_action_attr type = nl_attr_type(a);
+
+        switch (type) {
+        case OVS_ACTION_ATTR_UNSPEC:
+        case __OVS_ACTION_ATTR_MAX:
+            OVS_NOT_REACHED();
+
+        /* Reversible: do not modify the packet, or undone by commit. */
+        case OVS_ACTION_ATTR_OUTPUT:
+        case OVS_ACTION_ATTR_USERSPACE:
+        case OVS_ACTION_ATTR_SET:
+        case OVS_ACTION_ATTR_PUSH_VLAN:
+        case OVS_ACTION_ATTR_POP_VLAN:
+        case OVS_ACTION_ATTR_SAMPLE:
+        case OVS_ACTION_ATTR_RECIRC:
+        case OVS_ACTION_ATTR_PUSH_MPLS:
+        case OVS_ACTION_ATTR_POP_MPLS:
+        case OVS_ACTION_ATTR_SET_MASKED:
+        case OVS_ACTION_ATTR_CLONE:
+        case OVS_ACTION_ATTR_PSAMPLE:
+        case OVS_ACTION_ATTR_LB_OUTPUT:
             break;
 
-        case OFPACT_CT:
-        case OFPACT_CT_CLEAR:
-        case OFPACT_METER:
-        case OFPACT_NAT:
-        case OFPACT_OUTPUT_TRUNC:
-        case OFPACT_ENCAP:
-        case OFPACT_DECAP:
-        case OFPACT_DEC_NSH_TTL:
+        /* Nested: recurse into sub-action lists. */
+        case OVS_ACTION_ATTR_CHECK_PKT_LEN: {
+            const struct nlattr *nested;
+            unsigned int nested_left;
+
+            NL_ATTR_FOR_EACH (nested, nested_left,
+                              nl_attr_get(a), nl_attr_get_size(a)) {
+                enum ovs_check_pkt_len_attr attr;
+
+                attr = nl_attr_type(nested);
+                switch (attr) {
+                case OVS_CHECK_PKT_LEN_ATTR_UNSPEC:
+                case __OVS_CHECK_PKT_LEN_ATTR_MAX:
+                    OVS_NOT_REACHED();
+
+                case OVS_CHECK_PKT_LEN_ATTR_PKT_LEN:
+                    break;
+
+                case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER:
+                case OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_LESS_EQUAL:
+                    if (!odp_actions_are_reversible(
+                            nl_attr_get(nested),
+                            nl_attr_get_size(nested))) {
+                        return false;
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+
+        /* Non-reversible. */
+        case OVS_ACTION_ATTR_HASH:
+        case OVS_ACTION_ATTR_CT:
+        case OVS_ACTION_ATTR_TRUNC:
+        case OVS_ACTION_ATTR_PUSH_ETH:
+        case OVS_ACTION_ATTR_POP_ETH:
+        case OVS_ACTION_ATTR_CT_CLEAR:
+        case OVS_ACTION_ATTR_PUSH_NSH:
+        case OVS_ACTION_ATTR_POP_NSH:
+        case OVS_ACTION_ATTR_METER:
+        case OVS_ACTION_ATTR_ADD_MPLS:
+        case OVS_ACTION_ATTR_DEC_TTL:
+        case OVS_ACTION_ATTR_DROP:
+        case OVS_ACTION_ATTR_TUNNEL_PUSH:
+        case OVS_ACTION_ATTR_TUNNEL_POP:
             return false;
         }
     }
@@ -6194,86 +6232,84 @@ clone_xlate_actions(const struct ofpact *actions, size_t actions_len,
                     bool group_bucket_action OVS_UNUSED)
 {
     struct xretained_state *retained_state;
-    size_t offset, ac_offset;
+    bool old_was_mpls, old_conntracked;
+    size_t body_offset, body_size;
+    uint32_t old_observe_offset;
+
+    /* Commit pending datapath actions before translating the clone body
+     * so that body_offset accurately marks the start of the clone body's
+     * own actions.  Not needed for the last action since nothing follows
+     * that could be affected by the clone body's effects. */
+    if (!is_last_action) {
+        xlate_commit_actions(ctx);
+    }
 
     retained_state = xretain_state_save(ctx);
-
-    if (reversible_actions(actions, actions_len) || is_last_action) {
-        do_xlate_actions(actions, actions_len, ctx, is_last_action, false);
-        if (!ctx->freezing) {
-            xlate_action_set(ctx);
-        }
-        if (ctx->freezing) {
-            finish_freezing(ctx);
-        }
-        goto xlate_done;
-    }
-
-    /* Commit datapath actions before emitting the clone action to
-     * avoid emitting those actions twice. Once inside
-     * the clone, another time for the action after clone.  */
-    xlate_commit_actions(ctx);
     xretain_base_flow_save(ctx, retained_state);
 
-    bool old_was_mpls = ctx->was_mpls;
-    bool old_conntracked = ctx->conntracked;
+    old_was_mpls = ctx->was_mpls;
+    old_conntracked = ctx->conntracked;
+    old_observe_offset = ctx->xout->last_observe_offset;
 
-    /* The actions are not reversible, a datapath clone action is
-     * required to encode the translation. Select the clone action
-     * based on datapath capabilities.  */
-    if (ctx->xbridge->support.clone) { /* Use clone action */
-        /* Use clone action as datapath clone. */
-        offset = nl_msg_start_nested(ctx->odp_actions, OVS_ACTION_ATTR_CLONE);
-        do_xlate_actions(actions, actions_len, ctx, true, false);
-        if (!ctx->freezing) {
-            xlate_action_set(ctx);
-        }
-        if (ctx->freezing) {
-            finish_freezing(ctx);
-        }
-        nl_msg_end_non_empty_nested(ctx->odp_actions, offset);
-        goto dp_clone_done;
+    body_offset = ctx->odp_actions->size;
+
+    /* Translate the clone body.  Pass is_last_action=true to avoid
+     * unnecessary nesting within the clone body itself. */
+    do_xlate_actions(actions, actions_len, ctx, true, false);
+    if (!ctx->freezing) {
+        xlate_action_set(ctx);
+    }
+    if (ctx->freezing) {
+        finish_freezing(ctx);
     }
 
-    if (ctx->xbridge->support.sample_nesting > 3) {
-        /* Use sample action as datapath clone. */
-        offset = nl_msg_start_nested(ctx->odp_actions, OVS_ACTION_ATTR_SAMPLE);
-        ac_offset = nl_msg_start_nested(ctx->odp_actions,
-                                        OVS_SAMPLE_ATTR_ACTIONS);
-        do_xlate_actions(actions, actions_len, ctx, true, false);
-        if (!ctx->freezing) {
-            xlate_action_set(ctx);
-        }
-        if (ctx->freezing) {
-            finish_freezing(ctx);
-        }
-        if (nl_msg_end_non_empty_nested(ctx->odp_actions, ac_offset)) {
-            nl_msg_cancel_nested(ctx->odp_actions, offset);
-        } else {
+    body_size = ctx->odp_actions->size - body_offset;
+
+    if (!is_last_action && body_size > 0
+        && !odp_actions_are_reversible(
+                (char *) ctx->odp_actions->data + body_offset, body_size)) {
+        size_t observe_shift = 0;
+
+        if (ctx->xbridge->support.clone) {
+            nl_msg_wrap_nested(ctx->odp_actions, OVS_ACTION_ATTR_CLONE,
+                               body_offset, body_size);
+            observe_shift = NLA_HDRLEN;
+        } else if (ctx->xbridge->support.sample_nesting > 3) {
+            /* Use sample action as datapath clone fallback. */
+            nl_msg_wrap_nested(ctx->odp_actions, OVS_SAMPLE_ATTR_ACTIONS,
+                               body_offset, body_size);
             nl_msg_put_u32(ctx->odp_actions, OVS_SAMPLE_ATTR_PROBABILITY,
                            UINT32_MAX); /* 100% probability. */
-            nl_msg_end_nested(ctx->odp_actions, offset);
+            nl_msg_wrap_nested(ctx->odp_actions, OVS_ACTION_ATTR_SAMPLE,
+                               body_offset,
+                               ctx->odp_actions->size - body_offset);
+            observe_shift = 2 * NLA_HDRLEN;
+        } else {
+            /* Datapath does not support clone.  Discard the clone body
+             * since we cannot isolate its non-reversible effects. */
+            ctx->odp_actions->size = body_offset;
+            ctx->xout->last_observe_offset = old_observe_offset;
+            xlate_report_error(ctx, "Failed to compose clone action");
         }
-        goto dp_clone_done;
+
+        if (ctx->xout->last_observe_offset != UINT32_MAX
+            && ctx->xout->last_observe_offset >= body_offset) {
+            ctx->xout->last_observe_offset += observe_shift;
+        }
+
+        /* Datapath's clone isolates all packet modifications, so restore
+         * base_flow to match the packet's actual state after the clone. */
+        xretain_base_flow_restore(ctx, retained_state);
     }
+    /* When not wrapped, base_flow is NOT restored: it reflects the packet
+     * state after the inlined actions, so the commit mechanism will emit
+     * reverse actions to undo them. */
 
-    /* Datapath does not support clone, skip xlate 'oc' and
-     * report an error */
-    xlate_report_error(ctx, "Failed to compose clone action");
-
-dp_clone_done:
-    /* The clone's conntrack execution should have no effect on the original
-     * packet. */
+    /* The clone's conntrack and MPLS state changes should have no
+     * effect on the original packet. */
     ctx->conntracked = old_conntracked;
-
-    /* Popping MPLS from the clone should have no effect on the original
-     * packet. */
     ctx->was_mpls = old_was_mpls;
 
-    /* Restore the 'base_flow' for the next action.  */
-    xretain_base_flow_restore(ctx, retained_state);
-
-xlate_done:
     xretain_state_restore_and_free(ctx, retained_state);
 }
 
