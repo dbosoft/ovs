@@ -195,6 +195,7 @@
     <ClInclude Include="PacketParser.h" />
     <ClInclude Include="precomp.h" />
     <ClInclude Include="Recirc.h" />
+    <ClInclude Include="Registry.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="Switch.h" />
     <ClInclude Include="Tunnel.h" />
@@ -442,6 +443,7 @@
       <PreCompiledHeaderOutputFile>$(IntDir)\precomp.h.pch</PreCompiledHeaderOutputFile>
     </ClCompile>
     <ClCompile Include="Recirc.c" />
+    <ClCompile Include="Registry.c" />
     <ClCompile Include="Switch.c" />
     <ClCompile Include="Tunnel.c" />
     <ClCompile Include="TunnelFilter.c" />

@@ -59,8 +59,10 @@ Write-Host "local DBO_OVSE.sys = $localHash" -ForegroundColor DarkGray
 Invoke-Remote 'Get-ChildItem C:\ovs-test\driver -File -EA SilentlyContinue | Remove-Item -Force'
 & $egs upload-directory $VmId $pkg 'C:\ovs-test\driver' | Select-Object -Last 1
 
-# refresh the diagnostics helper (ovs-tcpdump.ps1 pktmon capture) alongside it.
+# refresh the diagnostics helpers alongside it: ovs-tcpdump.ps1 (pktmon capture)
+# and ovs-drvtrace.ps1 (driver ETW log capture).
 & $egs upload-file $VmId (Join-Path $here 'utilities\ovs-tcpdump.ps1') 'C:\ovs-test\ovs-tcpdump.ps1' --overwrite | Select-Object -Last 1
+& $egs upload-file $VmId (Join-Path $here 'utilities\ovs-drvtrace.ps1') 'C:\ovs-test\ovs-drvtrace.ps1' --overwrite | Select-Object -Last 1
 
 $stopList = if ($KeepNestedRunning) { '@()' } else { "@('" + ($NestedVMs -join "','") + "')" }
 $startBackLit = if ($KeepNestedRunning) { '$false' } else { '$true' }
