@@ -88,6 +88,23 @@ file(WRITE "${OVS_ROOT}/python/ovs/dirs.py" "${_dpy}")
 
 set(BA "${OVS_ROOT}/build-aux")
 set(INCO "${OVS_ROOT}/include/openvswitch")
+
+# Defend against a stale in-source autotools build: the autotools flow generates
+# these .inc next to their .c (e.g. lib/meta-flow.inc), and a quoted
+# #include "meta-flow.inc" resolves the compiland's own directory before any -I
+# path, so a leftover in-source copy silently shadows the ${GEN} one this build
+# generates -- compiling an out-of-date mf_fields[] (wrong field widths, e.g.
+# xreg/xxreg). They are .gitignore'd generated artifacts, so a clean checkout
+# never has them; remove any that a prior in-source build left behind.
+file(REMOVE
+  "${OVS_ROOT}/lib/meta-flow.inc"
+  "${OVS_ROOT}/lib/nx-match.inc"
+  "${OVS_ROOT}/lib/ofp-actions.inc1"
+  "${OVS_ROOT}/lib/ofp-actions.inc2"
+  "${OVS_ROOT}/lib/ofp-errors.inc"
+  "${OVS_ROOT}/lib/ofp-msgs.inc"
+  "${OVS_ROOT}/ovsdb/_server.ovsschema.inc")
+
 # OpenFlow field/action/error/msg extractors (all pure python3)
 ovs_gen("${GEN}/lib/meta-flow.inc"    "${BA}/extract-ofp-fields"  meta-flow "${INCO}/meta-flow.h")
 ovs_gen("${GEN}/lib/nx-match.inc"     "${BA}/extract-ofp-fields"  nx-match  "${INCO}/meta-flow.h")
