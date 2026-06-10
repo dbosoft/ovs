@@ -23,6 +23,7 @@
 #include "IpFragment.h"
 #include "Ip6Fragment.h"
 #include "Meter.h"
+#include "Registry.h"
 
 #ifdef OVS_DBG_MOD
 #undef OVS_DBG_MOD
@@ -101,7 +102,19 @@ DriverEntry(PDRIVER_OBJECT driverObject,
     NDIS_STATUS status;
     NDIS_FILTER_DRIVER_CHARACTERISTICS driverChars;
 
-    UNREFERENCED_PARAMETER(registryPath);
+    /*
+     * Register the ETW provider first so logging is captured for the whole load
+     * sequence. A registration failure is non-fatal: DbgPrintEx still works and
+     * the driver must still load, so the result is intentionally not checked.
+     */
+    OvsTraceLoggingRegister();
+
+    /*
+     * Apply registry logging overrides before any further logging so the rest
+     * of the load sequence honours the configured level/module mask. Failure is
+     * non-fatal (the compile-time defaults stand).
+     */
+    OvsReadDriverConfig(registryPath);
 
     /* Initialize driver associated data structures. */
     status = OvsInit();
@@ -274,6 +287,8 @@ DriverEntry(PDRIVER_OBJECT driverObject,
 cleanup:
     if (status != NDIS_STATUS_SUCCESS){
         OvsCleanup();
+        /* OvsExtUnload does not run when DriverEntry fails; unregister here. */
+        OvsTraceLoggingUnregister();
     }
 
     return status;
@@ -316,6 +331,9 @@ OvsExtUnload(struct _DRIVER_OBJECT *driverObject)
 
     /* Release driver associated data structures. */
     OvsCleanup();
+
+    /* Unregister the ETW provider last so teardown logging is still captured. */
+    OvsTraceLoggingUnregister();
 }
 
 

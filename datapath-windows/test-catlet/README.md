@@ -24,7 +24,8 @@ $exes = 'ovs-dpctl','ovs-vswitchd','ovsdb-server','ovs-vsctl','ovsdb-tool','ovs-
 & $scp -O ($exes | ForEach-Object { "$rel\$_.exe" }) vswitchd\vswitch.ovsschema `
     "<catlet>:C:/ovs-test/native/"
 & $scp -O datapath-windows\test-catlet\run-full-mgmt-dp-test.ps1 `
-    datapath-windows\utilities\ovs-tcpdump.ps1 "<catlet>:C:/ovs-test/"
+    datapath-windows\utilities\ovs-tcpdump.ps1 `
+    datapath-windows\utilities\ovs-drvtrace.ps1 "<catlet>:C:/ovs-test/"
 & $ssh <catlet> "powershell -NoProfile -ExecutionPolicy Bypass -File C:\ovs-test\run-full-mgmt-dp-test.ps1"
 ```
 
@@ -48,5 +49,8 @@ SFTP subsystem.
   `.pcapng` (the `ovs-tcpdump` replacement; see `../utilities/README.md`). Copied
   to `C:\ovs-test\` by the deploy steps above and by `deploy-driver.ps1`. Point
   `-OvsCtl C:\ovs-test\native\ovs-vsctl.exe` at the test build when needed.
+- **`ovs-drvtrace.ps1`** — driver log capture via ETW (`logman`+`tracerpt`), the
+  no-debugger way to read `OvsLog()` output (see `../utilities/README.md`). Copied
+  to `C:\ovs-test\` by the deploy steps above and by `deploy-driver.ps1`.
 
 These are manual/dev tools; they are not wired into CI.

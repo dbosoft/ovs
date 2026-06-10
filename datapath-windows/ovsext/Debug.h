@@ -54,8 +54,20 @@
 
 
 
+/*
+ * Logging verbosity (max OVS_DBG_* level emitted) and the per-module enable
+ * mask. Compile-time defaults; overridable at load from the registry
+ * (see Registry.c). Read on the hot path, so plain globals (no lock).
+ */
+extern UINT32 ovsLogLevel;
+extern UINT32 ovsLogFlags;
+
 VOID OvsLog(UINT32 level, UINT32 flag, CHAR *funcName,
             UINT32 line, CHAR *format, ...);
+
+/* ETW TraceLogging provider lifecycle (registered for the driver's lifetime). */
+NTSTATUS OvsTraceLoggingRegister(VOID);
+VOID OvsTraceLoggingUnregister(VOID);
 
 
 #define OVS_LOG_LOUD(_format, ...) \
