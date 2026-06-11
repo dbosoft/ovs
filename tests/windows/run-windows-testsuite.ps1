@@ -137,9 +137,9 @@ cd '$repoMsys'
 chmod +x tests/testsuite
 sed -i -E "s#^(abs_top_srcdir=).*#\1'$repoMsys'#; s#^(abs_top_builddir=).*#\1'$repoMsys'#; s#^(abs_srcdir=).*#\1'$repoMsys/tests'#; s#^(abs_builddir=).*#\1'$repoMsys/tests'#" tests/atconfig
 if [ ! -e tests/testpki-cacert.pem ]; then
-    export PATH='$opensslBin':"\$PATH"
+    export PATH='$opensslBin':"`$PATH"
     P="sh utilities/ovs-pki.in --dir=tests/pki --log=tests/ovs-pki.log"
-    \$P init && \$P req+sign tests/pki/test && \$P req+sign tests/pki/test2
+    `$P init && `$P req+sign tests/pki/test && `$P req+sign tests/pki/test2
     cp tests/pki/switchca/cacert.pem tests/testpki-cacert.pem
     cp tests/pki/test-cert.pem       tests/testpki-cert.pem
     cp tests/pki/test-req.pem        tests/testpki-req.pem
@@ -148,7 +148,10 @@ if [ ! -e tests/testpki-cacert.pem ]; then
     cp tests/pki/test2-req.pem       tests/testpki-req2.pem
     cp tests/pki/test2-privkey.pem   tests/testpki-privkey2.pem
 fi
-"@ | Out-Null
+"@
+# Don't swallow setup failures: a broken suite generation or PKI step leaves the
+# run certless and every SSL test fails downstream with a confusing error.
+if ($LASTEXITCODE -ne 0) { throw "test harness / PKI setup failed (rc=$LASTEXITCODE) -- see ovs-pki.log" }
 
 if ($List) {
   Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests -l"
