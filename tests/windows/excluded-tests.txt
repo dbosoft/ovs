@@ -51,3 +51,17 @@ SSL/TLS db: implementation
 # process, so the pidfile lingers. The monitor itself works (it prints
 # found/last_id); only the POSIX-signal teardown cleanup is untestable here.
 monitor-cond-since found but no new rows
+#
+# Record/replay asserts byte-identical logs between a record run and a replay
+# run, but one run logs a recv() OS-error line ("connection reset by peer") and
+# the other does not -- whether the close is seen during recv is timing-
+# dependent, and the message is a localized Win32 error string. Byte-identical
+# log replay is not achievable for that diagnostic on Windows.
+ovsdb-server record/replay
+#
+# The original lock holder must print the regained lock after the stealer
+# unlocks, but the regain round-trip (unlock -> server grants -> server notifies
+# the holder -> the detached holder writes output) races OVSDB_SERVER_SHUTDOWN
+# over the higher-latency Windows named pipe; the unchanged upstream test has no
+# synchronization point to wait on.
+ovsdb lock -- steal

@@ -68,6 +68,43 @@ function Invoke-MsysBash([string]$body) {
   finally { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
 }
 
+# 0. Synthesize the autotest harness files (atconfig/atlocal) if this is a
+#    CMake-only tree with no ./configure output (e.g. CI). atconfig is a small
+#    shell-var file; atlocal is atlocal.in with its @VAR@ set substituted for the
+#    values the Windows reduced suite needs. When present (a configured dev tree)
+#    they are left as-is and only repointed by the sed below. LF-only (bash sources them).
+function Write-LF([string]$path, [string]$text) {
+  [IO.File]::WriteAllText($path, ($text -replace "`r", ""), (New-Object Text.UTF8Encoding($false)))
+}
+$atconfig = Join-Path $repo 'tests\atconfig'
+if (-not (Test-Path $atconfig)) {
+  Write-LF $atconfig @"
+at_testdir='tests'
+abs_builddir='$repoMsys/tests'
+at_srcdir='.'
+abs_srcdir='$repoMsys/tests'
+at_top_srcdir='..'
+abs_top_srcdir='$repoMsys'
+at_top_build_prefix='../'
+abs_top_builddir='$repoMsys'
+at_top_builddir=`$at_top_build_prefix
+EXEEXT='.exe'
+AUTOTEST_PATH='tests'
+SHELL=`${CONFIG_SHELL-'/bin/sh'}
+"@
+}
+$atlocal = Join-Path $repo 'tests\atlocal'
+if (-not (Test-Path $atlocal)) {
+  $py3cmd = Get-Command python3 -ErrorAction SilentlyContinue
+  $py3msys = if ($py3cmd) { To-Msys $py3cmd.Source } else { 'python3' }
+  $al = Get-Content (Join-Path $repo 'tests\atlocal.in') -Raw
+  @{ '@HAVE_OPENSSL@'='yes'; '@PYTHON3@'=$py3msys; '@EGREP@'='grep -E'; '@CFLAGS@'='';
+     '@DPDK_MBUF_HEADROOM@'='0'; '@HAVE_BACKTRACE@'='no'; '@HAVE_TCA_HTB_RATE64@'='no';
+     '@HAVE_TCA_POLICE_PKTRATE64@'='no'; '@HAVE_UNBOUND@'='no'; '@HAVE_UNWIND@'='no'
+   }.GetEnumerator() | ForEach-Object { $al = $al.Replace($_.Key, $_.Value) }
+  Write-LF $atlocal $al
+}
+
 # 1. Generate the suite from the manifest + repoint atconfig abs_* at THIS checkout,
 #    and generate the test-PKI certs the ssl/tls tests need (ovs-pki via OpenSSL; the
 #    Windows chmod/ACL shim in ovs-pki.in is required for this to work).
