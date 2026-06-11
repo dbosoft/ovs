@@ -1702,6 +1702,11 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
     if (layers->isTcp || layers->isUdp) {
         hdrSize = layers->l4Offset +
                   layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+    } else if (layers->isIcmp) {
+        /* The ICMPv6 checksum is recomputed over the L4 payload below, so the
+         * whole packet must be contiguous, not just the IPv6 fixed header. */
+        hdrSize = NET_BUFFER_DATA_LENGTH(
+            NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl));
     } else {
         hdrSize = layers->l3Offset + sizeof (*ipHdr);
     }
@@ -1781,12 +1786,23 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
 
         if (layers->isIcmp) {
             ICMPHdr *icmp =(ICMPHdr *)(bufferStart + layers->l4Offset);
+            /*
+             * payload_len counts any IPv6 extension headers that l4Offset
+             * already skips; clamp the ICMPv6 span to the captured L4 bytes so
+             * the checksum walk cannot read past the contiguous buffer.
+             */
+            UINT32 captured = NET_BUFFER_DATA_LENGTH(
+                NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl)) - layers->l4Offset;
+            UINT32 ext = (UINT32)(layers->l4Offset - layers->l3Offset) -
+                         (UINT32)sizeof(IPv6Hdr);
+            UINT16 icmpLen = (UINT16)MIN((UINT32)ntohs(ipHdr->payload_len) - ext,
+                                         captured);
             icmp->checksum = 0x00;
-            icmp->checksum = OvsCalculateICMPv6Checksum(ipHdr->saddr, ipHdr->daddr,
-                                                        ntohs(ipHdr->payload_len),
+            icmp->checksum = OvsCalculateICMPv6Checksum(ipHdr->saddr,
+                                                        ipHdr->daddr, icmpLen,
                                                         IPPROTO_ICMPV6,
                                                         (uint16_t *)icmp,
-                                                        ntohs(ipHdr->payload_len));
+                                                        icmpLen);
         }
     }
 
@@ -2054,7 +2070,8 @@ OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
 
     RtlCopyMemory(&key->ipv6Key.ipv6Src, &ipHdr->saddr, sizeof(struct in6_addr));
     RtlCopyMemory(&key->ipv6Key.ipv6Dst, &ipHdr->daddr, sizeof(struct in6_addr));
-    key->ipv6Key.ipv6Label = ipv6Attr->ipv6_label & htonl(0x000FFFFFU);
+    /* The extractor stores the flow label as a host-order 20-bit value. */
+    key->ipv6Key.ipv6Label = ntohl(ipv6Attr->ipv6_label) & 0x000FFFFF;
     key->ipv6Key.nwTos = ipv6Attr->ipv6_tclass;
     key->ipv6Key.nwTtl = ipv6Attr->ipv6_hlimit;
 
@@ -2119,6 +2136,12 @@ OvsUpdateSctpPorts(OvsForwardingContext *ovsFwdCtx,
             ipLen = (UINT32)ntohs(ip4->tot_len) - ipHdrSpan;
         }
         payloadLen = MIN(ipLen, captured);
+    }
+
+    /* A malformed IP length could derive a span shorter than the SCTP header;
+     * the CRC32c (and the port writes) need at least the full header. */
+    if (payloadLen < sizeof(SCTPHdr)) {
+        return NDIS_STATUS_FAILURE;
     }
 
     if (sctpHdr->source != sctpAttr->sctp_src ||
@@ -2241,14 +2264,27 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
     icmpHdr = (ICMPHdr *)l4Start;
     ndTarget = (struct in6_addr *)(l4Start + sizeof(ICMPHdr));
 
+    /*
+     * The ND target and link-layer options exist only for neighbor
+     * solicitation / advertisement with code 0 (mirroring OvsParseIcmpV6); a
+     * set(nd) on any other ICMPv6 message would corrupt the payload.
+     */
+    if (icmpHdr->code != 0 ||
+        (icmpHdr->type != ND_NEIGHBOR_SOLICIT &&
+         icmpHdr->type != ND_NEIGHBOR_ADVERT)) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
     RtlCopyMemory(ndTarget, ndAttr->nd_target, sizeof *ndTarget);
     RtlCopyMemory(&key->icmp6Key.ndTarget, ndAttr->nd_target,
                   sizeof(struct in6_addr));
 
     /*
      * Walk the ND options updating the source/target link-layer address.
-     * Bounds mirror the parser: each option is 'len' 8-byte units; stop on a
-     * zero length or one that would run past the L4 payload.
+     * Bounds mirror the parser: each option is 'len' 8-byte units; a zero
+     * length or one running past the L4 payload is malformed, so fail like
+     * OvsParseIcmpV6 rather than forward a half-validated packet.
      */
     payloadLen = packetLen - layers->l4Offset;
     ofs = sizeof(ICMPHdr) + sizeof(struct in6_addr);
@@ -2257,7 +2293,8 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
         UINT16 optLen = (UINT16)ndOpt->len * 8;
 
         if (optLen == 0 || ofs + optLen > payloadLen) {
-            break;
+            ovsActionStats.noCopiedNbl++;
+            return NDIS_STATUS_FAILURE;
         }
 
         if (ndOpt->type == ND_OPT_SOURCE_LINKADDR && ndOpt->len == 1) {
@@ -2276,12 +2313,15 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
     }
 
     /*
-     * Clamp the checksum span to the captured L4 bytes. ipHdr->payload_len
-     * counts extension headers (which l4Offset already skips) and could exceed
-     * the contiguous buffer; walking it verbatim would read past the NBL.
+     * The ICMPv6 length is the IPv6 payload minus any extension headers that
+     * l4Offset already skips; clamp to the captured L4 bytes so the checksum
+     * walk cannot read past the contiguous buffer.
      */
     {
-        UINT16 csumLen = (UINT16)MIN(ntohs(ipHdr->payload_len), payloadLen);
+        UINT32 ext = (UINT32)(layers->l4Offset - layers->l3Offset) -
+                     (UINT32)sizeof(IPv6Hdr);
+        UINT16 csumLen = (UINT16)MIN((UINT32)ntohs(ipHdr->payload_len) - ext,
+                                     payloadLen);
         icmpHdr->checksum = 0;
         icmpHdr->checksum = OvsCalculateICMPv6Checksum(ipHdr->saddr,
                                                        ipHdr->daddr, csumLen,
