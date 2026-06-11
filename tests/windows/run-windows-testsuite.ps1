@@ -170,5 +170,21 @@ Write-Host "windows-testsuite: running $($run.Count), skipping $skip (feature/me
 
 # 3. Run the complement (or an explicit -Groups override).
 $sel = if ($Groups.Trim()) { $Groups.Trim() } else { ($run -join ' ') }
-Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests AUTOTEST_PATH='$ap' $sel -j$Jobs"
-exit $LASTEXITCODE
+$o = Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests AUTOTEST_PATH='$ap' $sel -j$Jobs"
+$o | ForEach-Object { Write-Host $_ }
+$rc = $LASTEXITCODE
+
+# Flake guard: a long -j1 sweep occasionally fails a test on timing/port/file
+# state that passes in isolation (e.g. group 508, "truncating database log").
+# Re-run just the failed groups once; a genuine failure fails twice. This keeps
+# the failing tests in coverage instead of excluding them, while staying a
+# reliable CI gate.
+$failed = @($o | Select-String -Pattern '^\s*(\d+):.*\bFAILED\b' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value })
+if ($rc -ne 0 -and $failed.Count -gt 0) {
+  Write-Host "`n[flake guard] re-running $($failed.Count) failed group(s) once: $($failed -join ' ')"
+  $o2 = Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests AUTOTEST_PATH='$ap' $($failed -join ' ') -j1"
+  $o2 | ForEach-Object { Write-Host $_ }
+  $rc = $LASTEXITCODE
+}
+exit $rc

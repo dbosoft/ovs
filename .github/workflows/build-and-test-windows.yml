@@ -92,7 +92,10 @@ jobs:
         with:
           msystem: MSYS
           update: false
-          install: base-devel
+          # autom4te (the only autotools tool the runner uses) is the
+          # autoconf-wrapper dispatching to a concrete autoconf2.NN; base-devel
+          # ships neither. m4 + perl are autom4te's deps.
+          install: autoconf-wrapper autoconf2.72 m4 perl
 
       # Full reduced autotest suite. The runner self-generates atconfig/atlocal
       # (no ./configure needed) and exits with the autotest status, so any

@@ -39,8 +39,12 @@ fails the job. Genuine platform/method incompatibilities are skipped via
   `OVSDB_SERVER_SHUTDOWN` over the higher-latency Windows named pipe; the
   unchanged upstream test has no synchronization point to wait on.
 
-`652` (equality wait with missing row - relay - clustered) is **flaky** under
-`-j4` but passes on its own; timing-sensitive, not a hard failure.
+**Flaky (timing/state-sensitive, not product bugs):** a few tests occasionally
+fail in the long `-j1` sweep but pass in isolation — `508` ("truncating database
+log with bad transaction") and `652` ("equality wait ... relay - clustered").
+The runner has a **flake guard**: it re-runs only the failed groups once, so a
+flake passes on retry while a genuine failure (which fails twice) still fails
+the job. These stay in coverage rather than being excluded.
 
 ## How to reproduce one test
 
