@@ -1972,8 +1972,8 @@ OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
     IPv6Hdr *ipHdr;
     struct in6_addr newSrc, newDst;
     UINT16 curSrcPort = 0, curDstPort = 0;
-    ovs_be32 *ip6FlowWord;
-    ovs_be32 flowWord;
+    UINT32 label;
+    UINT8 tc;
     NDIS_STATUS status;
 
     ASSERT(layers->value != 0);
@@ -2054,25 +2054,26 @@ OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
     ipHdr = (IPv6Hdr *)(bufferStart + layers->l3Offset);
 
     /*
-     * version|traffic-class|flow-label occupy the first 32-bit network-order
-     * word. Mask in the new traffic class (8 bits below the version nibble)
-     * and the 20-bit flow label.
+     * Write traffic class and the 20-bit flow label byte-wise, the inverse of
+     * how the extractor reads them (PacketParser.c): the TC high nibble lives
+     * in 'priority', its low nibble plus the label's top nibble in flow_lbl[0],
+     * and the rest of the label in flow_lbl[1..2]. This avoids any word-cast,
+     * alignment or bitfield-layout assumption and leaves 'version' untouched.
      */
-    ip6FlowWord = (ovs_be32 *)ipHdr;
-    flowWord = *ip6FlowWord;
-    flowWord = (flowWord & htonl(0xF00FFFFFU)) |
-               htonl((UINT32)ipv6Attr->ipv6_tclass << 20);
-    flowWord = (flowWord & htonl(0xFFF00000U)) |
-               (ipv6Attr->ipv6_label & htonl(0x000FFFFFU));
-    *ip6FlowWord = flowWord;
+    tc = ipv6Attr->ipv6_tclass;
+    label = ntohl(ipv6Attr->ipv6_label) & 0x000FFFFF;
+    ipHdr->priority = (tc >> 4) & 0x0F;
+    ipHdr->flow_lbl[0] = (UINT8)(((tc & 0x0F) << 4) | ((label >> 16) & 0x0F));
+    ipHdr->flow_lbl[1] = (UINT8)((label >> 8) & 0xFF);
+    ipHdr->flow_lbl[2] = (UINT8)(label & 0xFF);
 
     ipHdr->hop_limit = ipv6Attr->ipv6_hlimit;
 
     RtlCopyMemory(&key->ipv6Key.ipv6Src, &ipHdr->saddr, sizeof(struct in6_addr));
     RtlCopyMemory(&key->ipv6Key.ipv6Dst, &ipHdr->daddr, sizeof(struct in6_addr));
     /* The extractor stores the flow label as a host-order 20-bit value. */
-    key->ipv6Key.ipv6Label = ntohl(ipv6Attr->ipv6_label) & 0x000FFFFF;
-    key->ipv6Key.nwTos = ipv6Attr->ipv6_tclass;
+    key->ipv6Key.ipv6Label = label;
+    key->ipv6Key.nwTos = tc;
     key->ipv6Key.nwTtl = ipv6Attr->ipv6_hlimit;
 
     return NDIS_STATUS_SUCCESS;
@@ -2207,11 +2208,29 @@ OvsUpdateArpHeader(OvsForwardingContext *ovsFwdCtx,
     RtlCopyMemory(&arpHdr->arp_sha, arpAttr->arp_sha, sizeof arpHdr->arp_sha);
     RtlCopyMemory(&arpHdr->arp_tha, arpAttr->arp_tha, sizeof arpHdr->arp_tha);
 
-    key->arpKey.nwSrc = arpAttr->arp_sip;
-    key->arpKey.nwDst = arpAttr->arp_tip;
-    key->arpKey.nwProto = (UINT8)(ntohs(arpAttr->arp_op) & 0xFF);
-    RtlCopyMemory(key->arpKey.arpSha, arpAttr->arp_sha, sizeof key->arpKey.arpSha);
-    RtlCopyMemory(key->arpKey.arpTha, arpAttr->arp_tha, sizeof key->arpKey.arpTha);
+    /*
+     * Mirror the flow-key extractor (Flow.c): the opcode is keyed only when it
+     * fits in 8 bits, and the addresses only for request/reply -- otherwise the
+     * extractor leaves those key fields zero.
+     */
+    {
+        UINT16 op = ntohs(arpAttr->arp_op);
+        key->arpKey.nwProto = (op <= 0xff) ? (UINT8)op : 0;
+        if (key->arpKey.nwProto == ARPOP_REQUEST ||
+            key->arpKey.nwProto == ARPOP_REPLY) {
+            key->arpKey.nwSrc = arpAttr->arp_sip;
+            key->arpKey.nwDst = arpAttr->arp_tip;
+            RtlCopyMemory(key->arpKey.arpSha, arpAttr->arp_sha,
+                          sizeof key->arpKey.arpSha);
+            RtlCopyMemory(key->arpKey.arpTha, arpAttr->arp_tha,
+                          sizeof key->arpKey.arpTha);
+        } else {
+            key->arpKey.nwSrc = 0;
+            key->arpKey.nwDst = 0;
+            RtlZeroMemory(key->arpKey.arpSha, sizeof key->arpKey.arpSha);
+            RtlZeroMemory(key->arpKey.arpTha, sizeof key->arpKey.arpTha);
+        }
+    }
 
     return NDIS_STATUS_SUCCESS;
 }
