@@ -1,35 +1,60 @@
 # Windows autotest suite — known failures
 
 The Windows-reduced autotest suite (`tests/windows-testsuite.at`, run via
-`tests/windows/run-windows-testsuite.ps1`) currently has **10 failing tests**.
-They are **real bugs to fix**, not platform incompatibilities — the latter are
-skipped instead, see `excluded-tests.txt` / `excluded-keywords.txt`.
+`tests/windows/run-windows-testsuite.ps1`) currently has **0 unexpected
+failures**. It runs in CI (`.github/workflows/build-and-test-windows.yml`):
+`ctest` first (the CMake unit-test net: `ovstest` exit-code cases + the
+`dpif-windows` mock test), then the full reduced suite. Any unexpected failure
+fails the job. Genuine platform/method incompatibilities are skipped via
+`excluded-tests.txt` / `excluded-keywords.txt`. CI is a **driverless** runner
+(no ovsext kernel driver), so it passes `-NoDatapath`, which additionally skips
+the ovs-vswitchd/ofproto tests in `excluded-no-datapath.txt` (they log "could
+not open ovsext device" and trip check_logs without the driver). Those tests
+still run on a driver-equipped host via a plain `run-windows-testsuite.ps1`.
 
-The suite is **not yet wired into CI**, so these failures block nothing. This
-file tracks them so they are not silently forgotten. Baseline: 947 -> 10 after
-the CMake-overlay Windows port work.
+## Fixed (were failing, now pass)
 
-| # | Test (file) | Root cause | Direction |
-|---|---|---|---|
-| 520 | SSL/TLS db: implementation (`ovsdb-server.at`) | `--private-key=db:...` etc. read the cert/key **path from a database column**; under MSYS that value is an `/f/...` MSYS path, which native OpenSSL cannot open (command-line paths work only because MSYS rewrites argv to `F:\...`, but db-stored values bypass that). | Test-environment path-format issue; needs the db seeded with a native path, or a path-normalization shim. |
-| 521 | SSL/TLS db: implementation (TLSv1.3 only) | Same as 520. | Same as 520. |
-| 721 | ovsdb-server record/replay (`ovsdb-server.at`) | Not yet diagnosed. | Investigate. |
-| 769 | monitor-cond-since found but no new rows (`ovsdb-monitor.at`) | `kill` the detached `ovsdb-client` then wait for its pidfile to disappear; the Windows `--detach` pidfile-removal-on-exit races the harness check. | Ensure the pidfile is unlinked before exit on the Windows signal path. |
-| 820 | IDL writing via IDL with unicode - C (`ovsdb-idl.at`) | MSYS passes UTF-8 argv, but the MSVC CRT decodes `main()` args as the ANSI code page (CP1252), corrupting multi-byte characters before they reach the JSON layer. | Add a UTF-8 `activeCodePage` application manifest to the OVS executables (Win10 1903+), or `wmain()` + UTF-16->UTF-8 conversion. |
-| 821 | ...unicode - write-changed-only - C | Same as 820. | Same as 820. |
-| 822 | ...unicode - C - tcp | Same as 820 (fails on all variants incl. plain C, so not transport-related). | Same as 820. |
-| 823 | ...unicode - C - tcp6 | Same as 820. | Same as 820. |
-| 1129 | ovsdb lock -- steal (`ovsdb-lock.at`) | After a steal+unlock, the detached `ovsdb-client` reports `{}` instead of the expected `locked` / lock-list notification — the detached client may not process the async lock-regained notification on Windows. | Verify a detached `ovsdb-client` stays in its event loop for async notifications. |
-| 1167 | database commands -- conditions (`ovs-vsctl.at`) | `echo \`ovs-vsctl --bare find ... | sort\`` yields leading spaces vs. the expected joined list — likely empty/`\r`-terminated lines from the native binary confusing the shell pipeline. | Check whether ovs-vsctl emits `\r` / trailing blank lines on Windows. |
+- **820–823 — IDL unicode (`ovsdb-idl.at`).** A UTF-8 argv was decoded by the
+  MSVC CRT as the ANSI code page (`°` → `0xB0`), so the insert failed UTF-8
+  validation and cascaded to exit 1. Fixed by embedding a UTF-8 `activeCodePage`
+  manifest in every executable (`cmake/windows-utf8.manifest`, via `ovs_setup`).
+- **1167 — ovs-vsctl conditions (`ovs-vsctl.at`).** Native tools emitted CRLF on
+  stdout; `echo \`ovs-vsctl … | sort\`` merged the `\r`-terminated tokens into
+  one line with embedded `\r`s, past the suite's end-of-line CRLF normalization.
+  Fixed by putting stdout/stderr in binary mode at startup
+  (`ovs_set_program_name`) — output is LF-only, byte-identical to Unix.
 
-`652` (equality wait with missing row - relay - clustered) is **flaky** under
-`-j4` but passes when run on its own; it is timing-sensitive, not a hard failure.
+## Excluded (excluded-tests.txt — platform/method, not OVS bugs)
+
+- **520/521 — SSL/TLS db.** Cert/key paths are stored in an OVSDB column and read
+  back via `--private-key=db:…`; under MSYS the stored value is an MSYS `/f/…`
+  path that native OpenSSL cannot open (MSYS rewrites argv paths but not
+  DB-stored values). A product install stores native paths.
+- **769 — monitor-cond-since.** The monitor works; the failure is the post-`kill`
+  (taskkill `/F`) wait for the client pidfile to vanish — force-terminate can't
+  run the pidfile-removal handler, and there is no SIGTERM for a console-less
+  detached process.
+- **721 — record/replay.** Asserts byte-identical logs between the record and
+  replay runs, but one logs a timing-dependent, localized `recv()` OS-error line
+  ("connection reset"); byte-identical replay of that diagnostic isn't
+  achievable on Windows.
+- **1129 — ovsdb lock steal.** The original holder must print the regained lock
+  after the stealer unlocks, but the regain round-trip races
+  `OVSDB_SERVER_SHUTDOWN` over the higher-latency Windows named pipe; the
+  unchanged upstream test has no synchronization point to wait on.
+
+**Flaky (timing/state-sensitive, not product bugs):** a few tests occasionally
+fail in the long `-j1` sweep but pass in isolation — `508` ("truncating database
+log with bad transaction") and `652` ("equality wait ... relay - clustered").
+The runner has a **flake guard**: it re-runs only the failed groups once, so a
+flake passes on retry while a genuine failure (which fails twice) still fails
+the job. These stay in coverage rather than being excluded.
 
 ## How to reproduce one test
 
 ```powershell
-.\tests\windows\run-windows-testsuite.ps1 -BuildDir <cmake-build> -Groups '1129'
-# detailed log: tests/testsuite.dir/1129/testsuite.log
+.\tests\windows\run-windows-testsuite.ps1 -BuildDir <cmake-build> -Groups '1167'
+# detailed log: tests/testsuite.dir/<NNNN>/testsuite.log
 ```
 
 ## Debugging native crashes (no PDBs in Release by default)

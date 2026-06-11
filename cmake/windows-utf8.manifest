@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Make the process active code page UTF-8 (Windows 10 1903+). Without this the
+     MSVC CRT converts the UTF-16 command line to the multibyte argv[] using the
+     system ANSI code page (e.g. CP1252), corrupting non-ASCII arguments before
+     they reach OVS (which treats argv as UTF-8). This is what broke the OVSDB
+     IDL "unicode" tests: a UTF-8 argument arrived mangled and failed UTF-8
+     validation. With UTF-8 as the ACP, argv is delivered as UTF-8 unchanged. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>

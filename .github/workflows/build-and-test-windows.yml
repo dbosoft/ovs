@@ -26,7 +26,7 @@ jobs:
     # windows-2022 ships VS2022 + the Windows SDK.  (windows-latest=2025 dropped the
     # preinstalled WDK; not needed here since we build userspace only.)
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: checkout
@@ -82,10 +82,41 @@ jobs:
         shell: cmd
         run: ctest --test-dir build -C Release --output-on-failure
 
+      # MSYS2 supplies autom4te (to generate the suite from the .at manifest) and
+      # the POSIX sh the suite runs under. The test binaries are the MSVC build
+      # above; only the harness is MSYS. msystem MSYS = the plain env where
+      # /usr/bin/{bash,autom4te,m4,perl} live; base-devel pulls them in.
+      - name: install msys2 (autotest harness)
+        uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MSYS
+          update: false
+          # autom4te (the only autotools tool the runner uses) is the
+          # autoconf-wrapper dispatching to a concrete autoconf2.NN; base-devel
+          # ships neither. m4 + perl are autom4te's deps.
+          install: autoconf-wrapper autoconf2.72 m4 perl
+
+      # Full reduced autotest suite. The runner self-generates atconfig/atlocal
+      # + package.m4 (no ./configure needed) and exits with the autotest status,
+      # so any unexpected failure fails the job. -NoDatapath skips the
+      # ovs-vswitchd/ofproto tests that need the (absent) ovsext kernel driver on
+      # this runner; they still run on a driver-equipped host.
+      - name: windows testsuite
+        shell: pwsh
+        run: >
+          ./tests/windows/run-windows-testsuite.ps1
+          -BuildDir build
+          -NoDatapath
+          -Msys2 "${{ steps.msys2.outputs.msys2-location }}"
+
       - name: upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: logs-windows-cmake
           if-no-files-found: ignore
-          path: build/Testing/Temporary/LastTest.log
+          path: |
+            build/Testing/Temporary/LastTest.log
+            tests/testsuite.dir/*/testsuite.log
+            tests/testsuite.log

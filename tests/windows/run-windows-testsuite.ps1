@@ -32,6 +32,9 @@ param(
   [string]$PthreadsBin = 'C:\PTHREADS-BUILT\bin',
   [string]$OpenSslDir = 'C:\OpenSSL-Win64',
   [string]$Msys2 = 'C:\MSYS64',
+  [switch]$NoDatapath,                              # also skip tests that need the
+                                                   # ovsext datapath/driver (for a
+                                                   # driverless host, e.g. CI)
   [switch]$List                                    # just list matching groups
 )
 $ErrorActionPreference = 'Stop'
@@ -68,6 +71,57 @@ function Invoke-MsysBash([string]$body) {
   finally { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
 }
 
+# 0. Synthesize the autotest harness files (atconfig/atlocal) if this is a
+#    CMake-only tree with no ./configure output (e.g. CI). atconfig is a small
+#    shell-var file; atlocal is atlocal.in with its @VAR@ set substituted for the
+#    values the Windows reduced suite needs. When present (a configured dev tree)
+#    they are left as-is and only repointed by the sed below. LF-only (bash sources them).
+function Write-LF([string]$path, [string]$text) {
+  [IO.File]::WriteAllText($path, ($text -replace "`r", ""), (New-Object Text.UTF8Encoding($false)))
+}
+$atconfig = Join-Path $repo 'tests\atconfig'
+if (-not (Test-Path $atconfig)) {
+  Write-LF $atconfig @"
+at_testdir='tests'
+abs_builddir='$repoMsys/tests'
+at_srcdir='.'
+abs_srcdir='$repoMsys/tests'
+at_top_srcdir='..'
+abs_top_srcdir='$repoMsys'
+at_top_build_prefix='../'
+abs_top_builddir='$repoMsys'
+at_top_builddir=`$at_top_build_prefix
+EXEEXT='.exe'
+AUTOTEST_PATH='tests'
+SHELL=`${CONFIG_SHELL-'/bin/sh'}
+"@
+}
+$atlocal = Join-Path $repo 'tests\atlocal'
+if (-not (Test-Path $atlocal)) {
+  $py3cmd = Get-Command python3 -ErrorAction SilentlyContinue
+  $py3msys = if ($py3cmd) { To-Msys $py3cmd.Source } else { 'python3' }
+  $al = Get-Content (Join-Path $repo 'tests\atlocal.in') -Raw
+  @{ '@HAVE_OPENSSL@'='yes'; '@PYTHON3@'=$py3msys; '@EGREP@'='grep -E'; '@CFLAGS@'='';
+     '@DPDK_MBUF_HEADROOM@'='0'; '@HAVE_BACKTRACE@'='no'; '@HAVE_TCA_HTB_RATE64@'='no';
+     '@HAVE_TCA_POLICE_PKTRATE64@'='no'; '@HAVE_UNBOUND@'='no'; '@HAVE_UNWIND@'='no'
+   }.GetEnumerator() | ForEach-Object { $al = $al.Replace($_.Key, $_.Value) }
+  Write-LF $atlocal $al
+}
+# package.m4: autom4te requires it (AT_PACKAGE_*); ./config.status writes it from
+# configure.ac's AC_INIT. Newer autom4te (>=2.73) errors when it is absent, so
+# generate it. Values mirror AC_INIT(openvswitch, 3.7.90, bugs@openvswitch.org).
+$pkgm4 = Join-Path $repo 'tests\package.m4'
+if (-not (Test-Path $pkgm4)) {
+  Write-LF $pkgm4 @"
+m4_define([AT_PACKAGE_NAME],[openvswitch])
+m4_define([AT_PACKAGE_TARNAME],[openvswitch])
+m4_define([AT_PACKAGE_VERSION],[3.7.90])
+m4_define([AT_PACKAGE_STRING],[openvswitch 3.7.90])
+m4_define([AT_PACKAGE_BUGREPORT],[bugs@openvswitch.org])
+m4_define([AT_PACKAGE_URL],[http://www.openvswitch.org/])
+"@
+}
+
 # 1. Generate the suite from the manifest + repoint atconfig abs_* at THIS checkout,
 #    and generate the test-PKI certs the ssl/tls tests need (ovs-pki via OpenSSL; the
 #    Windows chmod/ACL shim in ovs-pki.in is required for this to work).
@@ -82,13 +136,13 @@ cd '$repoMsys'
 # would be scanned and its captured WARN/ERR lines (e.g. an expected
 # test-stream connect failure) reported as spurious failures.  Both names are
 # gitignored; this just reuses the stale autotools-generated artifact slot.
-/usr/bin/autom4te --language=autotest -I . -o tests/testsuite tests/windows-testsuite.at
+/usr/bin/autom4te --language=autotest -I . -I tests -o tests/testsuite tests/windows-testsuite.at
 chmod +x tests/testsuite
 sed -i -E "s#^(abs_top_srcdir=).*#\1'$repoMsys'#; s#^(abs_top_builddir=).*#\1'$repoMsys'#; s#^(abs_srcdir=).*#\1'$repoMsys/tests'#; s#^(abs_builddir=).*#\1'$repoMsys/tests'#" tests/atconfig
 if [ ! -e tests/testpki-cacert.pem ]; then
-    export PATH='$opensslBin':"\$PATH"
+    export PATH='$opensslBin':"`$PATH"
     P="sh utilities/ovs-pki.in --dir=tests/pki --log=tests/ovs-pki.log"
-    \$P init && \$P req+sign tests/pki/test && \$P req+sign tests/pki/test2
+    `$P init && `$P req+sign tests/pki/test && `$P req+sign tests/pki/test2
     cp tests/pki/switchca/cacert.pem tests/testpki-cacert.pem
     cp tests/pki/test-cert.pem       tests/testpki-cert.pem
     cp tests/pki/test-req.pem        tests/testpki-req.pem
@@ -97,7 +151,10 @@ if [ ! -e tests/testpki-cacert.pem ]; then
     cp tests/pki/test2-req.pem       tests/testpki-req2.pem
     cp tests/pki/test2-privkey.pem   tests/testpki-privkey2.pem
 fi
-"@ | Out-Null
+"@
+# Don't swallow setup failures: a broken suite generation or PKI step leaves the
+# run certless and every SSL test fails downstream with a confusing error.
+if ($LASTEXITCODE -ne 0) { throw "test harness / PKI setup failed (rc=$LASTEXITCODE) -- see ovs-pki.log" }
 
 if ($List) {
   Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests -l"
@@ -111,6 +168,14 @@ $exclKw = @(); $kf = Join-Path $PSScriptRoot 'excluded-keywords.txt'
 if (Test-Path $kf) { $exclKw = Get-Content $kf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
 $exclTitle = @(); $tf = Join-Path $PSScriptRoot 'excluded-tests.txt'
 if (Test-Path $tf) { $exclTitle = Get-Content $tf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
+# -NoDatapath: additionally skip tests that need the ovsext datapath/driver
+# (ovs-vswitchd/ofproto). On a driverless host they log "could not open ovsext
+# device" and trip check_logs; they pass on a driver-equipped host, so they are
+# only skipped here, never in excluded-tests.txt.
+if ($NoDatapath) {
+  $ndf = Join-Path $PSScriptRoot 'excluded-no-datapath.txt'
+  if (Test-Path $ndf) { $exclTitle += Get-Content $ndf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
+}
 
 $listing = Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests -l"
 $tests = @(); $cur = $null
@@ -133,5 +198,21 @@ Write-Host "windows-testsuite: running $($run.Count), skipping $skip (feature/me
 
 # 3. Run the complement (or an explicit -Groups override).
 $sel = if ($Groups.Trim()) { $Groups.Trim() } else { ($run -join ' ') }
-Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests AUTOTEST_PATH='$ap' $sel -j$Jobs"
-exit $LASTEXITCODE
+$o = Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests AUTOTEST_PATH='$ap' $sel -j$Jobs"
+$o | ForEach-Object { Write-Host $_ }
+$rc = $LASTEXITCODE
+
+# Flake guard: a long -j1 sweep occasionally fails a test on timing/port/file
+# state that passes in isolation (e.g. group 508, "truncating database log").
+# Re-run just the failed groups once; a genuine failure fails twice. This keeps
+# the failing tests in coverage instead of excluding them, while staying a
+# reliable CI gate.
+$failed = @($o | Select-String -Pattern '^\s*(\d+):.*\bFAILED\b' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value })
+if ($rc -ne 0 -and $failed.Count -gt 0) {
+  Write-Host "`n[flake guard] re-running $($failed.Count) failed group(s) once: $($failed -join ' ')"
+  $o2 = Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests AUTOTEST_PATH='$ap' $($failed -join ' ') -j1"
+  $o2 | ForEach-Object { Write-Host $_ }
+  $rc = $LASTEXITCODE
+}
+exit $rc
