@@ -104,6 +104,20 @@ if (-not (Test-Path $atlocal)) {
    }.GetEnumerator() | ForEach-Object { $al = $al.Replace($_.Key, $_.Value) }
   Write-LF $atlocal $al
 }
+# package.m4: autom4te requires it (AT_PACKAGE_*); ./config.status writes it from
+# configure.ac's AC_INIT. Newer autom4te (>=2.73) errors when it is absent, so
+# generate it. Values mirror AC_INIT(openvswitch, 3.7.90, bugs@openvswitch.org).
+$pkgm4 = Join-Path $repo 'tests\package.m4'
+if (-not (Test-Path $pkgm4)) {
+  Write-LF $pkgm4 @"
+m4_define([AT_PACKAGE_NAME],[openvswitch])
+m4_define([AT_PACKAGE_TARNAME],[openvswitch])
+m4_define([AT_PACKAGE_VERSION],[3.7.90])
+m4_define([AT_PACKAGE_STRING],[openvswitch 3.7.90])
+m4_define([AT_PACKAGE_BUGREPORT],[bugs@openvswitch.org])
+m4_define([AT_PACKAGE_URL],[http://www.openvswitch.org/])
+"@
+}
 
 # 1. Generate the suite from the manifest + repoint atconfig abs_* at THIS checkout,
 #    and generate the test-PKI certs the ssl/tls tests need (ovs-pki via OpenSSL; the
