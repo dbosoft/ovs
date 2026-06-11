@@ -32,6 +32,9 @@ param(
   [string]$PthreadsBin = 'C:\PTHREADS-BUILT\bin',
   [string]$OpenSslDir = 'C:\OpenSSL-Win64',
   [string]$Msys2 = 'C:\MSYS64',
+  [switch]$NoDatapath,                              # also skip tests that need the
+                                                   # ovsext datapath/driver (for a
+                                                   # driverless host, e.g. CI)
   [switch]$List                                    # just list matching groups
 )
 $ErrorActionPreference = 'Stop'
@@ -165,6 +168,14 @@ $exclKw = @(); $kf = Join-Path $PSScriptRoot 'excluded-keywords.txt'
 if (Test-Path $kf) { $exclKw = Get-Content $kf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
 $exclTitle = @(); $tf = Join-Path $PSScriptRoot 'excluded-tests.txt'
 if (Test-Path $tf) { $exclTitle = Get-Content $tf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
+# -NoDatapath: additionally skip tests that need the ovsext datapath/driver
+# (ovs-vswitchd/ofproto). On a driverless host they log "could not open ovsext
+# device" and trip check_logs; they pass on a driver-equipped host, so they are
+# only skipped here, never in excluded-tests.txt.
+if ($NoDatapath) {
+  $ndf = Join-Path $PSScriptRoot 'excluded-no-datapath.txt'
+  if (Test-Path $ndf) { $exclTitle += Get-Content $ndf | ForEach-Object { ($_ -replace '#.*','').Trim() } | Where-Object { $_ } }
+}
 
 $listing = Invoke-MsysBash "cd '$repoMsys' && sh tests/testsuite -C tests -l"
 $tests = @(); $cur = $null

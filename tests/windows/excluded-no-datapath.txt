@@ -1,0 +1,25 @@
+# Test GROUP TITLES (substring match) skipped only with -NoDatapath, i.e. on a
+# host without the ovsext kernel driver (CI). These start ovs-vswitchd / drive
+# ofproto, so the datapath provider tries to open the ovsext device, fails
+# ("could not open ovsext device"), and the ERR trips check_logs. They PASS on a
+# driver-equipped host, so they are NOT in excluded-tests.txt -- a local/driver
+# run still exercises them.
+
+# All of ovs-vswitchd.at (daemon lifecycle: start/switchover/version/list-commands/
+# datapath-ids/service-controller/stats-update/...). The "- Python3" unixctl
+# variants are already excluded by keyword; the few that pass driverless are
+# datapath-area and skipped here too for a clean gate.
+ovs-vswitchd
+
+# bundle/bundle_load ofproto actions that push flows through ovs-vswitchd (the
+# "bundle action bad ..." parse-only tests do NOT need the datapath and keep
+# running -- match the executing ones by their specific titles).
+bundle action with many ports
+bundle action with ports up and down
+bundle_load action with ports down
+bundle symmetric_l3 action with many ports
+
+# ovs-vsctl tests that add a port / reload against a running ovs-vswitchd.
+add-port -- reserved names
+ovs-vsctl -- return error if OVSDB reload issues are reported
+ovs-vsctl filter option usage

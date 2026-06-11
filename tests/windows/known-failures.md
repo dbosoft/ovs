@@ -6,7 +6,11 @@ failures**. It runs in CI (`.github/workflows/build-and-test-windows.yml`):
 `ctest` first (the CMake unit-test net: `ovstest` exit-code cases + the
 `dpif-windows` mock test), then the full reduced suite. Any unexpected failure
 fails the job. Genuine platform/method incompatibilities are skipped via
-`excluded-tests.txt` / `excluded-keywords.txt`.
+`excluded-tests.txt` / `excluded-keywords.txt`. CI is a **driverless** runner
+(no ovsext kernel driver), so it passes `-NoDatapath`, which additionally skips
+the ovs-vswitchd/ofproto tests in `excluded-no-datapath.txt` (they log "could
+not open ovsext device" and trip check_logs without the driver). Those tests
+still run on a driver-equipped host via a plain `run-windows-testsuite.ps1`.
 
 ## Fixed (were failing, now pass)
 
