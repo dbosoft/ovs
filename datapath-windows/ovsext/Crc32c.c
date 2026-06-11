@@ -1,11 +1,23 @@
-/*-
- *  COPYRIGHT (C) 1986 Gary S. Brown.  You may use this program, or
- *  code or tables extracted from it, as desired without restriction.
+/*
+ * Copyright (c) 2025 dbosoft GmbH
  *
- *  CRC32c (Castagnoli) table and computation ported verbatim from the
- *  OpenvSwitch userspace lib/crc32c.c for use by the Windows kernel
- *  datapath. The 256-entry table is reflected for the 0x1EDC6F41
- *  polynomial; see lib/crc32c.c for the derivation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * The CRC32c (Castagnoli) table and computation are ported verbatim from the
+ * Open vSwitch userspace lib/crc32c.c for use by the Windows kernel datapath.
+ * The 256-entry table is reflected for the 0x1EDC6F41 polynomial; see
+ * lib/crc32c.c for the derivation. Per that file the table is derived from
+ * work by Gary S. Brown (COPYRIGHT (C) 1986), usable without restriction.
  */
 
 #include "precomp.h"
@@ -83,10 +95,11 @@ static const UINT32 crc32Table[256] = {
 };
 
 /*
- * Compute a CRC32c checksum as per the SCTP requirements in RFC 4960. This
- * includes beginning with a checksum of all ones and returning the negated
- * CRC. The result is returned in network byte order; the Windows build is
- * always little-endian, so no byte swap is required.
+ * Compute a CRC32c checksum as per the SCTP requirements in RFC 4960: begin
+ * with a checksum of all ones and return the negated CRC. The polynomial is
+ * reflected, so on a little-endian build (every Windows target) the bytes of
+ * ~crc are already in the on-wire order of the SCTP checksum field and no byte
+ * swap is needed; userspace lib/crc32c.c swaps only on big-endian hosts.
  */
 ovs_be32
 OvsCrc32c(const UINT8 *data, SIZE_T size)
