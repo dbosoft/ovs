@@ -173,6 +173,7 @@
     <ClInclude Include="Datapath.h" />
     <ClInclude Include="Debug.h" />
     <ClInclude Include="DpInternal.h" />
+    <ClInclude Include="Crc32c.h" />
     <ClInclude Include="Ethernet.h" />
     <ClInclude Include="Event.h" />
     <ClInclude Include="Flow.h" />
@@ -418,6 +419,7 @@
     <ClCompile Include="Conntrack-other.c" />
     <ClCompile Include="Conntrack-tcp.c" />
     <ClCompile Include="Conntrack.c" />
+    <ClCompile Include="Crc32c.c" />
     <ClCompile Include="Debug.c" />
     <ClCompile Include="Driver.c" />
     <ClCompile Include="Event.c" />
