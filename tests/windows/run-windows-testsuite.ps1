@@ -133,7 +133,7 @@ cd '$repoMsys'
 # would be scanned and its captured WARN/ERR lines (e.g. an expected
 # test-stream connect failure) reported as spurious failures.  Both names are
 # gitignored; this just reuses the stale autotools-generated artifact slot.
-/usr/bin/autom4te --language=autotest -I . -o tests/testsuite tests/windows-testsuite.at
+/usr/bin/autom4te --language=autotest -I . -I tests -o tests/testsuite tests/windows-testsuite.at
 chmod +x tests/testsuite
 sed -i -E "s#^(abs_top_srcdir=).*#\1'$repoMsys'#; s#^(abs_top_builddir=).*#\1'$repoMsys'#; s#^(abs_srcdir=).*#\1'$repoMsys/tests'#; s#^(abs_builddir=).*#\1'$repoMsys/tests'#" tests/atconfig
 if [ ! -e tests/testpki-cacert.pem ]; then
