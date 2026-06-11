@@ -44,6 +44,8 @@
 #endif
 #ifdef _WIN32
 #include <shlwapi.h>
+#include <io.h>
+#include <fcntl.h>
 #endif
 
 VLOG_DEFINE_THIS_MODULE(util);
@@ -618,6 +620,14 @@ ovs_set_program_name(const char *argv0, const char *version)
      /* This function is deprecated from 1900 (Visual Studio 2015) */
     _set_output_format(_TWO_DIGIT_EXPONENT);
 #endif
+
+    /* Put stdout/stderr in binary mode so the CRT does not translate '\n' to
+     * '\r\n'. OVS text output is compared byte-for-byte against Unix-style
+     * expected output and piped through tools that don't strip '\r' (e.g.
+     * `echo \`ovs-vsctl ... | sort\`` leaves embedded '\r' once word-split),
+     * so CRLF translation corrupts it. */
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
 
     basename = xmalloc(max_len);
     _splitpath_s(argv0, NULL, 0, NULL, 0, basename, max_len, NULL, 0);

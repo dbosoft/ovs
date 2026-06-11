@@ -261,6 +261,13 @@ function(ovs_setup t)
     target_compile_options(${t} PRIVATE /fsanitize=address /Oy-)
     target_link_options(${t} PRIVATE /INCREMENTAL:NO)
   endif()
+  # Embed a UTF-8 active-code-page manifest in every executable so the CRT hands
+  # argv[] to OVS as UTF-8 rather than re-encoding it through the system ANSI
+  # code page (MSVC adds the .manifest via mt.exe). Libraries get no manifest.
+  get_target_property(_ovs_type ${t} TYPE)
+  if(_ovs_type STREQUAL "EXECUTABLE")
+    target_sources(${t} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows-utf8.manifest")
+  endif()
 endfunction()
 ovs_setup(openvswitch)
 

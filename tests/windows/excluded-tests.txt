@@ -36,3 +36,18 @@ many sessions pending
 # Asserts the timeout exit code is 142 (128 + SIGALRM); Windows has no SIGALRM,
 # so the --timeout expiry path uses a different (non-128+N) exit convention:
 ovs-vsctl connection retry
+#
+# Stores the SSL cert/key PATHS in an OVSDB column and has ovsdb-server read them
+# back (--private-key=db:...). Under MSYS the stored value is an MSYS path
+# (/f/...); MSYS rewrites argv paths to F:\... for native exes, but DB-stored
+# values bypass that, so native OpenSSL gets /f/... and fails to open it. A
+# product install stores native paths, so this is an MSYS path-format artifact,
+# not an OVS bug. (Command-line --private-key=FILE SSL tests pass.)
+SSL/TLS db: implementation
+#
+# Kills the detached ovsdb-client with the `kill` shim (taskkill /F) and waits
+# for its pidfile to disappear. Force-terminate cannot run the pidfile-removal
+# handler, and Windows has no SIGTERM to deliver to a console-less detached
+# process, so the pidfile lingers. The monitor itself works (it prints
+# found/last_id); only the POSIX-signal teardown cleanup is untestable here.
+monitor-cond-since found but no new rows
