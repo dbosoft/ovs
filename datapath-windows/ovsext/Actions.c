@@ -1511,7 +1511,7 @@ OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
 
     if (layers->isTcp || layers->isUdp) {
         hdrSize = layers->l4Offset +
-                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+                  (layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr));
     } else {
         hdrSize = layers->l3Offset + sizeof (*ipHdr);
     }
@@ -1701,7 +1701,7 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
 
     if (layers->isTcp || layers->isUdp) {
         hdrSize = layers->l4Offset +
-                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+                  (layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr));
     } else if (layers->isIcmp) {
         /* The ICMPv6 checksum is recomputed over the L4 payload below, so the
          * whole packet must be contiguous, not just the IPv6 fixed header. */
@@ -1843,7 +1843,7 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
 
     if (layers->isTcp || layers->isUdp) {
         hdrSize = layers->l4Offset +
-                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+                  (layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr));
     } else {
         hdrSize = layers->l3Offset + sizeof (*ipHdr);
     }
@@ -2269,10 +2269,14 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
     ASSERT(layers->value != 0);
 
     /*
-     * layers->isIcmp is set for IPv4 ICMP too, so also require IPv6 before
-     * reinterpreting the L3 header as IPv6Hdr and writing key->icmp6Key.
+     * Gate on IPv6 + the ICMPv6 L4 proto from the flow key rather than
+     * layers->isIcmp: that flag is set only when OvsParseIcmpV6 fully succeeds
+     * (and is also set for IPv4 ICMP), so a malformed-but-ICMPv6 ND packet would
+     * otherwise be rejected here. The on-wire ICMPv6 type/code are validated
+     * below.
      */
-    if (!layers->isIcmp || !layers->isIPv6) {
+    if (!layers->isIPv6 ||
+        key->ipv6Key.nwProto != SOCKET_IPPROTO_ICMPV6) {
         ovsActionStats.noCopiedNbl++;
         return NDIS_STATUS_FAILURE;
     }
