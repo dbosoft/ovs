@@ -138,4 +138,29 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
                                struct in6_addr newAddr, UINT16 newPort,
                                BOOLEAN isSource, BOOLEAN isTx);
 
+NDIS_STATUS
+OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
+                    OvsFlowKey *key,
+                    const struct ovs_key_ipv6 *ipv6Attr);
+
+NDIS_STATUS
+OvsUpdateSctpPorts(OvsForwardingContext *ovsFwdCtx,
+                   OvsFlowKey *key,
+                   const struct ovs_key_sctp *sctpAttr);
+
+NDIS_STATUS
+OvsUpdateArpHeader(OvsForwardingContext *ovsFwdCtx,
+                   OvsFlowKey *key,
+                   const struct ovs_key_arp *arpAttr);
+
+NDIS_STATUS
+OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
+                  OvsFlowKey *key,
+                  const struct ovs_key_nd *ndAttr);
+
+NDIS_STATUS
+OvsUpdateMplsHeader(OvsForwardingContext *ovsFwdCtx,
+                    OvsFlowKey *key,
+                    const struct ovs_key_mpls *mplsAttr);
+
 #endif /* __ACTIONS_H_ */

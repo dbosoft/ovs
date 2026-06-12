@@ -18,6 +18,7 @@
 
 #include "Actions.h"
 #include "Conntrack.h"
+#include "Crc32c.h"
 #include "Debug.h"
 #include "Event.h"
 #include "Flow.h"
@@ -1510,7 +1511,7 @@ OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
 
     if (layers->isTcp || layers->isUdp) {
         hdrSize = layers->l4Offset +
-                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+                  (layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr));
     } else {
         hdrSize = layers->l3Offset + sizeof (*ipHdr);
     }
@@ -1700,7 +1701,12 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
 
     if (layers->isTcp || layers->isUdp) {
         hdrSize = layers->l4Offset +
-                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+                  (layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr));
+    } else if (layers->isIcmp) {
+        /* The ICMPv6 checksum is recomputed over the L4 payload below, so the
+         * whole packet must be contiguous, not just the IPv6 fixed header. */
+        hdrSize = NET_BUFFER_DATA_LENGTH(
+            NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl));
     } else {
         hdrSize = layers->l3Offset + sizeof (*ipHdr);
     }
@@ -1780,12 +1786,25 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
 
         if (layers->isIcmp) {
             ICMPHdr *icmp =(ICMPHdr *)(bufferStart + layers->l4Offset);
+            /*
+             * payload_len counts any IPv6 extension headers that l4Offset
+             * already skips; clamp the ICMPv6 span to the captured L4 bytes so
+             * the checksum walk cannot read past the contiguous buffer.
+             */
+            UINT32 captured = NET_BUFFER_DATA_LENGTH(
+                NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl)) - layers->l4Offset;
+            UINT32 ipHdrSpan = (UINT32)(layers->l4Offset - layers->l3Offset);
+            UINT32 ext = (ipHdrSpan > sizeof(IPv6Hdr)) ?
+                         (ipHdrSpan - (UINT32)sizeof(IPv6Hdr)) : 0;
+            UINT32 v6pay = (UINT32)ntohs(ipHdr->payload_len);
+            UINT16 icmpLen = (UINT16)MIN((v6pay > ext) ? (v6pay - ext) : 0,
+                                         captured);
             icmp->checksum = 0x00;
-            icmp->checksum = OvsCalculateICMPv6Checksum(ipHdr->saddr, ipHdr->daddr,
-                                                        ntohs(ipHdr->payload_len),
+            icmp->checksum = OvsCalculateICMPv6Checksum(ipHdr->saddr,
+                                                        ipHdr->daddr, icmpLen,
                                                         IPPROTO_ICMPV6,
                                                         (uint16_t *)icmp,
-                                                        ntohs(ipHdr->payload_len));
+                                                        icmpLen);
         }
     }
 
@@ -1824,7 +1843,7 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
 
     if (layers->isTcp || layers->isUdp) {
         hdrSize = layers->l4Offset +
-                  layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr);
+                  (layers->isTcp ? sizeof (*tcpHdr) : sizeof (*udpHdr));
     } else {
         hdrSize = layers->l3Offset + sizeof (*ipHdr);
     }
@@ -1935,6 +1954,490 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
 }
 
 /*
+ *----------------------------------------------------------------------------
+ * OvsUpdateIPv6Header --
+ *      Updates the IPv6 header in ovsFwdCtx.curNbl inline based on the
+ *      specified key. The source/destination address rewrite (and the L4
+ *      pseudo-checksum / ICMPv6 fixup it implies) is delegated to the shared
+ *      OvsUpdateAddressAndPortForIpv6 helper; traffic class, flow label and
+ *      hop limit are written here. IPv6 has no L3 checksum.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
+                    OvsFlowKey *key,
+                    const struct ovs_key_ipv6 *ipv6Attr)
+{
+    PUINT8 bufferStart;
+    UINT32 hdrSize;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    IPv6Hdr *ipHdr;
+    struct in6_addr newSrc, newDst;
+    UINT16 curSrcPort = 0, curDstPort = 0;
+    UINT32 label;
+    UINT8 tc;
+    NDIS_STATUS status;
+
+    ASSERT(layers->value != 0);
+
+    if (!layers->isIPv6) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    RtlCopyMemory(&newSrc, ipv6Attr->ipv6_src, sizeof newSrc);
+    RtlCopyMemory(&newDst, ipv6Attr->ipv6_dst, sizeof newDst);
+
+    if (layers->isIcmp) {
+        /*
+         * For ICMPv6 the shared address helper recomputes the checksum over the
+         * L4 payload, so the whole packet must be contiguous, not just the L3
+         * header.
+         */
+        hdrSize = NET_BUFFER_DATA_LENGTH(
+            NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl));
+    } else if (layers->isTcp || layers->isUdp) {
+        hdrSize = layers->l4Offset +
+                  (layers->isTcp ? sizeof(TCPHdr) : sizeof(UDPHdr));
+    } else {
+        hdrSize = layers->l3Offset + sizeof *ipHdr;
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx, hdrSize);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    /*
+     * The address rewrite leaves L4 ports untouched: read the current ports
+     * and pass them back to the shared helper so its port-update branch is a
+     * no-op. The address helper does its own contiguity-checked compare and
+     * may clone curNbl, so capture everything needed by value here and do not
+     * dereference 'bufferStart' across the helper calls.
+     */
+    if (layers->isTcp) {
+        TCPHdr *tcpHdr = (TCPHdr *)(bufferStart + layers->l4Offset);
+        curSrcPort = tcpHdr->source;
+        curDstPort = tcpHdr->dest;
+    } else if (layers->isUdp) {
+        UDPHdr *udpHdr = (UDPHdr *)(bufferStart + layers->l4Offset);
+        curSrcPort = udpHdr->source;
+        curDstPort = udpHdr->dest;
+    }
+
+    /*
+     * The helper no-ops when the address already matches, so the calls are
+     * unconditional; this also avoids dereferencing a header pointer that an
+     * intervening clone may have invalidated. isTx=FALSE selects the
+     * incremental-checksum fixup, which is correct for an address change
+     * regardless of TX offload (the address is part of the L4 pseudo-header),
+     * matching the conservative set(ipv4) path rather than the NAT fast path.
+     */
+    status = OvsUpdateAddressAndPortForIpv6(ovsFwdCtx, newSrc, curSrcPort,
+                                            TRUE, FALSE);
+    if (status != NDIS_STATUS_SUCCESS) {
+        return status;
+    }
+    status = OvsUpdateAddressAndPortForIpv6(ovsFwdCtx, newDst, curDstPort,
+                                            FALSE, FALSE);
+    if (status != NDIS_STATUS_SUCCESS) {
+        return status;
+    }
+
+    /*
+     * The helper may have cloned the NBL to satisfy the contiguity request,
+     * so re-acquire the header before writing the remaining fields.
+     */
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx,
+                                     layers->l3Offset + sizeof *ipHdr);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+    ipHdr = (IPv6Hdr *)(bufferStart + layers->l3Offset);
+
+    /*
+     * Write traffic class and the 20-bit flow label byte-wise, the inverse of
+     * how the extractor reads them (PacketParser.c): the TC high nibble lives
+     * in 'priority', its low nibble plus the label's top nibble in flow_lbl[0],
+     * and the rest of the label in flow_lbl[1..2]. This avoids any word-cast,
+     * alignment or bitfield-layout assumption and leaves 'version' untouched.
+     */
+    tc = ipv6Attr->ipv6_tclass;
+    label = ntohl(ipv6Attr->ipv6_label) & 0x000FFFFF;
+    ipHdr->priority = (tc >> 4) & 0x0F;
+    ipHdr->flow_lbl[0] = (UINT8)(((tc & 0x0F) << 4) | ((label >> 16) & 0x0F));
+    ipHdr->flow_lbl[1] = (UINT8)((label >> 8) & 0xFF);
+    ipHdr->flow_lbl[2] = (UINT8)(label & 0xFF);
+
+    ipHdr->hop_limit = ipv6Attr->ipv6_hlimit;
+
+    RtlCopyMemory(&key->ipv6Key.ipv6Src, &ipHdr->saddr, sizeof(struct in6_addr));
+    RtlCopyMemory(&key->ipv6Key.ipv6Dst, &ipHdr->daddr, sizeof(struct in6_addr));
+    /* The extractor stores the flow label as a host-order 20-bit value. */
+    key->ipv6Key.ipv6Label = label;
+    key->ipv6Key.nwTos = tc;
+    key->ipv6Key.nwTtl = ipv6Attr->ipv6_hlimit;
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsUpdateSctpPorts --
+ *      Updates the SCTP source/destination port in ovsFwdCtx.curNbl inline.
+ *      SCTP carries a CRC32c over the whole transport payload, so the entire
+ *      L4 payload is pulled contiguously and the checksum recomputed using the
+ *      XOR-delta form that preserves a previously-incorrect checksum.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateSctpPorts(OvsForwardingContext *ovsFwdCtx,
+                   OvsFlowKey *key,
+                   const struct ovs_key_sctp *sctpAttr)
+{
+    PUINT8 bufferStart;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    SCTPHdr *sctpHdr;
+    UINT32 packetLen, payloadLen;
+
+    ASSERT(layers->value != 0);
+
+    if (!layers->isSctp) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    packetLen = NET_BUFFER_DATA_LENGTH(
+        NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl));
+    if (packetLen < (UINT32)layers->l4Offset + sizeof(SCTPHdr)) {
+        return NDIS_STATUS_FAILURE;
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx, packetLen);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+    sctpHdr = (SCTPHdr *)(bufferStart + layers->l4Offset);
+
+    /*
+     * The CRC32c covers the SCTP segment only. Derive its length from the IP
+     * header (like userspace dp_packet_l4_size) so L2 padding on a short frame
+     * is not folded into the checksum, then clamp to the captured bytes so a
+     * lying IP length cannot walk past the buffer.
+     */
+    {
+        UINT32 captured = packetLen - layers->l4Offset;
+        UINT32 ipHdrSpan = (UINT32)(layers->l4Offset - layers->l3Offset);
+        UINT32 ipLen;
+
+        if (key->l2.dlType == htons(ETH_TYPE_IPV6)) {
+            IPv6Hdr *ip6 = (IPv6Hdr *)(bufferStart + layers->l3Offset);
+            UINT32 ext = (ipHdrSpan > sizeof(IPv6Hdr)) ?
+                         (ipHdrSpan - (UINT32)sizeof(IPv6Hdr)) : 0;
+            UINT32 v6pay = (UINT32)ntohs(ip6->payload_len);
+            if (v6pay < ext) {            /* malformed: ext headers > payload */
+                return NDIS_STATUS_FAILURE;
+            }
+            ipLen = v6pay - ext;
+        } else {
+            IPHdr *ip4 = (IPHdr *)(bufferStart + layers->l3Offset);
+            UINT32 totLen = (UINT32)ntohs(ip4->tot_len);
+            if (totLen < ipHdrSpan) {     /* malformed: headers > total len */
+                return NDIS_STATUS_FAILURE;
+            }
+            ipLen = totLen - ipHdrSpan;
+        }
+        payloadLen = MIN(ipLen, captured);
+    }
+
+    /* A malformed IP length could derive a span shorter than the SCTP header;
+     * the CRC32c (and the port writes) need at least the full header. */
+    if (payloadLen < sizeof(SCTPHdr)) {
+        return NDIS_STATUS_FAILURE;
+    }
+
+    if (sctpHdr->source != sctpAttr->sctp_src ||
+        sctpHdr->dest != sctpAttr->sctp_dst) {
+        ovs_be32 oldCsum, oldCorrectCsum, newCsum;
+
+        oldCsum = sctpHdr->check;
+        sctpHdr->check = 0;
+        oldCorrectCsum = OvsCrc32c((UINT8 *)sctpHdr, payloadLen);
+
+        sctpHdr->source = sctpAttr->sctp_src;
+        sctpHdr->dest = sctpAttr->sctp_dst;
+
+        newCsum = OvsCrc32c((UINT8 *)sctpHdr, payloadLen);
+        sctpHdr->check = oldCsum ^ oldCorrectCsum ^ newCsum;
+
+        if (key->l2.dlType == htons(ETH_TYPE_IPV6)) {
+            key->ipv6Key.l4.tpSrc = sctpAttr->sctp_src;
+            key->ipv6Key.l4.tpDst = sctpAttr->sctp_dst;
+        } else {
+            key->ipKey.l4.tpSrc = sctpAttr->sctp_src;
+            key->ipKey.l4.tpDst = sctpAttr->sctp_dst;
+        }
+    }
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsUpdateArpHeader --
+ *      Updates the ARP payload in ovsFwdCtx.curNbl inline based on the
+ *      specified key. ARP carries no checksum.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateArpHeader(OvsForwardingContext *ovsFwdCtx,
+                   OvsFlowKey *key,
+                   const struct ovs_key_arp *arpAttr)
+{
+    PUINT8 bufferStart;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    EtherArp *arpHdr;
+
+    ASSERT(layers->value != 0);
+
+    if (key->l2.dlType != htons(ETH_TYPE_ARP)) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx,
+                                     layers->l3Offset + sizeof(EtherArp));
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+    arpHdr = (EtherArp *)(bufferStart + layers->l3Offset);
+
+    /* arp_op and ar_op are both network-order be16; the cast is a no-op. */
+    arpHdr->ea_hdr.ar_op = (UINT16)arpAttr->arp_op;
+    RtlCopyMemory(arpHdr->arp_spa, &arpAttr->arp_sip, sizeof arpHdr->arp_spa);
+    RtlCopyMemory(arpHdr->arp_tpa, &arpAttr->arp_tip, sizeof arpHdr->arp_tpa);
+    RtlCopyMemory(&arpHdr->arp_sha, arpAttr->arp_sha, sizeof arpHdr->arp_sha);
+    RtlCopyMemory(&arpHdr->arp_tha, arpAttr->arp_tha, sizeof arpHdr->arp_tha);
+
+    /*
+     * Mirror the flow-key extractor (Flow.c): the opcode is keyed only when it
+     * fits in 8 bits, and the addresses only for request/reply -- otherwise the
+     * extractor leaves those key fields zero.
+     */
+    {
+        UINT16 op = ntohs(arpAttr->arp_op);
+        key->arpKey.nwProto = (op <= 0xff) ? (UINT8)op : 0;
+        if (key->arpKey.nwProto == ARPOP_REQUEST ||
+            key->arpKey.nwProto == ARPOP_REPLY) {
+            key->arpKey.nwSrc = arpAttr->arp_sip;
+            key->arpKey.nwDst = arpAttr->arp_tip;
+            RtlCopyMemory(key->arpKey.arpSha, arpAttr->arp_sha,
+                          sizeof key->arpKey.arpSha);
+            RtlCopyMemory(key->arpKey.arpTha, arpAttr->arp_tha,
+                          sizeof key->arpKey.arpTha);
+        } else {
+            key->arpKey.nwSrc = 0;
+            key->arpKey.nwDst = 0;
+            RtlZeroMemory(key->arpKey.arpSha, sizeof key->arpKey.arpSha);
+            RtlZeroMemory(key->arpKey.arpTha, sizeof key->arpKey.arpTha);
+        }
+    }
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsUpdateNdHeader --
+ *      Updates the IPv6 neighbor-discovery target and the source/target
+ *      link-layer address options in ovsFwdCtx.curNbl inline, then recomputes
+ *      the ICMPv6 checksum over the IPv6 pseudo-header and the L4 payload.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
+                  OvsFlowKey *key,
+                  const struct ovs_key_nd *ndAttr)
+{
+    PUINT8 bufferStart, l4Start;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    IPv6Hdr *ipHdr;
+    ICMPHdr *icmpHdr;
+    struct in6_addr *ndTarget;
+    UINT32 packetLen, payloadLen, ofs;
+    BOOLEAN sawSll, sawTll;
+
+    ASSERT(layers->value != 0);
+
+    /*
+     * Gate on IPv6 + the ICMPv6 L4 proto from the flow key rather than
+     * layers->isIcmp: that flag is set only when OvsParseIcmpV6 fully succeeds
+     * (and is also set for IPv4 ICMP), so a malformed-but-ICMPv6 ND packet would
+     * otherwise be rejected here. The on-wire ICMPv6 type/code are validated
+     * below.
+     */
+    if (!layers->isIPv6 ||
+        key->ipv6Key.nwProto != SOCKET_IPPROTO_ICMPV6) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    packetLen = NET_BUFFER_DATA_LENGTH(
+        NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl));
+    if (packetLen < (UINT32)layers->l4Offset + sizeof(ICMPHdr) +
+                    sizeof(struct in6_addr)) {
+        return NDIS_STATUS_FAILURE;
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx, packetLen);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    ipHdr = (IPv6Hdr *)(bufferStart + layers->l3Offset);
+    l4Start = bufferStart + layers->l4Offset;
+    icmpHdr = (ICMPHdr *)l4Start;
+    ndTarget = (struct in6_addr *)(l4Start + sizeof(ICMPHdr));
+
+    /*
+     * The ND target and link-layer options exist only for neighbor
+     * solicitation / advertisement with code 0 (mirroring OvsParseIcmpV6); a
+     * set(nd) on any other ICMPv6 message would corrupt the payload.
+     */
+    if (icmpHdr->code != 0 ||
+        (icmpHdr->type != ND_NEIGHBOR_SOLICIT &&
+         icmpHdr->type != ND_NEIGHBOR_ADVERT)) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    RtlCopyMemory(ndTarget, ndAttr->nd_target, sizeof *ndTarget);
+    RtlCopyMemory(&key->icmp6Key.ndTarget, ndAttr->nd_target,
+                  sizeof(struct in6_addr));
+
+    /*
+     * Walk the ND options updating the source/target link-layer address.
+     * Bounds mirror the parser: each option is 'len' 8-byte units; a zero
+     * length or one running past the L4 payload is malformed, so fail like
+     * OvsParseIcmpV6 rather than forward a half-validated packet.
+     */
+    payloadLen = packetLen - layers->l4Offset;
+    ofs = sizeof(ICMPHdr) + sizeof(struct in6_addr);
+    sawSll = FALSE;
+    sawTll = FALSE;
+    while (ofs + sizeof(IPv6NdOptHdr) <= payloadLen) {
+        IPv6NdOptHdr *ndOpt = (IPv6NdOptHdr *)(l4Start + ofs);
+        UINT16 optLen = (UINT16)ndOpt->len * 8;
+
+        if (optLen == 0 || ofs + optLen > payloadLen) {
+            ovsActionStats.noCopiedNbl++;
+            return NDIS_STATUS_FAILURE;
+        }
+
+        if (ndOpt->type == ND_OPT_SOURCE_LINKADDR && ndOpt->len == 1) {
+            if (sawSll) {           /* duplicate SLL is malformed (parser fails) */
+                ovsActionStats.noCopiedNbl++;
+                return NDIS_STATUS_FAILURE;
+            }
+            sawSll = TRUE;
+            RtlCopyMemory(l4Start + ofs + sizeof(IPv6NdOptHdr),
+                          ndAttr->nd_sll, ETH_ADDR_LENGTH);
+            RtlCopyMemory(key->icmp6Key.arpSha, ndAttr->nd_sll,
+                          ETH_ADDR_LENGTH);
+        } else if (ndOpt->type == ND_OPT_TARGET_LINKADDR && ndOpt->len == 1) {
+            if (sawTll) {           /* duplicate TLL is malformed (parser fails) */
+                ovsActionStats.noCopiedNbl++;
+                return NDIS_STATUS_FAILURE;
+            }
+            sawTll = TRUE;
+            RtlCopyMemory(l4Start + ofs + sizeof(IPv6NdOptHdr),
+                          ndAttr->nd_tll, ETH_ADDR_LENGTH);
+            RtlCopyMemory(key->icmp6Key.arpTha, ndAttr->nd_tll,
+                          ETH_ADDR_LENGTH);
+        }
+
+        ofs += optLen;
+    }
+
+    /*
+     * The ICMPv6 length is the IPv6 payload minus any extension headers that
+     * l4Offset already skips; clamp to the captured L4 bytes so the checksum
+     * walk cannot read past the contiguous buffer.
+     */
+    {
+        UINT32 ipHdrSpan = (UINT32)(layers->l4Offset - layers->l3Offset);
+        UINT32 ext = (ipHdrSpan > sizeof(IPv6Hdr)) ?
+                     (ipHdrSpan - (UINT32)sizeof(IPv6Hdr)) : 0;
+        UINT32 v6pay = (UINT32)ntohs(ipHdr->payload_len);
+        UINT16 csumLen = (UINT16)MIN((v6pay > ext) ? (v6pay - ext) : 0,
+                                     payloadLen);
+        icmpHdr->checksum = 0;
+        icmpHdr->checksum = OvsCalculateICMPv6Checksum(ipHdr->saddr,
+                                                       ipHdr->daddr, csumLen,
+                                                       IPPROTO_ICMPV6,
+                                                       (uint16_t *)icmpHdr,
+                                                       csumLen);
+    }
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsUpdateMplsHeader --
+ *      Rewrites the topmost (outermost) MPLS label stack entry in
+ *      ovsFwdCtx.curNbl inline -- the one the flow key carries. The parser
+ *      advances l3Offset past the whole stack, so the topmost label is located
+ *      at the end of L2 (computed the same way the parser does), not at
+ *      l3Offset - MPLS_HLEN, which would be the innermost label of a multi-label
+ *      stack. MPLS carries no checksum.
+ *----------------------------------------------------------------------------
+ */
+NDIS_STATUS
+OvsUpdateMplsHeader(OvsForwardingContext *ovsFwdCtx,
+                    OvsFlowKey *key,
+                    const struct ovs_key_mpls *mplsAttr)
+{
+    PUINT8 bufferStart;
+    OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
+    MPLSHdr *mplsHdr;
+    UINT16 l2Len;
+
+    ASSERT(layers->value != 0);
+
+    if (!OvsEthertypeIsMpls(key->l2.dlType)) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    bufferStart = OvsGetHeaderBySize(ovsFwdCtx, layers->l3Offset);
+    if (!bufferStart) {
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    /*
+     * The topmost label sits at the end of the L2 header. Derive the L2 length
+     * the same way OvsExtractLayers does: a single in-packet 802.1Q tag adds to
+     * the DIX header, but a tag carried in NBL metadata does not.
+     */
+    l2Len = ETH_HEADER_LEN_DIX;
+    if (!NET_BUFFER_LIST_INFO(ovsFwdCtx->curNbl, Ieee8021QNetBufferListInfo) &&
+        ((Eth_Header *)bufferStart)->dix.typeNBO == ETH_TYPE_802_1PQ_NBO) {
+        l2Len += sizeof(Eth_802_1pq_Tag);
+    }
+    if ((UINT32)l2Len + MPLS_HLEN > layers->l3Offset) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    mplsHdr = (MPLSHdr *)(bufferStart + l2Len);
+    mplsHdr->lse = mplsAttr->mpls_lse;
+    key->mplsKey.lse = mplsAttr->mpls_lse;
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
  * --------------------------------------------------------------------------
  * OvsExecuteSetAction --
  *      Executes a set() action, but storing the actions into 'ovsFwdCtx'
@@ -1960,6 +2463,11 @@ OvsExecuteSetAction(OvsForwardingContext *ovsFwdCtx,
             NlAttrGetUnspec(a, sizeof(struct ovs_key_ipv4)));
         break;
 
+    case OVS_KEY_ATTR_IPV6:
+        status = OvsUpdateIPv6Header(ovsFwdCtx, key,
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_ipv6)));
+        break;
+
     case OVS_KEY_ATTR_TUNNEL:
     {
         OvsIPTunnelKey tunKey = { 0 };
@@ -1981,6 +2489,33 @@ OvsExecuteSetAction(OvsForwardingContext *ovsFwdCtx,
     case OVS_KEY_ATTR_TCP:
         status = OvsUpdateTcpPorts(ovsFwdCtx, key,
             NlAttrGetUnspec(a, sizeof(struct ovs_key_tcp)));
+        break;
+
+    case OVS_KEY_ATTR_SCTP:
+        status = OvsUpdateSctpPorts(ovsFwdCtx, key,
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_sctp)));
+        break;
+
+    case OVS_KEY_ATTR_ARP:
+        status = OvsUpdateArpHeader(ovsFwdCtx, key,
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_arp)));
+        break;
+
+    case OVS_KEY_ATTR_ND:
+        status = OvsUpdateNdHeader(ovsFwdCtx, key,
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_nd)));
+        break;
+
+    case OVS_KEY_ATTR_MPLS:
+        /* OVS_KEY_ATTR_MPLS is a variable-length LSE array with no minimum
+         * enforced by the install-time validator, so bound it here before the
+         * topmost-LSE read. */
+        if (NlAttrGetSize(a) < sizeof(struct ovs_key_mpls)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateMplsHeader(ovsFwdCtx, key,
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_mpls)));
         break;
 
     default:
