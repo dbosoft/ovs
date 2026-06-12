@@ -2265,6 +2265,7 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
     ICMPHdr *icmpHdr;
     struct in6_addr *ndTarget;
     UINT32 packetLen, payloadLen, ofs;
+    BOOLEAN sawSll, sawTll;
 
     ASSERT(layers->value != 0);
 
@@ -2322,6 +2323,8 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
      */
     payloadLen = packetLen - layers->l4Offset;
     ofs = sizeof(ICMPHdr) + sizeof(struct in6_addr);
+    sawSll = FALSE;
+    sawTll = FALSE;
     while (ofs + sizeof(IPv6NdOptHdr) <= payloadLen) {
         IPv6NdOptHdr *ndOpt = (IPv6NdOptHdr *)(l4Start + ofs);
         UINT16 optLen = (UINT16)ndOpt->len * 8;
@@ -2332,11 +2335,21 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
         }
 
         if (ndOpt->type == ND_OPT_SOURCE_LINKADDR && ndOpt->len == 1) {
+            if (sawSll) {           /* duplicate SLL is malformed (parser fails) */
+                ovsActionStats.noCopiedNbl++;
+                return NDIS_STATUS_FAILURE;
+            }
+            sawSll = TRUE;
             RtlCopyMemory(l4Start + ofs + sizeof(IPv6NdOptHdr),
                           ndAttr->nd_sll, ETH_ADDR_LENGTH);
             RtlCopyMemory(key->icmp6Key.arpSha, ndAttr->nd_sll,
                           ETH_ADDR_LENGTH);
         } else if (ndOpt->type == ND_OPT_TARGET_LINKADDR && ndOpt->len == 1) {
+            if (sawTll) {           /* duplicate TLL is malformed (parser fails) */
+                ovsActionStats.noCopiedNbl++;
+                return NDIS_STATUS_FAILURE;
+            }
+            sawTll = TRUE;
             RtlCopyMemory(l4Start + ofs + sizeof(IPv6NdOptHdr),
                           ndAttr->nd_tll, ETH_ADDR_LENGTH);
             RtlCopyMemory(key->icmp6Key.arpTha, ndAttr->nd_tll,
