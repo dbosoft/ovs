@@ -1793,9 +1793,11 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
              */
             UINT32 captured = NET_BUFFER_DATA_LENGTH(
                 NET_BUFFER_LIST_FIRST_NB(ovsFwdCtx->curNbl)) - layers->l4Offset;
-            UINT32 ext = (UINT32)(layers->l4Offset - layers->l3Offset) -
-                         (UINT32)sizeof(IPv6Hdr);
-            UINT16 icmpLen = (UINT16)MIN((UINT32)ntohs(ipHdr->payload_len) - ext,
+            UINT32 ipHdrSpan = (UINT32)(layers->l4Offset - layers->l3Offset);
+            UINT32 ext = (ipHdrSpan > sizeof(IPv6Hdr)) ?
+                         (ipHdrSpan - (UINT32)sizeof(IPv6Hdr)) : 0;
+            UINT32 v6pay = (UINT32)ntohs(ipHdr->payload_len);
+            UINT16 icmpLen = (UINT16)MIN((v6pay > ext) ? (v6pay - ext) : 0,
                                          captured);
             icmp->checksum = 0x00;
             icmp->checksum = OvsCalculateICMPv6Checksum(ipHdr->saddr,
@@ -2130,11 +2132,20 @@ OvsUpdateSctpPorts(OvsForwardingContext *ovsFwdCtx,
 
         if (key->l2.dlType == htons(ETH_TYPE_IPV6)) {
             IPv6Hdr *ip6 = (IPv6Hdr *)(bufferStart + layers->l3Offset);
-            ipLen = (UINT32)ntohs(ip6->payload_len) -
-                    (ipHdrSpan - (UINT32)sizeof(IPv6Hdr));
+            UINT32 ext = (ipHdrSpan > sizeof(IPv6Hdr)) ?
+                         (ipHdrSpan - (UINT32)sizeof(IPv6Hdr)) : 0;
+            UINT32 v6pay = (UINT32)ntohs(ip6->payload_len);
+            if (v6pay < ext) {            /* malformed: ext headers > payload */
+                return NDIS_STATUS_FAILURE;
+            }
+            ipLen = v6pay - ext;
         } else {
             IPHdr *ip4 = (IPHdr *)(bufferStart + layers->l3Offset);
-            ipLen = (UINT32)ntohs(ip4->tot_len) - ipHdrSpan;
+            UINT32 totLen = (UINT32)ntohs(ip4->tot_len);
+            if (totLen < ipHdrSpan) {     /* malformed: headers > total len */
+                return NDIS_STATUS_FAILURE;
+            }
+            ipLen = totLen - ipHdrSpan;
         }
         payloadLen = MIN(ipLen, captured);
     }
@@ -2337,9 +2348,11 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
      * walk cannot read past the contiguous buffer.
      */
     {
-        UINT32 ext = (UINT32)(layers->l4Offset - layers->l3Offset) -
-                     (UINT32)sizeof(IPv6Hdr);
-        UINT16 csumLen = (UINT16)MIN((UINT32)ntohs(ipHdr->payload_len) - ext,
+        UINT32 ipHdrSpan = (UINT32)(layers->l4Offset - layers->l3Offset);
+        UINT32 ext = (ipHdrSpan > sizeof(IPv6Hdr)) ?
+                     (ipHdrSpan - (UINT32)sizeof(IPv6Hdr)) : 0;
+        UINT32 v6pay = (UINT32)ntohs(ipHdr->payload_len);
+        UINT16 csumLen = (UINT16)MIN((v6pay > ext) ? (v6pay - ext) : 0,
                                      payloadLen);
         icmpHdr->checksum = 0;
         icmpHdr->checksum = OvsCalculateICMPv6Checksum(ipHdr->saddr,
@@ -2355,12 +2368,12 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
 /*
  *----------------------------------------------------------------------------
  * OvsUpdateMplsHeader --
- *      Rewrites the MPLS label stack entry adjacent to L3 in ovsFwdCtx.curNbl
- *      inline. The parser advances l3Offset past the whole label stack, so that
- *      LSE sits at l3Offset - MPLS_HLEN; for the single-label stacks in scope it
- *      is the only (hence topmost) label. Multi-label rewrite is out of scope --
- *      locating the outermost label of a deeper stack would need the L2 length,
- *      which is not carried in 'layers'. MPLS carries no checksum.
+ *      Rewrites the topmost (outermost) MPLS label stack entry in
+ *      ovsFwdCtx.curNbl inline -- the one the flow key carries. The parser
+ *      advances l3Offset past the whole stack, so the topmost label is located
+ *      at the end of L2 (computed the same way the parser does), not at
+ *      l3Offset - MPLS_HLEN, which would be the innermost label of a multi-label
+ *      stack. MPLS carries no checksum.
  *----------------------------------------------------------------------------
  */
 NDIS_STATUS
@@ -2371,14 +2384,11 @@ OvsUpdateMplsHeader(OvsForwardingContext *ovsFwdCtx,
     PUINT8 bufferStart;
     OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
     MPLSHdr *mplsHdr;
+    UINT16 l2Len;
 
     ASSERT(layers->value != 0);
 
-    /*
-     * Guard against a set(mpls) misapplied to a non-MPLS packet (l3Offset would
-     * point into L2/L3, not a label) and against l3Offset underflow.
-     */
-    if (!OvsEthertypeIsMpls(key->l2.dlType) || layers->l3Offset < MPLS_HLEN) {
+    if (!OvsEthertypeIsMpls(key->l2.dlType)) {
         ovsActionStats.noCopiedNbl++;
         return NDIS_STATUS_FAILURE;
     }
@@ -2387,8 +2397,23 @@ OvsUpdateMplsHeader(OvsForwardingContext *ovsFwdCtx,
     if (!bufferStart) {
         return NDIS_STATUS_RESOURCES;
     }
-    mplsHdr = (MPLSHdr *)(bufferStart + layers->l3Offset - MPLS_HLEN);
 
+    /*
+     * The topmost label sits at the end of the L2 header. Derive the L2 length
+     * the same way OvsExtractLayers does: a single in-packet 802.1Q tag adds to
+     * the DIX header, but a tag carried in NBL metadata does not.
+     */
+    l2Len = ETH_HEADER_LEN_DIX;
+    if (!NET_BUFFER_LIST_INFO(ovsFwdCtx->curNbl, Ieee8021QNetBufferListInfo) &&
+        ((Eth_Header *)bufferStart)->dix.typeNBO == ETH_TYPE_802_1PQ_NBO) {
+        l2Len += sizeof(Eth_802_1pq_Tag);
+    }
+    if ((UINT32)l2Len + MPLS_HLEN > layers->l3Offset) {
+        ovsActionStats.noCopiedNbl++;
+        return NDIS_STATUS_FAILURE;
+    }
+
+    mplsHdr = (MPLSHdr *)(bufferStart + l2Len);
     mplsHdr->lse = mplsAttr->mpls_lse;
     key->mplsKey.lse = mplsAttr->mpls_lse;
 
