@@ -2951,7 +2951,9 @@ OvsExtractFlow(const NET_BUFFER_LIST *packet,
             OvsParseIcmpV6(packet, &flow->ipv6Key, &flow->icmp6Key, layers);
             flow->l2.keyLen += (OVS_ICMPV6_KEY_SIZE - OVS_IPV6_KEY_SIZE);
         }
-    } else if (flow->l2.dlType == htons(ETH_TYPE_ARP)) {
+    } else if (flow->l2.dlType == htons(ETH_TYPE_ARP) ||
+               flow->l2.dlType == htons(ETH_TYPE_RARP)) {
+        /* RARP shares the ARP wire format, so it populates the same key. */
         EtherArp arpStorage;
         const EtherArp *arp;
         ArpKey *arpKey = &flow->arpKey;
@@ -2969,7 +2971,9 @@ OvsExtractFlow(const NET_BUFFER_LIST *packet,
                 arpKey->nwProto = (UINT8)ntohs(arp->ea_hdr.ar_op);
             }
             if (arpKey->nwProto == ARPOP_REQUEST
-                || arpKey->nwProto == ARPOP_REPLY) {
+                || arpKey->nwProto == ARPOP_REPLY
+                || arpKey->nwProto == RARPOP_REQUEST
+                || arpKey->nwProto == RARPOP_REPLY) {
                 RtlCopyMemory(&arpKey->nwSrc, arp->arp_spa, 4);
                 RtlCopyMemory(&arpKey->nwDst, arp->arp_tpa, 4);
                 RtlCopyMemory(arpKey->arpSha, arp->arp_sha, ETH_ADDR_LENGTH);
