@@ -1667,9 +1667,15 @@ OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
             if ((keySize & 1) != 0) {
                 return FALSE;
             }
+            /* A fixed-size key advertises minLen==maxLen; the executor reads a
+             * value plus a mask, each one struct wide, so require exactly twice
+             * that length rather than a mere minimum -- otherwise an oversize
+             * attribute installs but the flow fails when a packet hits it.
+             * Variable-length keys (e.g. MPLS) carry no minLen here and are
+             * bounded by the executor's own half >= sizeof check. */
             if (keyType < ARRAY_SIZE(nlFlowKeyPolicy) &&
                 nlFlowKeyPolicy[keyType].minLen &&
-                keySize < 2 * nlFlowKeyPolicy[keyType].minLen) {
+                keySize != 2 * nlFlowKeyPolicy[keyType].minLen) {
                 return FALSE;
             }
             break;
