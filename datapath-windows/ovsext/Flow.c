@@ -268,6 +268,7 @@ const NL_POLICY nlFlowActionPolicy[] = {
                               .maxLen = sizeof(struct ovs_action_hash),
                               .optional = TRUE},
     [OVS_ACTION_ATTR_SET] = {.type = NL_A_VAR_LEN, .optional = TRUE},
+    [OVS_ACTION_ATTR_SET_MASKED] = {.type = NL_A_VAR_LEN, .optional = TRUE},
     [OVS_ACTION_ATTR_SAMPLE] = {.type = NL_A_VAR_LEN, .optional = TRUE},
     [OVS_ACTION_ATTR_CT] = {.type = NL_A_VAR_LEN, .optional = TRUE}
 };
@@ -1638,6 +1639,38 @@ OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
                 if (trem != 0) {
                     return FALSE;
                 }
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_SET_MASKED: {
+            /* The SET_MASKED payload is a single nested flow-key attribute whose
+             * data is a value immediately followed by an equally-sized mask, so
+             * OvsExecuteSetActionMasked reads twice the key's length. Validate
+             * the nested attribute's bounds, that its length is even and at
+             * least 2x the key minimum, and reject a tunnel set (no masked
+             * tunnel path exists). */
+            PNL_ATTR setKey;
+            UINT32 keyType, keySize;
+
+            if (size < NLA_HDRLEN) {
+                return FALSE;
+            }
+            setKey = (PNL_ATTR)NlAttrData(a);
+            if (!NlAttrIsValid(setKey, size)) {
+                return FALSE;
+            }
+            keyType = NlAttrType(setKey);
+            keySize = NlAttrGetSize(setKey);
+            if (keyType == OVS_KEY_ATTR_TUNNEL) {
+                return FALSE;
+            }
+            if ((keySize & 1) != 0) {
+                return FALSE;
+            }
+            if (keyType < ARRAY_SIZE(nlFlowKeyPolicy) &&
+                nlFlowKeyPolicy[keyType].minLen &&
+                keySize < 2 * nlFlowKeyPolicy[keyType].minLen) {
+                return FALSE;
             }
             break;
         }
@@ -3739,6 +3772,7 @@ OvsActionIsSupported(UINT32 type)
     case OVS_ACTION_ATTR_RECIRC:
     case OVS_ACTION_ATTR_USERSPACE:
     case OVS_ACTION_ATTR_SET:
+    case OVS_ACTION_ATTR_SET_MASKED:
     case OVS_ACTION_ATTR_METER:
     case OVS_ACTION_ATTR_SAMPLE:
     case OVS_ACTION_ATTR_CHECK_PKT_LEN:

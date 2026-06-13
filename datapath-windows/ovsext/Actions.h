@@ -116,17 +116,20 @@ PUINT8 OvsGetHeaderBySize(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateUdpPorts(OvsForwardingContext *ovsFwdCtx,
                   OvsFlowKey *key,
-                  const struct ovs_key_udp *udpAttr);
+                  const struct ovs_key_udp *udpAttr,
+                  const struct ovs_key_udp *udpMask);
 
 NDIS_STATUS
 OvsUpdateTcpPorts(OvsForwardingContext *ovsFwdCtx,
                   OvsFlowKey *key,
-                  const struct ovs_key_tcp *tcpAttr);
+                  const struct ovs_key_tcp *tcpAttr,
+                  const struct ovs_key_tcp *tcpMask);
 
 NDIS_STATUS
 OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
                     OvsFlowKey *key,
-                    const struct ovs_key_ipv4 *ipAttr);
+                    const struct ovs_key_ipv4 *ipAttr,
+                    const struct ovs_key_ipv4 *ipMask);
 
 NDIS_STATUS
 OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
@@ -141,26 +144,31 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
                     OvsFlowKey *key,
-                    const struct ovs_key_ipv6 *ipv6Attr);
+                    const struct ovs_key_ipv6 *ipv6Attr,
+                    const struct ovs_key_ipv6 *ipv6Mask);
 
 NDIS_STATUS
 OvsUpdateSctpPorts(OvsForwardingContext *ovsFwdCtx,
                    OvsFlowKey *key,
-                   const struct ovs_key_sctp *sctpAttr);
+                   const struct ovs_key_sctp *sctpAttr,
+                   const struct ovs_key_sctp *sctpMask);
 
 NDIS_STATUS
 OvsUpdateArpHeader(OvsForwardingContext *ovsFwdCtx,
                    OvsFlowKey *key,
-                   const struct ovs_key_arp *arpAttr);
+                   const struct ovs_key_arp *arpAttr,
+                   const struct ovs_key_arp *arpMask);
 
 NDIS_STATUS
 OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
                   OvsFlowKey *key,
-                  const struct ovs_key_nd *ndAttr);
+                  const struct ovs_key_nd *ndAttr,
+                  const struct ovs_key_nd *ndMask);
 
 NDIS_STATUS
 OvsUpdateMplsHeader(OvsForwardingContext *ovsFwdCtx,
                     OvsFlowKey *key,
-                    const struct ovs_key_mpls *mplsAttr);
+                    const struct ovs_key_mpls *mplsAttr,
+                    const struct ovs_key_mpls *mplsMask);
 
 #endif /* __ACTIONS_H_ */
