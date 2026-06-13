@@ -1670,13 +1670,19 @@ OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
             /* A fixed-size key advertises minLen==maxLen; the executor reads a
              * value plus a mask, each one struct wide, so require exactly twice
              * that length rather than a mere minimum -- otherwise an oversize
-             * attribute installs but the flow fails when a packet hits it.
-             * Variable-length keys (e.g. MPLS) carry no minLen here and are
-             * bounded by the executor's own half >= sizeof check. */
+             * attribute installs but the flow fails when a packet hits it. */
             if (keyType < ARRAY_SIZE(nlFlowKeyPolicy) &&
-                nlFlowKeyPolicy[keyType].minLen &&
-                keySize != 2 * nlFlowKeyPolicy[keyType].minLen) {
-                return FALSE;
+                nlFlowKeyPolicy[keyType].minLen) {
+                if (keySize != 2 * nlFlowKeyPolicy[keyType].minLen) {
+                    return FALSE;
+                }
+            } else if (keyType == OVS_KEY_ATTR_MPLS) {
+                /* MPLS is a variable-length LSE array with no fixed minLen; the
+                 * executor rewrites the topmost label, so the value and mask
+                 * halves must each hold at least one full LSE. */
+                if (keySize < 2 * sizeof(struct ovs_key_mpls)) {
+                    return FALSE;
+                }
             }
             break;
         }
