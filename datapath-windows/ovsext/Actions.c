@@ -2845,6 +2845,15 @@ OvsExecuteSetActionMasked(OvsForwardingContext *ovsFwdCtx,
         break;
 
     default:
+        /*
+         * Tolerate, do not fail: ofproto routes OVS_KEY_ATTR_PRIORITY,
+         * OVS_KEY_ATTR_SKB_MARK and OVS_KEY_ATTR_ND_EXTENSIONS through the
+         * masked-set path (lib/odp-util.c commit()), but the Windows datapath
+         * does not carry those fields. OvsExecuteSetAction ignores the same key
+         * types for a plain set, so a flow that sets them must keep installing
+         * and forwarding rather than being dropped here. Leaving 'status' as
+         * success matches that long-standing behaviour.
+         */
         OVS_LOG_INFO("Unhandled masked attribute %#x", type);
         break;
     }
