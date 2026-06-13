@@ -184,7 +184,8 @@ OvsDoEncapVxlan(POVS_VPORT_ENTRY vport,
     PMDL curMdl;
     PUINT8 bufferStart;
     EthHdr *ethHdr;
-    IPHdr *ipHdr;
+    IPHdr *ipHdr = NULL;
+    IPv6Hdr *ipv6Hdr = NULL;
     UDPHdr *udpHdr;
     VXLANHdr *vxlanHdr;
     POVS_VXLAN_VPORT vportVxlan;
@@ -267,9 +268,13 @@ OvsDoEncapVxlan(POVS_VPORT_ENTRY vport,
                        sizeof ethHdr->Destination);
         NdisMoveMemory(ethHdr->Source, fwdInfo->srcMacAddr,
                        sizeof ethHdr->Source);
-        ethHdr->Type = htons(ETH_TYPE_IPV4);
+        if (fwdInfo->dstIphAddr.si_family == AF_INET) {
+            ethHdr->Type = htons(ETH_TYPE_IPV4);
+        } else if (fwdInfo->dstIphAddr.si_family == AF_INET6) {
+            ethHdr->Type = htons(ETH_TYPE_IPV6);
+        }
 
-        /* IP header */
+        /* L3 header */
         if (fwdInfo->dstIphAddr.si_family == AF_INET) {
            ipHdr = (IPHdr *)((PCHAR)ethHdr + sizeof *ethHdr);
 
@@ -292,34 +297,83 @@ OvsDoEncapVxlan(POVS_VPORT_ENTRY vport,
 
            ipHdr->check = 0;
 
-           /* UDP header */
            udpHdr = (UDPHdr *)((PCHAR)ipHdr + sizeof *ipHdr);
-           udpHdr->source = htons(tunKey->flow_hash | MAXINT16);
-           udpHdr->dest = tunKey->dst_port ? tunKey->dst_port :
-                                            htons(vportVxlan->dstPort);
-           udpHdr->len = htons(NET_BUFFER_DATA_LENGTH(curNb) - headRoom +
-                               sizeof *udpHdr + sizeof *vxlanHdr);
+       } else if (fwdInfo->dstIphAddr.si_family == AF_INET6) {
+           ipv6Hdr = (IPv6Hdr *)((PCHAR)ethHdr + sizeof *ethHdr);
 
+           ipv6Hdr->version = IPV6;
+           /*
+            * Encode tunKey->tos into the 8-bit Traffic Class, the exact inverse
+            * of the decap reconstruction in OvsDecapVxlan: the high nibble goes
+            * to the 'priority:4' bit-field and the low nibble to the top 4 bits
+            * of flow_lbl[0]. (The verbatim Geneve IPv6 arm zeroes these and so
+            * drops the tunnel TOS.)
+            */
+           ipv6Hdr->priority = (UINT8)(tunKey->tos >> 4);
+           ipv6Hdr->flow_lbl[0] = (UINT8)((tunKey->tos & 0x0F) << 4);
+           ipv6Hdr->flow_lbl[1] = 0;
+           ipv6Hdr->flow_lbl[2] = 0;
+           ipv6Hdr->payload_len =
+               htons(NET_BUFFER_DATA_LENGTH(curNb) - sizeof *ethHdr -
+                     sizeof *ipv6Hdr);
+           ipv6Hdr->hop_limit = tunKey->ttl ? tunKey->ttl : VXLAN_DEFAULT_TTL;
+           ipv6Hdr->nexthdr = IPPROTO_UDP;
+           ASSERT(OvsIphAddrEquals(&tunKey->dst, &fwdInfo->dstIphAddr));
+           ASSERT(OvsIphAddrEquals(&tunKey->src, &fwdInfo->srcIphAddr) ||
+                  OvsIphIsZero(&tunKey->src));
+
+           RtlCopyMemory(&ipv6Hdr->saddr, &fwdInfo->srcIphAddr.Ipv6.sin6_addr,
+                         sizeof(ipv6Hdr->saddr));
+           RtlCopyMemory(&ipv6Hdr->daddr, &fwdInfo->dstIphAddr.Ipv6.sin6_addr,
+                         sizeof(ipv6Hdr->daddr));
+
+           udpHdr = (UDPHdr *)((PCHAR)ipv6Hdr + sizeof *ipv6Hdr);
+       } else {
+           /* Unresolved/unexpected address family: fail closed rather than
+            * emit a frame with a bogus outer header. */
+           status = NDIS_STATUS_FAILURE;
+           goto ret_error;
+       }
+
+       /* UDP header */
+       udpHdr->source = htons(tunKey->flow_hash | MAXINT16);
+       udpHdr->dest = tunKey->dst_port ? tunKey->dst_port :
+                                         htons(vportVxlan->dstPort);
+       udpHdr->len = htons(NET_BUFFER_DATA_LENGTH(curNb) - headRoom +
+                           sizeof *udpHdr + sizeof *vxlanHdr);
+
+       if (fwdInfo->dstIphAddr.si_family == AF_INET) {
+           /* A zero UDP checksum is valid over IPv4, so honour the flag. */
            if (tunKey->flags & OVS_TNL_F_CSUM) {
                udpHdr->check = IPPseudoChecksum(&ipHdr->saddr, &ipHdr->daddr,
                                                 IPPROTO_UDP, ntohs(udpHdr->len));
            } else {
                udpHdr->check = 0;
            }
-
-           /* VXLAN header */
-           vxlanHdr = (VXLANHdr *)((PCHAR)udpHdr + sizeof *udpHdr);
-           vxlanHdr->flags1 = 0;
-           vxlanHdr->locallyReplicate = 0;
-           vxlanHdr->flags2 = 0;
-           vxlanHdr->reserved1 = 0;
-           vxlanHdr->vxlanID = VXLAN_TUNNELID_TO_VNI(tunKey->tunnelId);
-           vxlanHdr->instanceID = 1;
-           vxlanHdr->reserved2 = 0;
        } else {
-          status = NDIS_STATUS_FAILURE;
-          goto ret_error;
+           /*
+            * A zero UDP checksum is illegal over IPv6 (RFC 8200), so always
+            * seed the pseudo-checksum for the NIC to finalize, regardless of
+            * OVS_TNL_F_CSUM. The matching UdpChecksum offload flag is set
+            * unconditionally for IPv6 below.
+            */
+           UINT16 udpChksumLen =
+               (UINT16)(NET_BUFFER_DATA_LENGTH(curNb) - sizeof *ipv6Hdr -
+                        sizeof *ethHdr);
+           udpHdr->check = IPv6PseudoChecksum((UINT32*)&ipv6Hdr->saddr,
+                                              (UINT32*)&ipv6Hdr->daddr,
+                                              IPPROTO_UDP, udpChksumLen);
        }
+
+       /* VXLAN header */
+       vxlanHdr = (VXLANHdr *)((PCHAR)udpHdr + sizeof *udpHdr);
+       vxlanHdr->flags1 = 0;
+       vxlanHdr->locallyReplicate = 0;
+       vxlanHdr->flags2 = 0;
+       vxlanHdr->reserved1 = 0;
+       vxlanHdr->vxlanID = VXLAN_TUNNELID_TO_VNI(tunKey->tunnelId);
+       vxlanHdr->instanceID = 1;
+       vxlanHdr->reserved2 = 0;
     }
 
     csumInfo.Value = 0;
@@ -329,7 +383,12 @@ OvsDoEncapVxlan(POVS_VPORT_ENTRY vport,
     } else {
         csumInfo.Transmit.IsIPv6 = 1;
     }
-    if (tunKey->flags & OVS_TNL_F_CSUM) {
+    /*
+     * IPv6 mandates a non-zero UDP checksum, so always offload it there; for
+     * IPv4 it is only needed when the tunnel requested OVS_TNL_F_CSUM.
+     */
+    if ((tunKey->flags & OVS_TNL_F_CSUM) ||
+        fwdInfo->dstIphAddr.si_family == AF_INET6) {
         csumInfo.Transmit.UdpChecksum = 1;
     }
     NET_BUFFER_LIST_INFO(curNbl,
@@ -363,11 +422,6 @@ OvsEncapVxlan(POVS_VPORT_ENTRY vport,
 {
     NTSTATUS status;
     OVS_FWD_INFO fwdInfo;
-
-    if (tunKey->dst.si_family != AF_INET) {
-        /*V6 tunnel support will be supported later*/
-        return NDIS_STATUS_FAILURE;
-    }
 
     status = OvsLookupIPhFwdInfo(tunKey->src, tunKey->dst, &fwdInfo);
     if (status != STATUS_SUCCESS) {
