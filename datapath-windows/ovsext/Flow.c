@@ -1646,8 +1646,9 @@ OvsValidateActionSizes(const PNL_ATTR actions, INT actionsLen, UINT32 depth)
             /* The SET_MASKED payload is a single nested flow-key attribute whose
              * data is a value immediately followed by an equally-sized mask, so
              * OvsExecuteSetActionMasked reads twice the key's length. Validate
-             * the nested attribute's bounds, that its length is even and at
-             * least 2x the key minimum, and reject a tunnel set (no masked
+             * the nested attribute's bounds, that its length is even and exactly
+             * twice a fixed-size key (or at least two label entries for the
+             * variable-length MPLS key), and reject a tunnel set (no masked
              * tunnel path exists). */
             PNL_ATTR setKey;
             UINT32 keyType, keySize;
