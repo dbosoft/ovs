@@ -342,20 +342,27 @@ OvsDoEncapVxlan(POVS_VPORT_ENTRY vport,
        udpHdr->len = htons(NET_BUFFER_DATA_LENGTH(curNb) - headRoom +
                            sizeof *udpHdr + sizeof *vxlanHdr);
 
-       if (tunKey->flags & OVS_TNL_F_CSUM) {
-           if (fwdInfo->dstIphAddr.si_family == AF_INET) {
+       if (fwdInfo->dstIphAddr.si_family == AF_INET) {
+           /* A zero UDP checksum is valid over IPv4, so honour the flag. */
+           if (tunKey->flags & OVS_TNL_F_CSUM) {
                udpHdr->check = IPPseudoChecksum(&ipHdr->saddr, &ipHdr->daddr,
                                                 IPPROTO_UDP, ntohs(udpHdr->len));
-           } else if (fwdInfo->dstIphAddr.si_family == AF_INET6) {
-               UINT16 udpChksumLen =
-                   (UINT16)(NET_BUFFER_DATA_LENGTH(curNb) - sizeof *ipv6Hdr -
-                            sizeof *ethHdr);
-               udpHdr->check = IPv6PseudoChecksum((UINT32*)&ipv6Hdr->saddr,
-                                                  (UINT32*)&ipv6Hdr->daddr,
-                                                  IPPROTO_UDP, udpChksumLen);
+           } else {
+               udpHdr->check = 0;
            }
        } else {
-           udpHdr->check = 0;
+           /*
+            * A zero UDP checksum is illegal over IPv6 (RFC 8200), so always
+            * seed the pseudo-checksum for the NIC to finalize, regardless of
+            * OVS_TNL_F_CSUM. The matching UdpChecksum offload flag is set
+            * unconditionally for IPv6 below.
+            */
+           UINT16 udpChksumLen =
+               (UINT16)(NET_BUFFER_DATA_LENGTH(curNb) - sizeof *ipv6Hdr -
+                        sizeof *ethHdr);
+           udpHdr->check = IPv6PseudoChecksum((UINT32*)&ipv6Hdr->saddr,
+                                              (UINT32*)&ipv6Hdr->daddr,
+                                              IPPROTO_UDP, udpChksumLen);
        }
 
        /* VXLAN header */
@@ -376,7 +383,12 @@ OvsDoEncapVxlan(POVS_VPORT_ENTRY vport,
     } else {
         csumInfo.Transmit.IsIPv6 = 1;
     }
-    if (tunKey->flags & OVS_TNL_F_CSUM) {
+    /*
+     * IPv6 mandates a non-zero UDP checksum, so always offload it there; for
+     * IPv4 it is only needed when the tunnel requested OVS_TNL_F_CSUM.
+     */
+    if ((tunKey->flags & OVS_TNL_F_CSUM) ||
+        fwdInfo->dstIphAddr.si_family == AF_INET6) {
         csumInfo.Transmit.UdpChecksum = 1;
     }
     NET_BUFFER_LIST_INFO(curNbl,
