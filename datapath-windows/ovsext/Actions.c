@@ -1264,17 +1264,56 @@ OvsActionMplsPush(OvsForwardingContext *ovsFwdCtx,
 }
 
 /*
+ * Masked-set folds: combine the existing on-wire value 'old' with the action's
+ * 'value' under 'mask', i.e. keep 'old' where the mask bit is 0 and take
+ * 'value' where it is 1. AND/OR/NOT are per-bit, so this is byte-order agnostic
+ * and may be applied directly to network-order fields without a host-order
+ * conversion. A NULL mask in the updaters below means a plain (full) set, which
+ * leaves the action value untouched.
+ */
+static __inline UINT8
+OvsMaskU8(UINT8 old, UINT8 value, UINT8 mask)
+{
+    return (UINT8)((old & ~mask) | (value & mask));
+}
+
+static __inline UINT16
+OvsMaskU16(UINT16 old, UINT16 value, UINT16 mask)
+{
+    return (UINT16)((old & ~mask) | (value & mask));
+}
+
+static __inline UINT32
+OvsMaskU32(UINT32 old, UINT32 value, UINT32 mask)
+{
+    return (old & ~mask) | (value & mask);
+}
+
+static __inline VOID
+OvsMaskBytes(PUINT8 dst, const UINT8 *old, const UINT8 *value,
+             const UINT8 *mask, SIZE_T len)
+{
+    SIZE_T i;
+    for (i = 0; i < len; i++) {
+        dst[i] = (UINT8)((old[i] & ~mask[i]) | (value[i] & mask[i]));
+    }
+}
+
+/*
  *----------------------------------------------------------------------------
  * OvsUpdateEthHeader --
  *      Updates the ethernet header in ovsFwdCtx.curNbl inline based on the
- *      specified key.
+ *      specified key. When 'ethMask' is non-NULL the write is a masked set:
+ *      each address byte is folded with the current header byte under the mask.
  *----------------------------------------------------------------------------
  */
 static __inline NDIS_STATUS
 OvsUpdateEthHeader(OvsForwardingContext *ovsFwdCtx,
                    OvsFlowKey *key,
-                   const struct ovs_key_ethernet *ethAttr)
+                   const struct ovs_key_ethernet *ethAttr,
+                   const struct ovs_key_ethernet *ethMask)
 {
+    struct ovs_key_ethernet masked;
     PNET_BUFFER curNb;
     PMDL curMdl;
     PUINT8 bufferStart;
@@ -1298,6 +1337,14 @@ OvsUpdateEthHeader(OvsForwardingContext *ovsFwdCtx,
         return NDIS_STATUS_FAILURE;
     }
     ethHdr = (EthHdr *)(bufferStart + NET_BUFFER_CURRENT_MDL_OFFSET(curNb));
+
+    if (ethMask) {
+        OvsMaskBytes(masked.eth_dst, ethHdr->Destination, ethAttr->eth_dst,
+                     ethMask->eth_dst, ETH_ADDR_LENGTH);
+        OvsMaskBytes(masked.eth_src, ethHdr->Source, ethAttr->eth_src,
+                     ethMask->eth_src, ETH_ADDR_LENGTH);
+        ethAttr = &masked;
+    }
 
     RtlCopyMemory(ethHdr->Destination, ethAttr->eth_dst, ETH_ADDR_LENGTH);
     RtlCopyMemory(ethHdr->Source, ethAttr->eth_src, ETH_ADDR_LENGTH);
@@ -1393,11 +1440,13 @@ PUINT8 OvsGetHeaderBySize(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateUdpPorts(OvsForwardingContext *ovsFwdCtx,
                   OvsFlowKey *key,
-                  const struct ovs_key_udp *udpAttr)
+                  const struct ovs_key_udp *udpAttr,
+                  const struct ovs_key_udp *udpMask)
 {
     PUINT8 bufferStart;
     OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
     UDPHdr *udpHdr = NULL;
+    struct ovs_key_udp masked;
 
     ASSERT(layers->value != 0);
 
@@ -1412,6 +1461,13 @@ OvsUpdateUdpPorts(OvsForwardingContext *ovsFwdCtx,
     }
 
     udpHdr = (UDPHdr *)(bufferStart + layers->l4Offset);
+    if (udpMask) {
+        masked.udp_src = OvsMaskU16(udpHdr->source, udpAttr->udp_src,
+                                    udpMask->udp_src);
+        masked.udp_dst = OvsMaskU16(udpHdr->dest, udpAttr->udp_dst,
+                                    udpMask->udp_dst);
+        udpAttr = &masked;
+    }
     if (udpHdr->check) {
         if (udpHdr->source != udpAttr->udp_src) {
             udpHdr->check = ChecksumUpdate16(udpHdr->check, udpHdr->source,
@@ -1445,11 +1501,13 @@ OvsUpdateUdpPorts(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateTcpPorts(OvsForwardingContext *ovsFwdCtx,
                   OvsFlowKey *key,
-                  const struct ovs_key_tcp *tcpAttr)
+                  const struct ovs_key_tcp *tcpAttr,
+                  const struct ovs_key_tcp *tcpMask)
 {
     PUINT8 bufferStart;
     OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
     TCPHdr *tcpHdr = NULL;
+    struct ovs_key_tcp masked;
 
     ASSERT(layers->value != 0);
 
@@ -1464,6 +1522,14 @@ OvsUpdateTcpPorts(OvsForwardingContext *ovsFwdCtx,
     }
 
     tcpHdr = (TCPHdr *)(bufferStart + layers->l4Offset);
+
+    if (tcpMask) {
+        masked.tcp_src = OvsMaskU16(tcpHdr->source, tcpAttr->tcp_src,
+                                    tcpMask->tcp_src);
+        masked.tcp_dst = OvsMaskU16(tcpHdr->dest, tcpAttr->tcp_dst,
+                                    tcpMask->tcp_dst);
+        tcpAttr = &masked;
+    }
 
     if (tcpHdr->source != tcpAttr->tcp_src) {
         tcpHdr->check = ChecksumUpdate16(tcpHdr->check, tcpHdr->source,
@@ -1830,7 +1896,8 @@ OvsUpdateAddressAndPortForIpv6(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
                     OvsFlowKey *key,
-                    const struct ovs_key_ipv4 *ipAttr)
+                    const struct ovs_key_ipv4 *ipAttr,
+                    const struct ovs_key_ipv4 *ipMask)
 {
     PUINT8 bufferStart;
     UINT32 hdrSize;
@@ -1838,6 +1905,7 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
     IPHdr *ipHdr;
     TCPHdr *tcpHdr = NULL;
     UDPHdr *udpHdr = NULL;
+    struct ovs_key_ipv4 masked;
 
     ASSERT(layers->value != 0);
 
@@ -1859,6 +1927,27 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
         tcpHdr = (TCPHdr *)(bufferStart + layers->l4Offset);
     } else if (layers->isUdp) {
         udpHdr = (UDPHdr *)(bufferStart + layers->l4Offset);
+    }
+
+    /*
+     * For a masked set, fold each action field with the current header value
+     * under the mask so the per-field compare-and-checksum logic below operates
+     * on the masked result. The ToS fold spans the whole byte; the DSCP/ECN
+     * split is applied as usual when the field is written.
+     */
+    if (ipMask) {
+        masked.ipv4_src = OvsMaskU32(ipHdr->saddr, ipAttr->ipv4_src,
+                                     ipMask->ipv4_src);
+        masked.ipv4_dst = OvsMaskU32(ipHdr->daddr, ipAttr->ipv4_dst,
+                                     ipMask->ipv4_dst);
+        masked.ipv4_proto = OvsMaskU8(ipHdr->protocol, ipAttr->ipv4_proto,
+                                      ipMask->ipv4_proto);
+        masked.ipv4_ttl = OvsMaskU8(ipHdr->ttl, ipAttr->ipv4_ttl,
+                                    ipMask->ipv4_ttl);
+        masked.ipv4_tos = OvsMaskU8(ipHdr->tos, ipAttr->ipv4_tos,
+                                    ipMask->ipv4_tos);
+        masked.ipv4_frag = ipAttr->ipv4_frag;
+        ipAttr = &masked;
     }
 
     /*
@@ -1932,22 +2021,32 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
         ipHdr->ttl = ipAttr->ipv4_ttl;
         key->ipKey.nwTtl = ipAttr->ipv4_ttl;
     }
-    if (ipHdr->dscp != (ipAttr->ipv4_tos & 0xfc)) {
-        /* ECN + DSCP */
-        UINT8 newTos = (ipHdr->tos & 0x3) | (ipAttr->ipv4_tos & 0xfc);
-        if (ipHdr->check != 0) {
-            /*
-             * ToS is the low byte of the network-order {version/IHL, ToS} word,
-             * i.e. the high byte of the host-order read ChecksumUpdate16() wants,
-             * so shift left by 8. Passing the bare byte updated the wrong word
-             * position and produced a bad IP checksum on every DSCP/ECN change.
-             */
-            ipHdr->check = ChecksumUpdate16(ipHdr->check,
-                                            (UINT16)(ipHdr->tos << 8),
-                                            (UINT16)(newTos << 8));
+    {
+        /*
+         * A plain set(ipv4) rewrites only DSCP and preserves the on-wire ECN
+         * bits (the Linux datapath behaviour). A masked set must honour the
+         * mask exactly: 'ipAttr->ipv4_tos' already holds the full-byte fold,
+         * including any ECN bits the mask selected, so it is written verbatim.
+         */
+        UINT8 newTos = ipMask ? ipAttr->ipv4_tos
+                              : (UINT8)((ipHdr->tos & 0x3) |
+                                        (ipAttr->ipv4_tos & 0xfc));
+        if (ipHdr->tos != newTos) {
+            if (ipHdr->check != 0) {
+                /*
+                 * ToS is the low byte of the network-order {version/IHL, ToS}
+                 * word, i.e. the high byte of the host-order read
+                 * ChecksumUpdate16() wants, so shift left by 8. Passing the
+                 * bare byte updated the wrong word position and produced a bad
+                 * IP checksum on every DSCP/ECN change.
+                 */
+                ipHdr->check = ChecksumUpdate16(ipHdr->check,
+                                                (UINT16)(ipHdr->tos << 8),
+                                                (UINT16)(newTos << 8));
+            }
+            ipHdr->tos = newTos;
+            key->ipKey.nwTos = newTos;
         }
-        ipHdr->tos = newTos;
-        key->ipKey.nwTos = newTos;
     }
 
     return NDIS_STATUS_SUCCESS;
@@ -1966,7 +2065,8 @@ OvsUpdateIPv4Header(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
                     OvsFlowKey *key,
-                    const struct ovs_key_ipv6 *ipv6Attr)
+                    const struct ovs_key_ipv6 *ipv6Attr,
+                    const struct ovs_key_ipv6 *ipv6Mask)
 {
     PUINT8 bufferStart;
     UINT32 hdrSize;
@@ -1975,7 +2075,7 @@ OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
     struct in6_addr newSrc, newDst;
     UINT16 curSrcPort = 0, curDstPort = 0;
     UINT32 label;
-    UINT8 tc;
+    UINT8 tc, hlimit;
     NDIS_STATUS status;
 
     ASSERT(layers->value != 0);
@@ -1987,6 +2087,9 @@ OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
 
     RtlCopyMemory(&newSrc, ipv6Attr->ipv6_src, sizeof newSrc);
     RtlCopyMemory(&newDst, ipv6Attr->ipv6_dst, sizeof newDst);
+    tc = ipv6Attr->ipv6_tclass;
+    label = ntohl(ipv6Attr->ipv6_label) & 0x000FFFFF;
+    hlimit = ipv6Attr->ipv6_hlimit;
 
     if (layers->isIcmp) {
         /*
@@ -2026,6 +2129,43 @@ OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
     }
 
     /*
+     * For a masked set, fold every field with its current on-wire value here,
+     * while 'bufferStart' is still valid (the address helper may clone the NBL
+     * below). The addresses fold byte-wise; the traffic class and 20-bit flow
+     * label are reconstructed from their bit-packed header positions, folded in
+     * host order, and written back further down.
+     */
+    if (ipv6Mask) {
+        ipHdr = (IPv6Hdr *)(bufferStart + layers->l3Offset);
+        {
+            struct in6_addr maskSrc, maskDst;
+            UINT8 oldTc, maskTc;
+            UINT32 oldLabel, maskLabel;
+
+            RtlCopyMemory(&maskSrc, ipv6Mask->ipv6_src, sizeof maskSrc);
+            RtlCopyMemory(&maskDst, ipv6Mask->ipv6_dst, sizeof maskDst);
+            OvsMaskBytes((PUINT8)&newSrc, (const UINT8 *)&ipHdr->saddr,
+                         (const UINT8 *)&newSrc, (const UINT8 *)&maskSrc,
+                         sizeof newSrc);
+            OvsMaskBytes((PUINT8)&newDst, (const UINT8 *)&ipHdr->daddr,
+                         (const UINT8 *)&newDst, (const UINT8 *)&maskDst,
+                         sizeof newDst);
+
+            oldTc = (UINT8)((ipHdr->priority << 4) |
+                            ((ipHdr->flow_lbl[0] & 0xF0) >> 4));
+            oldLabel = ((UINT32)(ipHdr->flow_lbl[0] & 0x0F) << 16) |
+                       ((UINT32)ipHdr->flow_lbl[1] << 8) |
+                       (UINT32)ipHdr->flow_lbl[2];
+            maskTc = ipv6Mask->ipv6_tclass;
+            maskLabel = ntohl(ipv6Mask->ipv6_label) & 0x000FFFFF;
+
+            tc = OvsMaskU8(oldTc, tc, maskTc);
+            label = OvsMaskU32(oldLabel, label, maskLabel) & 0x000FFFFF;
+            hlimit = OvsMaskU8(ipHdr->hop_limit, hlimit, ipv6Mask->ipv6_hlimit);
+        }
+    }
+
+    /*
      * The helper no-ops when the address already matches, so the calls are
      * unconditional; this also avoids dereferencing a header pointer that an
      * intervening clone may have invalidated. isTx=FALSE selects the
@@ -2061,22 +2201,22 @@ OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
      * in 'priority', its low nibble plus the label's top nibble in flow_lbl[0],
      * and the rest of the label in flow_lbl[1..2]. This avoids any word-cast,
      * alignment or bitfield-layout assumption and leaves 'version' untouched.
+     * 'tc', 'label' and 'hlimit' already hold the (mask-folded, for a masked
+     * set) values computed above.
      */
-    tc = ipv6Attr->ipv6_tclass;
-    label = ntohl(ipv6Attr->ipv6_label) & 0x000FFFFF;
     ipHdr->priority = (tc >> 4) & 0x0F;
     ipHdr->flow_lbl[0] = (UINT8)(((tc & 0x0F) << 4) | ((label >> 16) & 0x0F));
     ipHdr->flow_lbl[1] = (UINT8)((label >> 8) & 0xFF);
     ipHdr->flow_lbl[2] = (UINT8)(label & 0xFF);
 
-    ipHdr->hop_limit = ipv6Attr->ipv6_hlimit;
+    ipHdr->hop_limit = hlimit;
 
     RtlCopyMemory(&key->ipv6Key.ipv6Src, &ipHdr->saddr, sizeof(struct in6_addr));
     RtlCopyMemory(&key->ipv6Key.ipv6Dst, &ipHdr->daddr, sizeof(struct in6_addr));
     /* The extractor stores the flow label as a host-order 20-bit value. */
     key->ipv6Key.ipv6Label = label;
     key->ipv6Key.nwTos = tc;
-    key->ipv6Key.nwTtl = ipv6Attr->ipv6_hlimit;
+    key->ipv6Key.nwTtl = hlimit;
 
     return NDIS_STATUS_SUCCESS;
 }
@@ -2093,12 +2233,14 @@ OvsUpdateIPv6Header(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateSctpPorts(OvsForwardingContext *ovsFwdCtx,
                    OvsFlowKey *key,
-                   const struct ovs_key_sctp *sctpAttr)
+                   const struct ovs_key_sctp *sctpAttr,
+                   const struct ovs_key_sctp *sctpMask)
 {
     PUINT8 bufferStart;
     OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
     SCTPHdr *sctpHdr;
     UINT32 packetLen, payloadLen;
+    struct ovs_key_sctp masked;
 
     ASSERT(layers->value != 0);
 
@@ -2118,6 +2260,14 @@ OvsUpdateSctpPorts(OvsForwardingContext *ovsFwdCtx,
         return NDIS_STATUS_RESOURCES;
     }
     sctpHdr = (SCTPHdr *)(bufferStart + layers->l4Offset);
+
+    if (sctpMask) {
+        masked.sctp_src = OvsMaskU16(sctpHdr->source, sctpAttr->sctp_src,
+                                     sctpMask->sctp_src);
+        masked.sctp_dst = OvsMaskU16(sctpHdr->dest, sctpAttr->sctp_dst,
+                                     sctpMask->sctp_dst);
+        sctpAttr = &masked;
+    }
 
     /*
      * The CRC32c covers the SCTP segment only. Derive its length from the IP
@@ -2192,11 +2342,13 @@ OvsUpdateSctpPorts(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateArpHeader(OvsForwardingContext *ovsFwdCtx,
                    OvsFlowKey *key,
-                   const struct ovs_key_arp *arpAttr)
+                   const struct ovs_key_arp *arpAttr,
+                   const struct ovs_key_arp *arpMask)
 {
     PUINT8 bufferStart;
     OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
     EtherArp *arpHdr;
+    struct ovs_key_arp masked;
 
     ASSERT(layers->value != 0);
 
@@ -2211,6 +2363,25 @@ OvsUpdateArpHeader(OvsForwardingContext *ovsFwdCtx,
         return NDIS_STATUS_RESOURCES;
     }
     arpHdr = (EtherArp *)(bufferStart + layers->l3Offset);
+
+    if (arpMask) {
+        masked.arp_op = OvsMaskU16((UINT16)arpHdr->ea_hdr.ar_op,
+                                   (UINT16)arpAttr->arp_op,
+                                   (UINT16)arpMask->arp_op);
+        OvsMaskBytes((PUINT8)&masked.arp_sip, arpHdr->arp_spa,
+                     (const UINT8 *)&arpAttr->arp_sip,
+                     (const UINT8 *)&arpMask->arp_sip, sizeof masked.arp_sip);
+        OvsMaskBytes((PUINT8)&masked.arp_tip, arpHdr->arp_tpa,
+                     (const UINT8 *)&arpAttr->arp_tip,
+                     (const UINT8 *)&arpMask->arp_tip, sizeof masked.arp_tip);
+        OvsMaskBytes(masked.arp_sha, (const UINT8 *)&arpHdr->arp_sha,
+                     arpAttr->arp_sha, arpMask->arp_sha,
+                     sizeof masked.arp_sha);
+        OvsMaskBytes(masked.arp_tha, (const UINT8 *)&arpHdr->arp_tha,
+                     arpAttr->arp_tha, arpMask->arp_tha,
+                     sizeof masked.arp_tha);
+        arpAttr = &masked;
+    }
 
     /* arp_op and ar_op are both network-order be16; the cast is a no-op. */
     arpHdr->ea_hdr.ar_op = (UINT16)arpAttr->arp_op;
@@ -2257,7 +2428,8 @@ OvsUpdateArpHeader(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
                   OvsFlowKey *key,
-                  const struct ovs_key_nd *ndAttr)
+                  const struct ovs_key_nd *ndAttr,
+                  const struct ovs_key_nd *ndMask)
 {
     PUINT8 bufferStart, l4Start;
     OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
@@ -2311,9 +2483,18 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
         return NDIS_STATUS_FAILURE;
     }
 
-    RtlCopyMemory(ndTarget, ndAttr->nd_target, sizeof *ndTarget);
-    RtlCopyMemory(&key->icmp6Key.ndTarget, ndAttr->nd_target,
-                  sizeof(struct in6_addr));
+    /*
+     * For a masked set each link-layer field is folded with its current
+     * on-wire bytes; the in-place fold reads each byte before overwriting it.
+     */
+    if (ndMask) {
+        OvsMaskBytes((PUINT8)ndTarget, (const UINT8 *)ndTarget,
+                     (const UINT8 *)ndAttr->nd_target,
+                     (const UINT8 *)ndMask->nd_target, sizeof *ndTarget);
+    } else {
+        RtlCopyMemory(ndTarget, ndAttr->nd_target, sizeof *ndTarget);
+    }
+    RtlCopyMemory(&key->icmp6Key.ndTarget, ndTarget, sizeof(struct in6_addr));
 
     /*
      * Walk the ND options updating the source/target link-layer address.
@@ -2335,25 +2516,33 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
         }
 
         if (ndOpt->type == ND_OPT_SOURCE_LINKADDR && ndOpt->len == 1) {
+            PUINT8 sll = l4Start + ofs + sizeof(IPv6NdOptHdr);
             if (sawSll) {           /* duplicate SLL is malformed (parser fails) */
                 ovsActionStats.noCopiedNbl++;
                 return NDIS_STATUS_FAILURE;
             }
             sawSll = TRUE;
-            RtlCopyMemory(l4Start + ofs + sizeof(IPv6NdOptHdr),
-                          ndAttr->nd_sll, ETH_ADDR_LENGTH);
-            RtlCopyMemory(key->icmp6Key.arpSha, ndAttr->nd_sll,
-                          ETH_ADDR_LENGTH);
+            if (ndMask) {
+                OvsMaskBytes(sll, sll, ndAttr->nd_sll, ndMask->nd_sll,
+                             ETH_ADDR_LENGTH);
+            } else {
+                RtlCopyMemory(sll, ndAttr->nd_sll, ETH_ADDR_LENGTH);
+            }
+            RtlCopyMemory(key->icmp6Key.arpSha, sll, ETH_ADDR_LENGTH);
         } else if (ndOpt->type == ND_OPT_TARGET_LINKADDR && ndOpt->len == 1) {
+            PUINT8 tll = l4Start + ofs + sizeof(IPv6NdOptHdr);
             if (sawTll) {           /* duplicate TLL is malformed (parser fails) */
                 ovsActionStats.noCopiedNbl++;
                 return NDIS_STATUS_FAILURE;
             }
             sawTll = TRUE;
-            RtlCopyMemory(l4Start + ofs + sizeof(IPv6NdOptHdr),
-                          ndAttr->nd_tll, ETH_ADDR_LENGTH);
-            RtlCopyMemory(key->icmp6Key.arpTha, ndAttr->nd_tll,
-                          ETH_ADDR_LENGTH);
+            if (ndMask) {
+                OvsMaskBytes(tll, tll, ndAttr->nd_tll, ndMask->nd_tll,
+                             ETH_ADDR_LENGTH);
+            } else {
+                RtlCopyMemory(tll, ndAttr->nd_tll, ETH_ADDR_LENGTH);
+            }
+            RtlCopyMemory(key->icmp6Key.arpTha, tll, ETH_ADDR_LENGTH);
         }
 
         ofs += optLen;
@@ -2396,12 +2585,14 @@ OvsUpdateNdHeader(OvsForwardingContext *ovsFwdCtx,
 NDIS_STATUS
 OvsUpdateMplsHeader(OvsForwardingContext *ovsFwdCtx,
                     OvsFlowKey *key,
-                    const struct ovs_key_mpls *mplsAttr)
+                    const struct ovs_key_mpls *mplsAttr,
+                    const struct ovs_key_mpls *mplsMask)
 {
     PUINT8 bufferStart;
     OVS_PACKET_HDR_INFO *layers = &ovsFwdCtx->layers;
     MPLSHdr *mplsHdr;
     UINT16 l2Len;
+    ovs_be32 newLse;
 
     ASSERT(layers->value != 0);
 
@@ -2431,8 +2622,11 @@ OvsUpdateMplsHeader(OvsForwardingContext *ovsFwdCtx,
     }
 
     mplsHdr = (MPLSHdr *)(bufferStart + l2Len);
-    mplsHdr->lse = mplsAttr->mpls_lse;
-    key->mplsKey.lse = mplsAttr->mpls_lse;
+    newLse = mplsMask
+             ? OvsMaskU32(mplsHdr->lse, mplsAttr->mpls_lse, mplsMask->mpls_lse)
+             : mplsAttr->mpls_lse;
+    mplsHdr->lse = newLse;
+    key->mplsKey.lse = newLse;
 
     return NDIS_STATUS_SUCCESS;
 }
@@ -2455,17 +2649,17 @@ OvsExecuteSetAction(OvsForwardingContext *ovsFwdCtx,
     switch (type) {
     case OVS_KEY_ATTR_ETHERNET:
         status = OvsUpdateEthHeader(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_ethernet)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_ethernet)), NULL);
         break;
 
     case OVS_KEY_ATTR_IPV4:
         status = OvsUpdateIPv4Header(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_ipv4)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_ipv4)), NULL);
         break;
 
     case OVS_KEY_ATTR_IPV6:
         status = OvsUpdateIPv6Header(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_ipv6)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_ipv6)), NULL);
         break;
 
     case OVS_KEY_ATTR_TUNNEL:
@@ -2483,27 +2677,27 @@ OvsExecuteSetAction(OvsForwardingContext *ovsFwdCtx,
 
     case OVS_KEY_ATTR_UDP:
         status = OvsUpdateUdpPorts(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_udp)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_udp)), NULL);
         break;
 
     case OVS_KEY_ATTR_TCP:
         status = OvsUpdateTcpPorts(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_tcp)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_tcp)), NULL);
         break;
 
     case OVS_KEY_ATTR_SCTP:
         status = OvsUpdateSctpPorts(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_sctp)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_sctp)), NULL);
         break;
 
     case OVS_KEY_ATTR_ARP:
         status = OvsUpdateArpHeader(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_arp)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_arp)), NULL);
         break;
 
     case OVS_KEY_ATTR_ND:
         status = OvsUpdateNdHeader(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_nd)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_nd)), NULL);
         break;
 
     case OVS_KEY_ATTR_MPLS:
@@ -2515,11 +2709,153 @@ OvsExecuteSetAction(OvsForwardingContext *ovsFwdCtx,
             break;
         }
         status = OvsUpdateMplsHeader(ovsFwdCtx, key,
-            NlAttrGetUnspec(a, sizeof(struct ovs_key_mpls)));
+            NlAttrGetUnspec(a, sizeof(struct ovs_key_mpls)), NULL);
         break;
 
     default:
         OVS_LOG_INFO("Unhandled attribute %#x", type);
+        break;
+    }
+    return status;
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * OvsExecuteSetActionMasked --
+ *      Executes a masked set() action. The nested key attribute 'a' carries a
+ *      value immediately followed by an equally-sized mask; each header field
+ *      is rewritten to (old & ~mask) | (value & mask), preserving the bits the
+ *      mask leaves clear. Mirrors OvsExecuteSetAction's per-key dispatch, minus
+ *      OVS_KEY_ATTR_TUNNEL, which has no masked form.
+ * --------------------------------------------------------------------------
+ */
+static __inline NDIS_STATUS
+OvsExecuteSetActionMasked(OvsForwardingContext *ovsFwdCtx,
+                          OvsFlowKey *key,
+                          const PNL_ATTR a)
+{
+    enum ovs_key_attr type = NlAttrType(a);
+    UINT32 size = NlAttrGetSize(a);
+    UINT32 half = size / 2;
+    NDIS_STATUS status = NDIS_STATUS_SUCCESS;
+    const UINT8 *value, *mask;
+
+    /* The payload is a value followed by an equally-sized mask. */
+    if ((size & 1) != 0) {
+        return NDIS_STATUS_FAILURE;
+    }
+    value = NlAttrGetUnspec(a, size);
+    mask = value + half;
+
+    switch (type) {
+    case OVS_KEY_ATTR_ETHERNET:
+        if (half != sizeof(struct ovs_key_ethernet)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateEthHeader(ovsFwdCtx, key,
+            (const struct ovs_key_ethernet *)value,
+            (const struct ovs_key_ethernet *)mask);
+        break;
+
+    case OVS_KEY_ATTR_IPV4:
+        if (half != sizeof(struct ovs_key_ipv4)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateIPv4Header(ovsFwdCtx, key,
+            (const struct ovs_key_ipv4 *)value,
+            (const struct ovs_key_ipv4 *)mask);
+        break;
+
+    case OVS_KEY_ATTR_IPV6:
+        if (half != sizeof(struct ovs_key_ipv6)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateIPv6Header(ovsFwdCtx, key,
+            (const struct ovs_key_ipv6 *)value,
+            (const struct ovs_key_ipv6 *)mask);
+        break;
+
+    case OVS_KEY_ATTR_TUNNEL:
+        /* The executor has no masked tunnel path. */
+        status = NDIS_STATUS_FAILURE;
+        break;
+
+    case OVS_KEY_ATTR_UDP:
+        if (half != sizeof(struct ovs_key_udp)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateUdpPorts(ovsFwdCtx, key,
+            (const struct ovs_key_udp *)value,
+            (const struct ovs_key_udp *)mask);
+        break;
+
+    case OVS_KEY_ATTR_TCP:
+        if (half != sizeof(struct ovs_key_tcp)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateTcpPorts(ovsFwdCtx, key,
+            (const struct ovs_key_tcp *)value,
+            (const struct ovs_key_tcp *)mask);
+        break;
+
+    case OVS_KEY_ATTR_SCTP:
+        if (half != sizeof(struct ovs_key_sctp)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateSctpPorts(ovsFwdCtx, key,
+            (const struct ovs_key_sctp *)value,
+            (const struct ovs_key_sctp *)mask);
+        break;
+
+    case OVS_KEY_ATTR_ARP:
+        if (half != sizeof(struct ovs_key_arp)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateArpHeader(ovsFwdCtx, key,
+            (const struct ovs_key_arp *)value,
+            (const struct ovs_key_arp *)mask);
+        break;
+
+    case OVS_KEY_ATTR_ND:
+        if (half != sizeof(struct ovs_key_nd)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateNdHeader(ovsFwdCtx, key,
+            (const struct ovs_key_nd *)value,
+            (const struct ovs_key_nd *)mask);
+        break;
+
+    case OVS_KEY_ATTR_MPLS:
+        /* Variable-length LSE array; the helper rewrites the topmost label. */
+        if (half < sizeof(struct ovs_key_mpls)) {
+            status = NDIS_STATUS_FAILURE;
+            break;
+        }
+        status = OvsUpdateMplsHeader(ovsFwdCtx, key,
+            (const struct ovs_key_mpls *)value,
+            (const struct ovs_key_mpls *)mask);
+        break;
+
+    default:
+        /*
+         * Tolerate, do not fail: ofproto routes OVS_KEY_ATTR_PRIORITY,
+         * OVS_KEY_ATTR_SKB_MARK and OVS_KEY_ATTR_ND_EXTENSIONS through the
+         * masked-set path (lib/odp-util.c commit()), but the Windows datapath
+         * does not carry those fields. OvsExecuteSetAction ignores the same key
+         * types for a plain set, so a flow that sets them must keep installing
+         * and forwarding rather than being dropped here. Leaving 'status' as
+         * success matches that long-standing behaviour. Log at TRACE, not INFO:
+         * these keys are expected per packet on such a flow, so INFO would spam.
+         */
+        OVS_LOG_TRACE("Unhandled masked attribute %#x", type);
         break;
     }
     return status;
@@ -3252,6 +3588,29 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
                      dropReason = L"OVS-set action ExtractLayers failed";
                      goto dropit;
                  }
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_SET_MASKED:
+        {
+            /* A masked set rewrites packet headers in place, like a plain set,
+             * so flush any pending destinations onto a private copy first.
+             * Masked tunnel sets do not exist, so the tunnel-key fixup the
+             * plain-set path performs afterwards is not needed here. */
+            if (ovsFwdCtx.destPortsSizeOut > 0 || ovsFwdCtx.tunnelTxNic != NULL
+                || ovsFwdCtx.tunnelRxNic != NULL) {
+                status = OvsOutputBeforeSetAction(&ovsFwdCtx);
+                if (status != NDIS_STATUS_SUCCESS) {
+                    dropReason = L"OVS-adding destination failed";
+                    goto dropit;
+                }
+            }
+            status = OvsExecuteSetActionMasked(&ovsFwdCtx, key,
+                                               (const PNL_ATTR)NlAttrGet
+                                               ((const PNL_ATTR)a));
+            if (status != NDIS_STATUS_SUCCESS) {
+                dropReason = L"OVS-masked set action failed";
+                goto dropit;
             }
             break;
         }
