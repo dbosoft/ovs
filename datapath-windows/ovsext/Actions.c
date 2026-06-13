@@ -2852,9 +2852,10 @@ OvsExecuteSetActionMasked(OvsForwardingContext *ovsFwdCtx,
          * does not carry those fields. OvsExecuteSetAction ignores the same key
          * types for a plain set, so a flow that sets them must keep installing
          * and forwarding rather than being dropped here. Leaving 'status' as
-         * success matches that long-standing behaviour.
+         * success matches that long-standing behaviour. Log at TRACE, not INFO:
+         * these keys are expected per packet on such a flow, so INFO would spam.
          */
-        OVS_LOG_INFO("Unhandled masked attribute %#x", type);
+        OVS_LOG_TRACE("Unhandled masked attribute %#x", type);
         break;
     }
     return status;
